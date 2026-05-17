@@ -186,6 +186,13 @@ pub struct Endpoints {
     pub trees: String,
     pub submit: String,
     pub verify: String,
+    /// Browser-friendly agent integration guide. Mirrors the structure of
+    /// the markdown skill at [`docs_skill`].
+    pub docs: String,
+    /// Machine-readable agent skill: same content as `docs`, in the
+    /// `~/.claude/skills/<name>/SKILL.md` shape. Lets a remote agent
+    /// self-bootstrap without out-of-band documentation.
+    pub docs_skill: String,
 }
 
 impl IdentityResponse {
@@ -204,6 +211,8 @@ impl IdentityResponse {
                 trees: "/trees".to_string(),
                 submit: "/v1/leaves".to_string(),
                 verify: "/api/explorer/trees/{tip}/verify".to_string(),
+                docs: "/docs".to_string(),
+                docs_skill: "/docs/skill.md".to_string(),
             },
             identity_claim,
         }

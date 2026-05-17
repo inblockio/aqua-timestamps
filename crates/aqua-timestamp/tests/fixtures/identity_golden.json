@@ -13,7 +13,9 @@
     "auth": "/auth",
     "trees": "/trees",
     "submit": "/v1/leaves",
-    "verify": "/api/explorer/trees/{tip}/verify"
+    "verify": "/api/explorer/trees/{tip}/verify",
+    "docs": "/docs",
+    "docs_skill": "/docs/skill.md"
   },
   "identity_claim": {
     "revisions": {

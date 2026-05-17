@@ -27,6 +27,14 @@ pub struct AppState {
     /// the state so handlers that surface "what would this leaf look like
     /// if we re-minted now?" can reach the same configuration.
     pub witness_ctx: WitnessContext,
+    /// Pre-rendered self-served agent integration guide. Browser-friendly
+    /// HTML served at `GET /docs`. Built once at boot from the loaded
+    /// identity so DNS / IP / DID values are correct without an edit.
+    pub docs_html: String,
+    /// Pre-rendered agent skill markdown served at `GET /docs/skill.md`.
+    /// Same content as `docs_html`, in the `~/.claude/skills/<name>/SKILL.md`
+    /// format so an agent can drop it straight into its skill library.
+    pub docs_skill_md: String,
 }
 
 impl AppState {

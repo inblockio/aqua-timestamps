@@ -56,6 +56,28 @@ pub async fn landing_page() -> Response {
         .into_response()
 }
 
+/// `GET /docs` — browser-friendly agent integration guide.
+pub async fn docs_page(State(state): State<Arc<AppState>>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(state.docs_html.clone()),
+    )
+        .into_response()
+}
+
+/// `GET /docs/skill.md` — raw markdown skill in the same shape Claude (and
+/// any other agent honoring the convention) consumes for
+/// `~/.claude/skills/<name>/SKILL.md`. Public, no auth.
+pub async fn docs_skill_md(State(state): State<Arc<AppState>>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        state.docs_skill_md.clone(),
+    )
+        .into_response()
+}
+
 pub async fn aqua_identity(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(state.identity_response_json.clone())
 }
