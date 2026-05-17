@@ -216,21 +216,128 @@ The seal commits the `EpochRecord`, the full leaf-set, every
   covering the round trip, isolation, restart durability, response
   shape, and query validation.
 
-### M4 hand-off
+### M4 hand-off (legacy notes; M4 is now shipped, see M4 addendum below)
 
-The witness minter currently writes stub anchor outputs. M4 replaces
-the EVM stub by:
-
-1. Submitting a `witness(bytes32)` tx to the on-chain witness contract
-   on Sepolia (selector `0x114ee197`, see
-   `aqua_rs_sdk::primitives::estimate_timestamp_gas`).
-2. Awaiting the receipt to learn the real `transaction_hash` and the
-   resolved `smart_contract_address`.
-3. Threading those values into `mint_witnesses_for_epoch` instead of
-   the zero placeholders. The signature payload, persistence path, and
-   endpoint shapes need no change.
+The witness minter previously wrote stub anchor outputs. M4 swaps EVM
+for a real Sepolia anchor via `aqua_rs_sdk::CliEthTimestamper`.
 
 M5 swaps the qTSA stub for a real RFC 3161 client. Same shape.
+
+## M4 addendum (shipped 2026-05-17)
+
+M4 wires the real Sepolia anchor on top of the M3 witness pipeline.
+Notes for whoever takes M5 / M-E2E next.
+
+### Architecture
+
+* `crates/aqua-timestamp-core/src/anchors.rs` (new): tiny
+  `AnchorProvider` trait + a blanket impl over the SDK's
+  `TimestampProvider` (so `aqua_rs_sdk::CliEthTimestamper` is a usable
+  anchor provider without any glue). `MockProvider` and
+  `FailingProvider` test fixtures live in the same module, exposed
+  unconditionally so cross-crate tests can reach them.
+* `WitnessContext` (in `sealer.rs`) now carries
+  `evm_anchor: Option<Arc<dyn AnchorProvider>>` and
+  `qtsa_anchor: Option<Arc<dyn AnchorProvider>>`. `with_evm_anchor` /
+  `with_qtsa_anchor` are the builder hooks.
+* `MethodAnchorOutcome` (in `witness.rs`) captures the per-method
+  anchor result (transaction hash, sender, contract, network,
+  tsa_provider). `mint_witnesses_for_epoch` takes
+  `&[(AnchorMethod, MethodAnchorOutcome)]` and folds the matching
+  outcome into every per-leaf witness payload.
+* `seal_once` calls each `dyn AnchorProvider` once per non-empty
+  epoch with the full Merkle root (`0x` + 64 hex). On success the
+  returned `TimestampValue` becomes the per-method outcome; on failure
+  `MethodAnchorOutcome::stub_evm` / `stub_qtsa` populates a stub
+  outcome and a `warn!` is logged. **Sealing never fails because the
+  anchor failed.** Empty epochs skip the live anchor entirely (no
+  gas for a degenerate root); this is asserted by
+  `sealer::tests::empty_epoch_skips_live_anchor`.
+
+### Config shape
+
+The legacy M3 `[anchor]` block is replaced by `[anchors.evm]`:
+
+```toml
+[anchors.evm]
+enabled       = true
+rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
+chain         = "sepolia"            # mainnet | sepolia | holesky | custom:<id>
+network_label = "sepolia"            # `network` field in witness payload
+```
+
+The legacy `[anchor]` block is still accepted (and aliased onto a
+`anchor_legacy` field on `Config`), so an M3 config still loads after
+an M4 upgrade. If the legacy block sets a non-default `evm_network`,
+that value is promoted into `anchors.evm.network_label` automatically.
+M6 removes the legacy block.
+
+### Mnemonic handling
+
+The mnemonic is read once from `AQUA_TIMESTAMP_ANCHOR_MNEMONIC` at
+boot in `ServiceIdentity::from_env`, kept inside `ServiceIdentity`
+under `Arc<String>`, and passed into `CliEthTimestamper::new` exactly
+once during `build_app`. It is never re-read at seal time, never
+logged, never returned over HTTP. The `Debug` impl on
+`ServiceIdentity` redacts it (same as `private_key`).
+
+### Tests
+
+Unit tests in `sealer.rs` (under `crates/aqua-timestamp-core`):
+
+* `happy_path_live_evm_anchor_populates_payloads`: `MockProvider`
+  returning a canned `TimestampValue`; assert payload carries the
+  canned `transaction_hash` / sender / contract / network.
+* `fall_back_path_failing_anchor_does_not_fail_seal`:
+  `FailingProvider`; assert payload carries stub data and the seal
+  still produces an `EpochRecord`.
+* `disabled_path_no_provider_uses_stub`: no `with_evm_anchor`; assert
+  the live provider is never constructed (no RPC traffic).
+* `empty_epoch_skips_live_anchor`: counting provider asserts zero
+  invocations on an empty epoch.
+
+Integration test (gated):
+`crates/aqua-timestamp/tests/live_sepolia_anchor.rs` is `#[ignore]`
+AND checks `AQUA_TIMESTAMP_LIVE_SEPOLIA=1`. Run it manually with:
+
+```sh
+AQUA_TIMESTAMP_LIVE_SEPOLIA=1 \
+AQUA_TIMESTAMP_ANCHOR_MNEMONIC="<funded mnemonic>" \
+    cargo test -p aqua-timestamp --test live_sepolia_anchor \
+        -- --ignored --nocapture
+```
+
+It submits one leaf, triggers a seal, polls `/trees/by-leaf/...`
+until the witness appears, and asserts the on-chain
+`transaction_hash` is non-zero hex AND the wallet's Sepolia balance
+strictly decreased. Every run burns testnet gas, hence the gate.
+
+### Operational notes for deploy
+
+* No new env vars beyond M3. `AQUA_TIMESTAMP_ANCHOR_MNEMONIC` is the
+  same key used for identity + SIWE signing + Sepolia anchor (one
+  secp256k1 key, per hard requirements).
+* First live seal after deploy burns Sepolia gas; the funded balance
+  (0.02 ETH) covers many anchor txs at testnet gas prices.
+* If Sepolia is down or RPC times out: epoch still seals, witnesses
+  carry stub anchor data for that epoch, `warn!` logs surface the
+  failure. The aggregator self-recovers on the next epoch.
+* To temporarily disable live anchoring at runtime (e.g. RPC outage
+  drained gas budget): set `[anchors.evm].enabled = false` on the
+  server's `deploy/config.toml` and restart. Witnesses minted while
+  disabled carry stub anchor data; the EVM contract is unaffected.
+
+### M5 hand-off
+
+The qTSA stub stays in place at M4. M5 replaces it the same way:
+
+1. Define an RFC 3161 client implementation of `AnchorProvider`.
+2. Wire it under `[anchors.qtsa]` in config (new sub-table; mirror
+   the `[anchors.evm]` shape).
+3. Construct it in `build_app` (same pattern as the EVM branch) and
+   attach via `WitnessContext::with_qtsa_anchor`.
+4. The witness minter and storage paths need no change; the qTSA
+   outcome already flows through `MethodAnchorOutcome`.
 
 ## M1 addendum (shipped 2026-05-17)
 

@@ -14,7 +14,8 @@ use aqua_rs_sdk::{
 use aqua_timestamp::{
     build_app,
     config::{
-        AnchorConfig, AuthConfig, Config, EpochConfig, IdentityConfig, ServerConfig, StorageConfig,
+        AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
+        IdentityConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -61,7 +62,16 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
             duration_secs: 60,
             max_leaves_per_request: max_leaves,
         },
-        anchor: AnchorConfig::default(),
+        anchor_legacy: AnchorConfig::default(),
+        // M3 tests assert stub witness payloads byte for byte; keep the
+        // EVM live provider off here so the assertions remain stable
+        // (no Sepolia RPC dependency during unit/integration tests).
+        anchors: AnchorsConfig {
+            evm: EvmAnchorConfig {
+                enabled: false,
+                ..EvmAnchorConfig::default()
+            },
+        },
     }
 }
 

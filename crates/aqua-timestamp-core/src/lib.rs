@@ -7,6 +7,7 @@
 //! the `EpochRecord`.
 
 pub mod accumulator;
+pub mod anchors;
 pub mod epoch;
 pub mod merkle;
 pub mod sealer;

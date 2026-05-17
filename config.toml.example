@@ -32,7 +32,18 @@ duration_secs = 600
 # above this are rejected with 400.
 max_leaves_per_request = 10000
 
-[anchor]
-# Network label written into the EVM witness payloads at M3 (stub anchor)
-# and M4 (real Sepolia anchor). Default matches the M4 target chain.
-evm_network = "sepolia"
+[anchors.evm]
+# Live anchoring toggle. `true` constructs an `aqua-rs-sdk`
+# `CliEthTimestamper` at boot and submits one `witness(bytes32)` tx per
+# non-empty epoch, signed by the service mnemonic. `false` keeps the M3
+# stub behaviour (witnesses minted with zero `transaction_hash`).
+enabled       = true
+# JSON-RPC URL of the chain to anchor on. Public free endpoints are fine
+# for M4; production should switch to a paid endpoint at M6.
+rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
+# One of `mainnet`, `sepolia`, `holesky`, or `custom:<chain_id>`.
+chain         = "sepolia"
+# `network` field embedded in the EVM witness payload. Usually matches
+# `chain`. Kept separate so `custom:<id>` setups can still surface a
+# human-readable name in witnesses.
+network_label = "sepolia"

@@ -19,5 +19,8 @@ path = "/var/lib/aqua-timestamp/state"
 duration_secs          = 600
 max_leaves_per_request = 10000
 
-[anchor]
-evm_network = "sepolia"
+[anchors.evm]
+enabled       = true
+rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
+chain         = "sepolia"
+network_label = "sepolia"

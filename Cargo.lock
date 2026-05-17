@@ -760,6 +760,7 @@ version = "0.1.0"
 dependencies = [
  "aqua-auth",
  "aqua-rs-sdk",
+ "async-trait",
  "chrono",
  "fjall",
  "hex",

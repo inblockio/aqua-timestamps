@@ -21,8 +21,43 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub epoch: EpochConfig,
+    /// Legacy M3 `[anchor]` block. Retained so an M3 config still loads
+    /// after the M4 upgrade without manual editing; the only field here
+    /// is `evm_network`, which the resolver below promotes into the new
+    /// `[anchors.evm]` shape if `[anchors.evm].network_label` is absent.
+    /// Operators should migrate to `[anchors.evm]` at their next config
+    /// edit; the legacy block will be removed at M6.
+    #[serde(default, alias = "anchor")]
+    pub anchor_legacy: AnchorConfig,
+    /// M4+ anchors block. Defaults pick up Sepolia / live provider on,
+    /// so an M3 config that doesn't mention `[anchors]` will start
+    /// anchoring on Sepolia immediately after upgrade. Operators who
+    /// don't want this (e.g. local dev without faucet ETH) should set
+    /// `[anchors.evm].enabled = false`.
     #[serde(default)]
-    pub anchor: AnchorConfig,
+    pub anchors: AnchorsConfig,
+}
+
+impl Config {
+    /// Resolve the effective `[anchors.evm]` for this config.
+    ///
+    /// Currently the only legacy-promotion rule is: if the deprecated
+    /// `[anchor].evm_network` is present and `[anchors.evm].network_label`
+    /// is still at its default, use the legacy value as the network
+    /// label. This keeps existing M3 configs that say
+    /// `[anchor]\nevm_network = "sepolia"` semantically equivalent to
+    /// the new shape without an explicit edit.
+    pub fn effective_evm_anchor(&self) -> EvmAnchorConfig {
+        let mut evm = self.anchors.evm.clone();
+        // Only inherit when the legacy value diverges from the modern
+        // default; this avoids "promoting" the implicit default Sepolia.
+        if self.anchor_legacy.evm_network != default_evm_network()
+            && evm.network_label == default_evm_network()
+        {
+            evm.network_label = self.anchor_legacy.evm_network.clone();
+        }
+        evm
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -84,9 +119,8 @@ pub struct StorageConfig {
     pub path: PathBuf,
 }
 
-/// Configuration for the (M3 stub / M4 real) anchor providers. Only the
-/// labels used inside witness payloads live here; provider implementations
-/// remain hardcoded until M4.
+/// Legacy M3 `[anchor]` block. Replaced by `[anchors.evm]` at M4 but kept
+/// for one milestone so existing deploys load without manual editing.
 #[derive(Debug, Deserialize, Clone)]
 pub struct AnchorConfig {
     /// The `network` field embedded in EVM timestamp witness payloads.
@@ -103,6 +137,96 @@ impl Default for AnchorConfig {
     fn default() -> Self {
         Self {
             evm_network: default_evm_network(),
+        }
+    }
+}
+
+/// New-shape anchors block. One sub-table per method.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AnchorsConfig {
+    #[serde(default)]
+    pub evm: EvmAnchorConfig,
+}
+
+/// `[anchors.evm]`. Every field has a default so an M3 config without the
+/// block still loads and picks up live Sepolia anchoring automatically.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EvmAnchorConfig {
+    /// Live anchor toggle. `true` (default) constructs a
+    /// `CliEthTimestamper` at boot and submits one tx per non-empty
+    /// epoch. `false` keeps the M3 stub behaviour: witnesses are minted
+    /// with zero `transaction_hash` / zero contract address.
+    #[serde(default = "default_evm_enabled")]
+    pub enabled: bool,
+
+    /// JSON-RPC URL the live provider talks to. Public, free Sepolia
+    /// endpoints (no API key) are fine for M4; production deployments
+    /// should switch to a paid endpoint at M6 for SLA.
+    #[serde(default = "default_evm_rpc_url")]
+    pub rpc_url: String,
+
+    /// One of `mainnet`, `sepolia`, `holesky`, or `custom:<chain_id>`.
+    /// Parsed via [`Self::evm_chain`] into the SDK's `EvmChain`.
+    #[serde(default = "default_evm_chain")]
+    pub chain: String,
+
+    /// Free-form network label the witness payload's `network` field
+    /// carries. Usually the same string as `chain`. Kept separate so a
+    /// custom chain id (`chain = "custom:12345"`) can still surface a
+    /// human-readable network name in witnesses.
+    #[serde(default = "default_evm_network")]
+    pub network_label: String,
+}
+
+fn default_evm_enabled() -> bool {
+    true
+}
+fn default_evm_rpc_url() -> String {
+    "https://ethereum-sepolia-rpc.publicnode.com".to_string()
+}
+fn default_evm_chain() -> String {
+    "sepolia".to_string()
+}
+
+impl Default for EvmAnchorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_evm_enabled(),
+            rpc_url: default_evm_rpc_url(),
+            chain: default_evm_chain(),
+            network_label: default_evm_network(),
+        }
+    }
+}
+
+impl EvmAnchorConfig {
+    /// Parse the `chain` string into the SDK's `EvmChain`.
+    ///
+    /// Recognised forms:
+    /// - `"mainnet"` / `"sepolia"` / `"holesky"`
+    /// - `"custom:<chain_id>"` (`chain_id` parsed as `u64`)
+    ///
+    /// Anything else is rejected at boot so a typo in the deploy config
+    /// surfaces immediately rather than silently picking the default.
+    pub fn evm_chain(&self) -> Result<aqua_rs_sdk::primitives::EvmChain> {
+        use aqua_rs_sdk::primitives::EvmChain;
+        match self.chain.as_str() {
+            "mainnet" => Ok(EvmChain::Mainnet),
+            "sepolia" => Ok(EvmChain::Sepolia),
+            "holesky" => Ok(EvmChain::Holesky),
+            other if other.starts_with("custom:") => {
+                let id_str = &other["custom:".len()..];
+                let chain_id: u64 = id_str.parse().map_err(|e| {
+                    anyhow::anyhow!("invalid anchors.evm.chain={other:?}: {e}")
+                })?;
+                Ok(EvmChain::Custom {
+                    chain_id,
+                    name: None,
+                })
+            }
+            other => Err(anyhow::anyhow!(
+                "unknown anchors.evm.chain={other:?}: expected mainnet | sepolia | holesky | custom:<chain_id>"
+            )),
         }
     }
 }

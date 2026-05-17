@@ -40,6 +40,11 @@ pub struct ServiceIdentity {
     pub dns: String,
     pub ip: String,
     pub private_key: Arc<Vec<u8>>,
+    /// BIP39 mnemonic the service key was derived from. Held in process
+    /// memory so the M4 EVM anchor (`CliEthTimestamper`) can be
+    /// constructed without re-reading the env var. Never logged, never
+    /// surfaced over HTTP, dropped when the `Arc` drops.
+    pub mnemonic: Arc<String>,
 }
 
 impl std::fmt::Debug for ServiceIdentity {
@@ -52,6 +57,7 @@ impl std::fmt::Debug for ServiceIdentity {
             .field("dns", &self.dns)
             .field("ip", &self.ip)
             .field("private_key", &"<redacted>")
+            .field("mnemonic", &"<redacted>")
             .finish()
     }
 }
@@ -92,6 +98,7 @@ impl ServiceIdentity {
             dns: cfg.dns.clone(),
             ip: cfg.ip.clone(),
             private_key: Arc::new(pk_bytes),
+            mnemonic: Arc::new(mnemonic.trim().to_string()),
         })
     }
 }

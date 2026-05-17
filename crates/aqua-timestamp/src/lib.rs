@@ -12,9 +12,10 @@ pub mod state;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use aqua_rs_sdk::Secp256k1Signer;
+use aqua_rs_sdk::{CliEthTimestamper, Secp256k1Signer};
 use aqua_timestamp_core::{
     accumulator::Accumulator,
+    anchors::AnchorProvider,
     sealer::{run_sealer_with_channel, run_sealer_with_interval, SealTick, WitnessContext},
     storage::Store,
     time::{Clock, SystemClock},
@@ -110,12 +111,41 @@ pub async fn build_app(
     // so both the sealer task and any future on-demand minter paths reuse
     // the same in-memory key material.
     let signer = Arc::new(Secp256k1Signer::new(identity.private_key.as_ref().clone()));
-    let witness_ctx = WitnessContext::new(
+    // M4: if `[anchors.evm].enabled = true` (the default), construct a
+    // real `CliEthTimestamper` against Sepolia and let the sealer call
+    // it once per non-empty epoch. On any failure the sealer falls back
+    // to stub witness data and keeps sealing; sealing never fails
+    // because the anchor failed. See `sealer::resolve_evm_outcome`.
+    let evm_anchor_cfg = cfg.effective_evm_anchor();
+    let evm_anchor: Option<Arc<dyn AnchorProvider>> = if evm_anchor_cfg.enabled {
+        let chain = evm_anchor_cfg
+            .evm_chain()
+            .context("parsing anchors.evm.chain")?;
+        info!(
+            chain = %chain,
+            rpc_url = %evm_anchor_cfg.rpc_url,
+            network_label = %evm_anchor_cfg.network_label,
+            "evm anchor enabled (CliEthTimestamper)"
+        );
+        let timestamper = CliEthTimestamper::new(
+            identity.mnemonic.as_ref().clone(),
+            evm_anchor_cfg.rpc_url.clone(),
+            chain,
+        );
+        Some(Arc::new(timestamper) as Arc<dyn AnchorProvider>)
+    } else {
+        info!("evm anchor disabled: minting stub witnesses for evm method");
+        None
+    };
+    let mut witness_ctx = WitnessContext::new(
         Arc::clone(&signer),
         format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
-        cfg.anchor.evm_network.clone(),
+        evm_anchor_cfg.network_label.clone(),
         vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
     );
+    if let Some(anchor) = evm_anchor {
+        witness_ctx = witness_ctx.with_evm_anchor(anchor);
+    }
 
     // Spawn the seal task.
     match seal_driver {

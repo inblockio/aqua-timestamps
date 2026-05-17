@@ -10,7 +10,8 @@
 use aqua_timestamp::{
     build_app,
     config::{
-        AnchorConfig, AuthConfig, Config, EpochConfig, IdentityConfig, ServerConfig, StorageConfig,
+        AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
+        IdentityConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -52,7 +53,13 @@ fn service_config(allowed_dids: Vec<String>, storage_path: std::path::PathBuf) -
             duration_secs: 600,
             max_leaves_per_request: 10_000,
         },
-        anchor: AnchorConfig::default(),
+        anchor_legacy: AnchorConfig::default(),
+        anchors: AnchorsConfig {
+            evm: EvmAnchorConfig {
+                enabled: false,
+                ..EvmAnchorConfig::default()
+            },
+        },
     }
 }
 
