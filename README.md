@@ -151,22 +151,31 @@ buildx there, `docker compose up -d` against
 
 ## Documentation
 
-- [Design Specification](docs/design-spec.md) - Full architecture, data flows, and protocol details
-- [Success Criteria](docs/success-criteria.md) - Per-milestone "done" checklist
-- [M0 Deploy Transcript](docs/runbooks/m0-deploy-transcript-2026-05-17.md)
+- [Success Criteria](docs/success-criteria.md): per-milestone checklist (the contract).
+- [Design Spec](docs/design-spec.md): early architecture sketch. **Read with skepticism**; the
+  `aqua-rs-sdk` is authoritative where it disagrees, and several spec choices
+  (Ed25519 service key, V4 framing, single anchor) were superseded by what
+  shipped. The runbooks below describe what the deployed service actually does.
+- [Overnight build session](docs/runbooks/session-2026-05-17-overnight-build.md):
+  M0 -> M4 + M-E2E shipped in one session.
+- [M0 deploy transcript](docs/runbooks/m0-deploy-transcript-2026-05-17.md)
+- [Live e2e transcript](docs/runbooks/e2e-live-transcript-2026-05-17.md)
+- [Multi-DID e2e + second Sepolia anchor](docs/runbooks/multi-method-e2e-and-anchor-2026-05-17.md)
+- [M5 qTSA anchor live](docs/runbooks/m5-qtsa-anchor-2026-05-17.md)
+- Project context for future Claude sessions: [`CLAUDE.md`](CLAUDE.md).
 
 ## Status
 
 | Milestone | State |
 |---|---|
-| **M0** Skeleton on the wire | shipped 2026-05-17 (`https://timestamp.inblock.io/health` live) |
-| **M1** Identity + SIWE auth | shipped 2026-05-17 |
-| M2 Accumulate + seal | pending |
-| M3 Witness revisions | pending |
-| M-E2E Live roundtrip | pending |
-| M4 Real EVM anchor (Sepolia) | pending |
-| M5 Real qTSA anchor | pending |
-| M6 Production hardening | pending |
+| **M0** Skeleton on the wire | shipped 2026-05-17 (`https://timestamp.inblock.io/health` live, valid Let's Encrypt) |
+| **M1** Identity + SIWE auth | shipped 2026-05-17 (signed `service_claim_server` at `/.well-known/aqua-identity`, secp256k1+EIP-191 plus Ed25519 + P-256 clients verified) |
+| **M2** Accumulate + seal | shipped 2026-05-17 (600s epochs, deterministic RFC 9162 Merkle root, fjall LSM-tree storage) |
+| **M3** Witness revisions | shipped 2026-05-17 (aqua-node compatible `/trees/{tip}` plus `by-leaf` / `?epoch=&method=` extensions, DID isolation, restart durability) |
+| **M-E2E** Live roundtrip | shipped 2026-05-17 (`tests/e2e/live_roundtrip.sh` end-to-end, all three DID methods proven in-process) |
+| **M4** Real EVM anchor (Sepolia) | shipped 2026-05-17 (`CliEthTimestamper` against Sepolia at chain id 11155111; service wallet `0x55Fcf9F8...634f`) |
+| **M5** Real qTSA anchor | shipped 2026-05-17 (`TsaTimestamper` against `http://timestamp.sectigo.com/qualified`, eIDAS qualified chain) |
+| M6 Production hardening | pending (metrics, rate-limits per DID, fjall pruning, WAL, chaos test) |
 
 ## License
 

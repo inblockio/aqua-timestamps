@@ -2,7 +2,32 @@
 
 **Version:** 0.3.0-draft
 **Date:** 2026-05-16
-**Status:** Architecture review (pre-implementation)
+**Status:** Historical (pre-implementation). Superseded by what actually shipped.
+
+> **Read this with skepticism.** This document predates the
+> implementation. Several decisions captured below were deliberately
+> overridden during the M0..M5 build; the `aqua-rs-sdk` is the
+> authoritative source of truth where the two disagree. For the
+> shipped reality:
+>
+> - per-milestone contract: [`success-criteria.md`](success-criteria.md);
+> - per-milestone runbooks with live transcripts: [`runbooks/`](runbooks/);
+> - operational context for the next session: [`../CLAUDE.md`](../CLAUDE.md).
+>
+> Known divergences from this document:
+>
+> - Service identity uses **secp256k1 + EIP-191** (the aquafire
+>   reference shape), not Ed25519.
+> - The identity tree is built from the SDK's
+>   `service_claim_server` template (not a hand-rolled service_claim).
+> - `aqua-rs-auth` accepts all three CAIP-122 namespaces (`eip155`,
+>   `ed25519`, `p256`); clients are not restricted to one curve.
+> - `aqua-node` does not expose `/trees/by-leaf/...` or
+>   `/trees?epoch=&method=...`; aqua-timestamp adds those as
+>   additive extensions returning the same `Tree` shape so aqua-node
+>   clients consume them transparently.
+> - The qTSA endpoint is Sectigo qualified
+>   (`http://timestamp.sectigo.com/qualified`), not D-Trust.
 
 ## 1. Purpose
 

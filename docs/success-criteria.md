@@ -97,19 +97,29 @@ The project is divided into milestones so progress is visible and each
 deploy is meaningful on its own. Earlier milestones do not block later
 ones from being scoped, but they do block them from being shipped.
 
-| ID | Title | Outcome |
-|---|---|---|
-| **M0** | Skeleton on the wire | `https://timestamp.inblock.io/health` returns 200 with valid TLS, served by a Rust binary running in Docker on dev.inblock.io. Landing page at `/` describes the service and links to the identity endpoint. No business logic yet. |
-| **M1** | Identity and SIWE auth | Service loads its secp256k1 key, serves a signed `service_claim` at `/.well-known/aqua-identity` that mirrors the aquafire shape exactly, accepts SIWE sessions via `aqua-rs-auth`, and rejects unauthenticated submission with 401. |
-| **M2** | Accumulate and seal | Allowlisted clients submit leaves via `POST /v1/leaves`, the epoch timer fires, an RFC 9162 Merkle root is built deterministically (via `aqua-rs-sdk` primitives), and an `EpochRecord` is persisted to fjall. Anchor providers are stubbed. |
-| **M3** | Witness revisions retrievable | After seal, witness revisions (TimestampObject + EIP-191 Signature) are minted per leaf for each stubbed anchor method, persisted, and retrievable via the aqua-node-compatible `GET /trees/{tip}` and `GET /trees/by-leaf/{hash}` endpoints, with DID-scoped access enforced. |
-| **M-E2E** | **Live e2e round trip** | A local client built on `aqua-rs-cli` / `aqua-rs-sdk` runs against the *deployed* `https://timestamp.inblock.io`: signs a SIWE challenge with its own key, submits a leaf, waits for the epoch to seal, retrieves the witness revisions, and verifies signature + Merkle proof — all without a single hand-edit. Anchors may still be stubbed at this milestone. |
-| **M4** | Real EVM anchor | The EVM stub is replaced with a real `TimestampProvider` submitting to Sepolia, signed by the service wallet (funded prerequisite). End-to-end: a submitted hash gets a witness revision containing a real on-chain `transaction_hash` that resolves on a Sepolia block explorer. |
-| **M5** | Real qTSA anchor | The qTSA stub is replaced with a real RFC 3161 client against an eIDAS-qualified provider (D-Trust or alternative). End-to-end as M4 but for qTSA witness revisions. |
-| **M6** | Production hardening | Metrics endpoint, structured tracing, rate limits per DID, fjall retention pruning, write-ahead log for accumulator, restart durability proven by chaos test. |
+| ID | Title | Outcome | State |
+|---|---|---|---|
+| **M0** | Skeleton on the wire | `https://timestamp.inblock.io/health` returns 200 with valid TLS, served by a Rust binary running in Docker on the agentic-hub host. Landing page at `/` describes the service and links to the identity endpoint. No business logic yet. | **shipped** 2026-05-17 |
+| **M1** | Identity and SIWE auth | Service loads its secp256k1 key, serves a signed `service_claim` at `/.well-known/aqua-identity` that mirrors the aquafire shape exactly, accepts SIWE sessions via `aqua-rs-auth`, and rejects unauthenticated submission with 401. Verified for all three CAIP-122 DID methods (`eip155`, `ed25519`, `p256`). | **shipped** 2026-05-17 |
+| **M2** | Accumulate and seal | Allowlisted clients submit leaves via `POST /v1/leaves`, the epoch timer fires, an RFC 9162 Merkle root is built deterministically (via `aqua-rs-sdk` primitives), and an `EpochRecord` is persisted to fjall. Anchor providers are stubbed at this milestone. | **shipped** 2026-05-17 |
+| **M3** | Witness revisions retrievable | After seal, witness revisions (TimestampObject + EIP-191 Signature) are minted per leaf for each anchor method, persisted, and retrievable via the aqua-node-compatible `GET /trees/{tip}` and the aqua-timestamp-specific `GET /trees/by-leaf/{hash}?method=` and `GET /trees?epoch=&method=` endpoints, with DID-scoped access enforced. | **shipped** 2026-05-17 |
+| **M-E2E** | **Live e2e round trip** | A local client built on `aqua-rs-sdk` runs against the *deployed* `https://timestamp.inblock.io`: signs a SIWE challenge with its own key, submits a leaf, waits for the epoch to seal, retrieves the witness revisions for both anchor methods, and verifies signature + Merkle proof on each, all without a single hand-edit. | **shipped** 2026-05-17 |
+| **M4** | Real EVM anchor | The EVM stub is replaced with a real `TimestampProvider` submitting to Sepolia, signed by the service wallet. End-to-end: a submitted hash gets a witness revision containing a real on-chain `transaction_hash` that resolves on a Sepolia block explorer. | **shipped** 2026-05-17 |
+| **M5** | Real qTSA anchor | The qTSA stub is replaced with a real RFC 3161 client against an eIDAS-qualified provider (`http://timestamp.sectigo.com/qualified`). End-to-end as M4 but for qTSA witness revisions. | **shipped** 2026-05-17 |
+| **M6** | Production hardening | Metrics endpoint, structured tracing tightening, rate limits per DID, fjall retention pruning, write-ahead log for accumulator, restart durability proven by chaos test. | pending |
 
-The owner picks the bar for the current session. Default first-session
-target: **M0**. The crab will not silently expand scope.
+Per-milestone runbooks (with live transcripts) live in
+`docs/runbooks/`:
+
+- M0 deploy: [`m0-deploy-transcript-2026-05-17.md`](runbooks/m0-deploy-transcript-2026-05-17.md)
+- M-E2E first live run: [`e2e-live-transcript-2026-05-17.md`](runbooks/e2e-live-transcript-2026-05-17.md)
+- Multi-DID e2e + second Sepolia anchor: [`multi-method-e2e-and-anchor-2026-05-17.md`](runbooks/multi-method-e2e-and-anchor-2026-05-17.md)
+- M5 qTSA anchor: [`m5-qtsa-anchor-2026-05-17.md`](runbooks/m5-qtsa-anchor-2026-05-17.md)
+- Full overnight build: [`session-2026-05-17-overnight-build.md`](runbooks/session-2026-05-17-overnight-build.md)
+
+The owner picks the bar for the current session. Default next session
+target: **M6** (production hardening) unless redirected. The crab will
+not silently expand scope.
 
 ## M0: Skeleton on the wire
 

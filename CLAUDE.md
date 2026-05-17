@@ -84,48 +84,94 @@ See memory [[reference-server-agentic-hub]] for full server details and
 
 ## Workflow conventions for this project
 
-- **Build locally, ship the image.** Owner doesn't want GH Actions wired
-  up yet. Local `docker buildx build`, then either
-  `docker save | ssh root@... docker load` or push to `ghcr.io/inblockio/aqua-timestamp` once GH auth is in.
-- **No GH Actions CI yet.** Add later; not blocking M0.
-- **`cargo clippy -- -D warnings` and `cargo fmt --check`** before
-  declaring any code work done (global rule, reaffirmed).
-- **Secrets handling:** the service mnemonic NEVER goes into the repo,
-  the image, or any committed compose file. It's read at runtime from
-  `AQUA_TIMESTAMP_ANCHOR_MNEMONIC` env var, sourced from a `.env` on the
-  server (chmod 600, not in git).
+- **Build on the deploy server.** This host has no local Docker
+  (installing it needs sudo and the global rules gate that). The
+  pattern is: `rsync` the workspace plus the two sister crates
+  (`aqua-rs-sdk`, `aqua-rs-auth`) to `/root/timestamp/build/` on
+  `timestamp.inblock.io`, then `docker buildx build` there. The full
+  command sequence is in the M0 deploy transcript and in
+  [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
+  When `gh auth login` is done later, the alternate path is GHCR
+  push from this host, which removes the rsync.
+- **No GH Actions CI yet.** Add later; doesn't block M0..M5.
+- **`cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo fmt --check`** before declaring any code work done. The
+  workspace ships clean under both (the only warnings come from the
+  read-only `aqua-rs-sdk` sister crate's unused imports).
+- **Secrets handling:** the service mnemonic NEVER goes into the
+  repo, the image, or any committed compose file. It's read at
+  runtime from `AQUA_TIMESTAMP_ANCHOR_MNEMONIC`, sourced from
+  `/root/timestamp/.env` on the server (chmod 600, not in git). The
+  pipe-only seeding pattern from the gnome-keyring to the remote
+  `.env` is documented in the session transcript; never echo the
+  mnemonic as a command argument.
 
 ## Current state (handover, end of 2026-05-17)
 
-**Shipped at end of 2026-05-17 overnight session (M0 -> M-E2E -> M4):**
-- M0: Rust + Axum skeleton, dockerized, deployed at `https://timestamp.inblock.io`.
-- M1: Identity loader + `service_claim_server` aqua-tree at `/.well-known/aqua-identity`, SIWE auth via `aqua-rs-auth`.
-- M2: leaf accumulator + epoch sealer + fjall storage (`epochs`, `epoch_leaves`).
-- M3: witness revision minter, aqua-node compatible `/trees/{tip}`, `/trees/by-leaf/{leaf}?method=`, `/trees?epoch=&method=`, DID isolation.
-- M4: real Sepolia anchor via `aqua_rs_sdk::CliEthTimestamper`. First live tx
+**Shipped at end of 2026-05-17 (M0 through M5 + M-E2E):**
+- M0: Rust + Axum skeleton, Dockerized, deployed at `https://timestamp.inblock.io`.
+- M1: identity loader, `service_claim_server` aqua-tree at
+  `/.well-known/aqua-identity`, SIWE auth via `aqua-rs-auth`. All
+  three CAIP-122 namespaces are supported on the wire: `eip155`
+  (secp256k1 + EIP-191), `ed25519`, `p256`. The service's own
+  identity DID is on `eip155:1`.
+- M2: leaf accumulator + epoch sealer + fjall storage (`epochs`,
+  `epoch_leaves`). Empty epochs still seal but don't anchor; epoch
+  numbering monotonic across restarts.
+- M3: witness revision minter, aqua-node-compatible
+  `GET /trees/{tip}`, plus the aqua-timestamp extensions
+  `/trees/by-leaf/{leaf}?method=` and `/trees?epoch=&method=` that
+  return the same `Tree` shape. DID isolation enforced (`403` on
+  other-DID lookups; `404` on unknown).
+- M4: real Sepolia anchor via `aqua_rs_sdk::CliEthTimestamper`.
+  First live tx
   `0x0db2eb94217596ad39c59c27f54778cd53911186ceb759d8c13ba8cb3bf81f3c`
-  anchored epoch 7's Merkle root at Sepolia block `0xa5d075` (10866805).
-- M-E2E: live + selfcheck client at `crates/aqua-timestamp-e2e/`. Wrapper at
-  `tests/e2e/live_roundtrip.sh` runs the full 10-step witness roundtrip
-  against the deployed service and exits `STATUS = OK`.
+  at block 10866805. The sealer falls back to a stub on RPC failure
+  and continues; sealing never fails because an anchor failed.
+- **M5**: real eIDAS-qualified qTSA anchor via
+  `aqua_rs_sdk::web::tsa::TsaTimestamper` against
+  `http://timestamp.sectigo.com/qualified`. Every non-empty epoch
+  now produces dual witnesses (`method=evm` + `method=qtsa`).
+  Sectigo's documented 16s minimum spacing is honored by the
+  built-in throttle. First live qTSA witness was epoch 33 with
+  `genTime=1779012930`, signed under the Sectigo Qualified Time
+  Stamping Root R45.
+- M-E2E: live + selfcheck client at `crates/aqua-timestamp-e2e/`.
+  Subcommands: `live`, `selfcheck`, `live-all`, `selfcheck-all`.
+  The wrapper at `tests/e2e/live_roundtrip.sh` runs the full flow
+  (SIWE -> submit -> wait for seal -> fetch evm witness -> fetch
+  qtsa witness -> verify L1 / L2 / L3 on both -> negative isolation
+  + no-bearer checks) and exits `STATUS = OK`.
 
-**Full session log:** [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
+**Session log:** [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
+**Multi-DID + second Sepolia anchor:** [`docs/runbooks/multi-method-e2e-and-anchor-2026-05-17.md`](docs/runbooks/multi-method-e2e-and-anchor-2026-05-17.md).
+**M5 qTSA anchor:** [`docs/runbooks/m5-qtsa-anchor-2026-05-17.md`](docs/runbooks/m5-qtsa-anchor-2026-05-17.md).
+
+**Test counts on `main` after M5:** 59 passing, 1 `#[ignore]`-gated
+(`live_sepolia_anchor`, runs only under `AQUA_TIMESTAMP_LIVE_SEPOLIA=1`
+because every run burns Sepolia gas).
 
 **Deferred (not blocking):**
-- M5 real qTSA anchor: the SDK already ships `aqua_rs_sdk::web::tsa::TsaTimestamper`
-  (a full `TimestampProvider` impl). Wiring is a `[anchors.qtsa]` config block
-  plus one slot on the sealer. A free standard TSA (`http://timestamp.digicert.com`)
-  works without auth for a smoke test; eIDAS-qualified providers need an account.
-- M6 production hardening (metrics, rate limits per DID, fjall pruning, WAL, chaos test).
-- GHCR push (no `gh auth` yet; image is built directly on the deploy server).
-- Image size trim (139 MB, target was <100 MB).
-- Em-dash sweep in legacy prose (landing.rs, some doc files).
+- M6 production hardening: metrics, rate limits per DID, fjall
+  pruning, WAL for the accumulator, chaos test for restart
+  durability.
+- GHCR push (`gh auth login` still pending).
+- Image size trim: 139 MB at M5; target was <100 MB. The bulk is
+  `libssl3` + `ca-certificates` for the SDK's `web` feature.
+- Em-dash sweep in legacy prose
+  (`crates/aqua-timestamp/src/landing.rs`, several doc files).
 
 **Resume here (next session):**
-1. Read [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
-2. M5 if you want it: wire `[anchors.qtsa]` and plug `TsaTimestamper` into the
-   sealer's `qtsa_anchor` slot. The mint pipeline is identical to EVM.
-3. M6 otherwise: pick metrics or pruning first.
+1. Read the session log above and the M5 qTSA runbook for context.
+2. If M6 is the target: pick metrics first (Prometheus scrape on
+   `/metrics`, mirror `aqua-node`'s shape if it has one); then rate
+   limits per DID via a tower middleware; then fjall pruning and the
+   WAL. Restart durability is already proven; the chaos test is the
+   regression net for it.
+3. If `gh auth login` lands, switch the deploy from rsync + build to
+   GHCR pull. Update `deploy/docker-compose.yml` to `image:
+   ghcr.io/inblockio/aqua-timestamp:<tag>` and add a GH Actions
+   workflow.
 
 ## M3 addendum (shipped 2026-05-17)
 
@@ -325,7 +371,7 @@ strictly decreased. Every run burns testnet gas, hence the gate.
   server's `deploy/config.toml` and restart. Witnesses minted while
   disabled carry stub anchor data; the EVM contract is unaffected.
 
-### M5 hand-off
+### M5 hand-off (legacy notes; M5 is now shipped, see M5 addendum below)
 
 The qTSA stub stays in place at M4. M5 replaces it the same way:
 
@@ -336,6 +382,58 @@ The qTSA stub stays in place at M4. M5 replaces it the same way:
    attach via `WitnessContext::with_qtsa_anchor`.
 4. The witness minter and storage paths need no change; the qTSA
    outcome already flows through `MethodAnchorOutcome`.
+
+## M5 addendum (shipped 2026-05-17)
+
+M5 turned the qTSA stub into a real RFC 3161 anchor pointing at
+`http://timestamp.sectigo.com/qualified` (the operator-chosen
+eIDAS-qualified Sectigo endpoint). The wiring matched the M4 hand-off
+sketch above almost exactly; the only surprise was that
+`aqua_rs_sdk::web::tsa::TsaTimestamper` already implements the
+SDK's `TimestampProvider` trait, so step 1 was free.
+
+Concrete changes:
+
+- New `[anchors.qtsa]` block in `crates/aqua-timestamp/src/config.rs`
+  with `enabled`, `url`, `min_request_interval_secs` (16 by default
+  for the Sectigo qualified endpoint), and `network_label` fields.
+  The SDK doc-comment on `TsaTimestamper::new` recommends 16s
+  spacing for Sectigo specifically; setting
+  `min_request_interval_secs = 0` disables the throttle for free
+  standard TSAs like DigiCert / Sectigo standard.
+- `MethodAnchorOutcome::from_tsa_timestamp_value()` folds the live
+  `TimestampValue` (`transaction_hash` = the RFC 3161 TimeStampResp
+  identifier, `tsa_provider` = publisher name from the response,
+  `smart_contract_address` = the TSA URL as the SDK overloads it,
+  `network` = configured label) into the witness payload.
+- `sealer::resolve_qtsa_outcome` mirrors `resolve_evm_outcome`
+  exactly: live call on non-empty epochs with the provider attached;
+  fall-back to stub on RPC error, empty epoch, or
+  `[anchors.qtsa].enabled = false`. Sealing never fails because the
+  qTSA call failed.
+- `build_app` constructs the `TsaTimestamper` once at boot and
+  attaches it via `WitnessContext::with_qtsa_anchor`.
+- Four new unit tests in `crates/aqua-timestamp-core/src/sealer.rs`
+  cover happy / failing / disabled / empty-epoch paths for the qTSA
+  branch, identical in shape to the EVM tests added at M4.
+- The e2e flow (`crates/aqua-timestamp-e2e/src/flow.rs`) gained a
+  new step 9d that fetches `/trees/by-leaf/{leaf}?method=qtsa` and
+  runs L1 / L2 / L3 against it, plus a payload-surface log line
+  printing the TSA provider name, genTime, and the RFC 3161
+  response byte length so a transcript is readable at a glance.
+  A `404` on the qtsa lookup skips gracefully so a deployment
+  without qTSA still passes.
+
+The qTSA response is a fully signed RFC 3161 TimeStampResp under
+the Sectigo Qualified Time Stamping Root R45. Any EU verifier can
+confirm eIDAS-qualified status from the cert policy OID
+(`1.3.6.1.4.1.6449.1.2.1.9.1` is Sectigo's qualified policy) without
+extra input from us. The whole DER blob is in the witness payload.
+
+The `live_qtsa_anchor` `#[ignore]`-gated test that mirrors
+`live_sepolia_anchor` is left as a small follow-on for the next
+session (TsaTimestamper is free to call, so a non-ignored variant
+running under a `LIVE_QTSA=1` env gate is also reasonable).
 
 ## M1 addendum (shipped 2026-05-17)
 
@@ -375,7 +473,7 @@ not by drift.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **aqua-timestamp** (944 symbols, 2000 relationships, 82 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **aqua-timestamp** (1000 symbols, 2123 relationships, 85 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
