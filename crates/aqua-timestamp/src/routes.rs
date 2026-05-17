@@ -2,15 +2,19 @@
 
 use std::sync::Arc;
 
-use aqua_timestamp_core::merkle::{hex_lower, parse_leaf_hex, LeafParseError};
+use aqua_timestamp_core::{
+    merkle::{hex_lower, parse_leaf_hex, LeafParseError},
+    storage::TipPairIndex,
+    witness::AnchorMethod,
+};
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use tracing::{info, warn};
 
 use crate::{
@@ -268,4 +272,276 @@ pub async fn list_epochs(
 /// 404 fallback for routes we don't define yet (uniform JSON shape).
 pub async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })))
+}
+
+// ── /trees/{tip}, /trees/by-leaf/{leaf}, /trees, /trees?epoch=&method= ───
+//
+// The aqua-node REST contract defines `GET /trees` (list tips),
+// `GET /trees/{tip_hex}` (the witness pair rooted at `tip_hex`), and
+// `GET /trees/by-genesis/{genesis_hex}`. aqua-timestamp implements
+// `/trees` and `/trees/{tip}` byte-for-byte against the aqua-node shape
+// (`{revisions, file_index}` with the SDK's `BTreeMap<RevisionLink, _>`
+// ordering), then ADDS two aqua-timestamp-specific variants that return
+// the same shape:
+//
+// * `GET /trees/by-leaf/{leaf}?method=evm|qtsa` : resolve a witness pair
+//   from a client-submitted leaf + anchor method.
+// * `GET /trees?epoch=N&method=evm|qtsa` : union of witnesses for every
+//   leaf the calling DID submitted in epoch `N`.
+//
+// All three return the same `Tree` shape so existing aqua-node clients
+// can consume them unmodified. The list-tips form (no query string) is
+// preserved as the legacy `GET /trees` path.
+
+/// Query parameters for the union variant of `/trees`.
+///
+/// `epoch` AND `method` MUST be present together; either alone is a 400.
+#[derive(Debug, Deserialize)]
+pub struct TreesQuery {
+    pub epoch: Option<u64>,
+    pub method: Option<String>,
+}
+
+/// `GET /trees` (no query → legacy aqua-node tip list)
+/// OR `GET /trees?epoch=N&method=evm|qtsa` (M3 union variant).
+pub async fn list_or_query_trees(
+    State(state): State<Arc<AppState>>,
+    bearer: BearerDid,
+    Query(q): Query<TreesQuery>,
+) -> Result<Response, AuthApiError> {
+    match (q.epoch, q.method.as_deref()) {
+        (None, None) => list_tips_for_did(&state, &bearer.0),
+        (Some(epoch), Some(method_str)) => {
+            let method = AnchorMethod::parse(method_str).ok_or_else(|| {
+                AuthApiError::bad_request(format!(
+                    "method must be 'evm' or 'qtsa', got '{method_str}'"
+                ))
+            })?;
+            union_for_epoch(&state, &bearer.0, epoch, method)
+        }
+        _ => Err(AuthApiError::bad_request(
+            "epoch and method must be supplied together (or omit both for the tip list)",
+        )),
+    }
+}
+
+/// `GET /trees` shape: a JSON array of hex tip hashes belonging to the
+/// caller's DID, sorted descending by epoch.
+fn list_tips_for_did(state: &Arc<AppState>, did: &str) -> Result<Response, AuthApiError> {
+    let tips = state
+        .store
+        .list_witness_tips_for_did(did)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    let body: Vec<String> = tips
+        .into_iter()
+        .map(|(_, tip)| format!("0x{}", hex::encode(tip)))
+        .collect();
+    info!(did, count = body.len(), "trees.list");
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// `GET /trees?epoch=N&method=...` : union of witness pairs for every
+/// leaf the caller submitted in epoch `N` under `method`. Empty
+/// `revisions`/`file_index` if the caller submitted no leaves in that
+/// epoch. 404 only if the epoch has not been sealed at all.
+fn union_for_epoch(
+    state: &Arc<AppState>,
+    did: &str,
+    epoch_id: u64,
+    method: AnchorMethod,
+) -> Result<Response, AuthApiError> {
+    let epoch = state
+        .store
+        .get_epoch(epoch_id)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    if epoch.is_none() {
+        return Ok(not_found_response("epoch not sealed yet"));
+    }
+    let entries = state
+        .store
+        .list_witnesses_for_did_in_epoch(did, epoch_id, method)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+
+    let mut revisions: Map<String, Value> = Map::new();
+    let mut file_index: Map<String, Value> = Map::new();
+
+    for idx in entries {
+        load_pair_into_maps(&state.store, &idx, &mut revisions, &mut file_index)
+            .map_err(AuthApiError::bad_request)?;
+    }
+
+    info!(
+        did,
+        epoch = epoch_id,
+        method = %method.as_str(),
+        leaves = revisions.len() / 2,
+        "trees.union"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "revisions": Value::Object(revisions),
+            "file_index": Value::Object(file_index),
+        })),
+    )
+        .into_response())
+}
+
+/// `GET /trees/{tip_hex}` : aqua-node-compatible single-tree fetch.
+pub async fn get_tree_by_tip(
+    State(state): State<Arc<AppState>>,
+    bearer: BearerDid,
+    Path(tip_hex): Path<String>,
+) -> Result<Response, AuthApiError> {
+    let tip = parse_hash32(&tip_hex).map_err(AuthApiError::bad_request)?;
+    let idx = match state
+        .store
+        .get_tip_pair(&tip)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?
+    {
+        Some(p) => p,
+        None => return Ok(not_found_response("unknown tip")),
+    };
+    if idx.submitter_did != bearer.0 {
+        warn!(
+            caller = %bearer.0,
+            owner = %idx.submitter_did,
+            "trees.tip access denied"
+        );
+        return Err(AuthApiError::forbidden("witness owned by a different DID"));
+    }
+    let body = build_pair_body(&state.store, &idx)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    info!(did = %bearer.0, tip = %format!("0x{}", hex::encode(tip)), "trees.tip");
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// `GET /trees/by-leaf/{leaf_hex}?method=evm|qtsa` : aqua-timestamp
+/// extension.
+pub async fn get_tree_by_leaf(
+    State(state): State<Arc<AppState>>,
+    bearer: BearerDid,
+    Path(leaf_hex): Path<String>,
+    Query(q): Query<ByLeafQuery>,
+) -> Result<Response, AuthApiError> {
+    let method_str = q
+        .method
+        .ok_or_else(|| AuthApiError::bad_request("missing required query parameter 'method'"))?;
+    let method = AnchorMethod::parse(&method_str).ok_or_else(|| {
+        AuthApiError::bad_request(format!(
+            "method must be 'evm' or 'qtsa', got '{method_str}'"
+        ))
+    })?;
+    let leaf = parse_hash32(&leaf_hex).map_err(AuthApiError::bad_request)?;
+
+    // Resolve ownership first. A leaf that doesn't exist at all is a 404;
+    // a leaf owned by someone else is a 403 (the §M3 isolation invariant).
+    let owner = state
+        .store
+        .get_leaf_owner(&leaf)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    match owner {
+        None => return Ok(not_found_response("unknown leaf")),
+        Some(d) if d != bearer.0 => {
+            warn!(caller = %bearer.0, owner = %d, "trees.by-leaf access denied");
+            return Err(AuthApiError::forbidden("leaf submitted by a different DID"));
+        }
+        Some(_) => {}
+    }
+
+    let tip = state
+        .store
+        .get_tip_for_leaf(&leaf, method)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    let tip = match tip {
+        Some(t) => t,
+        None => return Ok(not_found_response("no witness for that leaf/method yet")),
+    };
+    let idx = state
+        .store
+        .get_tip_pair(&tip)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?
+        .ok_or_else(|| {
+            AuthApiError::bad_request("internal: tip_to_pair index missing for known tip")
+        })?;
+    let body = build_pair_body(&state.store, &idx)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    info!(
+        did = %bearer.0,
+        leaf = %format!("0x{}", hex::encode(leaf)),
+        method = %method.as_str(),
+        "trees.by-leaf"
+    );
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ByLeafQuery {
+    pub method: Option<String>,
+}
+
+// ── /trees response helpers ───────────────────────────────────────────────
+
+fn build_pair_body(
+    store: &aqua_timestamp_core::storage::Store,
+    idx: &TipPairIndex,
+) -> Result<Value, String> {
+    let mut revisions: Map<String, Value> = Map::new();
+    let mut file_index: Map<String, Value> = Map::new();
+    load_pair_into_maps(store, idx, &mut revisions, &mut file_index)?;
+    Ok(json!({
+        "revisions": Value::Object(revisions),
+        "file_index": Value::Object(file_index),
+    }))
+}
+
+/// Add the two revisions (object + signature) of the witness pair
+/// described by `idx` into the supplied response maps. Mirrors aqua-node's
+/// JSON shape: keys are `"0x<hex>"` revision hashes, values are the raw
+/// `AnyRevision` JSON the SDK emitted at sign time.
+fn load_pair_into_maps(
+    store: &aqua_timestamp_core::storage::Store,
+    idx: &TipPairIndex,
+    revisions: &mut Map<String, Value>,
+    file_index: &mut Map<String, Value>,
+) -> Result<(), String> {
+    let obj_bytes = store
+        .get_revision_json(&idx.object_hash)
+        .map_err(|e| format!("store: {e}"))?
+        .ok_or_else(|| "witness object revision missing in store".to_string())?;
+    let sig_bytes = store
+        .get_revision_json(&idx.signature_hash)
+        .map_err(|e| format!("store: {e}"))?
+        .ok_or_else(|| "witness signature revision missing in store".to_string())?;
+
+    let obj_json: Value = serde_json::from_slice(&obj_bytes).map_err(|e| format!("json: {e}"))?;
+    let sig_json: Value = serde_json::from_slice(&sig_bytes).map_err(|e| format!("json: {e}"))?;
+
+    let obj_hex = format!("0x{}", hex::encode(idx.object_hash));
+    let sig_hex = format!("0x{}", hex::encode(idx.signature_hash));
+
+    revisions.insert(obj_hex.clone(), obj_json);
+    revisions.insert(sig_hex.clone(), sig_json);
+    file_index.insert(obj_hex, Value::String(idx.object_file_name.clone()));
+    file_index.insert(sig_hex, Value::String(idx.signature_file_name.clone()));
+    Ok(())
+}
+
+fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
+    let trimmed = input.strip_prefix("0x").unwrap_or(input);
+    if trimmed.len() != 64 {
+        return Err(format!(
+            "expected 64 hex chars (optionally 0x-prefixed), got {}",
+            trimmed.len()
+        ));
+    }
+    let bytes = hex::decode(trimmed).map_err(|e| format!("non-hex: {e}"))?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn not_found_response(msg: &str) -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into_response()
 }

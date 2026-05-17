@@ -21,6 +21,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub epoch: EpochConfig,
+    #[serde(default)]
+    pub anchor: AnchorConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +82,29 @@ pub struct StorageConfig {
     /// mirrors `/var/lib/aqua-timestamp/state`.
     #[serde(default = "default_storage_path")]
     pub path: PathBuf,
+}
+
+/// Configuration for the (M3 stub / M4 real) anchor providers. Only the
+/// labels used inside witness payloads live here; provider implementations
+/// remain hardcoded until M4.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AnchorConfig {
+    /// The `network` field embedded in EVM timestamp witness payloads.
+    /// Defaults to `"sepolia"` so the M3 stub matches the M4 target chain.
+    #[serde(default = "default_evm_network")]
+    pub evm_network: String,
+}
+
+fn default_evm_network() -> String {
+    "sepolia".to_string()
+}
+
+impl Default for AnchorConfig {
+    fn default() -> Self {
+        Self {
+            evm_network: default_evm_network(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

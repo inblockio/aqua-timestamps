@@ -31,3 +31,8 @@ duration_secs = 600
 # Hard cap on the leaves array in a single `POST /v1/leaves`. Requests
 # above this are rejected with 400.
 max_leaves_per_request = 10000
+
+[anchor]
+# Network label written into the EVM witness payloads at M3 (stub anchor)
+# and M4 (real Sepolia anchor). Default matches the M4 target chain.
+evm_network = "sepolia"

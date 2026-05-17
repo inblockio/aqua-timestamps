@@ -129,6 +129,109 @@ See memory [[reference-server-agentic-hub]] for full server details and
    `/home/portal/portal/Caddyfile`, `docker exec portal-caddy-1 caddy reload`.
 6. Verify `https://timestamp.inblock.io/health` returns 200 from off-box.
 
+## M3 addendum (shipped 2026-05-17)
+
+M3 lands the witness revision minter, the `/trees/*` endpoints, and the
+DID-isolation invariant. Notes for whoever takes M4 / M-E2E next.
+
+### Endpoint contract vs. aqua-node
+
+aqua-node's REST surface (verified against
+`~/projects/aqua-node/crates/aqua-rest/src/routes.rs`) exposes
+`GET /trees`, `GET /trees/{tip}`, `GET /trees/by-genesis/{genesis}`,
+`POST /trees`, `DELETE /trees/{tip}`, plus a dependencies route. It does
+**not** offer a per-leaf or per-epoch query. aqua-timestamp therefore:
+
+* Implements `GET /trees` and `GET /trees/{tip}` byte-for-byte against
+  aqua-node's shape (the response deserialises back into
+  `aqua_rs_sdk::schema::tree::Tree` cleanly; the
+  `tip_response_shape_matches_aqua_node` test enforces this).
+* ADDS two aqua-timestamp extensions that reuse the same
+  `{revisions, file_index}` shape so aqua-node clients consume them
+  without modification:
+  * `GET /trees/by-leaf/{leaf_hex}?method=evm|qtsa`
+  * `GET /trees?epoch=N&method=evm|qtsa`
+
+All four are bearer-gated and enforce the DID-isolation invariant:
+fetching a tip or leaf that exists but was submitted by a different DID
+returns 403 (not 404). The `unknown_tip_returns_404_known_tip_for_other_did_returns_403`
+test asserts both codes explicitly.
+
+### Witness shape
+
+For every accepted leaf at seal time, the minter produces two revisions
+per anchor method, chained as `client_leaf -> TimestampObject ->
+Signature`:
+
+* The TimestampObject's `previous_revision` is the client-submitted leaf
+  hash itself (treated as a `RevisionLink`). Method is `Method::Scalar`
+  for parity with aquafire.
+* Payload is the SDK's `EvmTimestampPayload` / `TsaTimestampPayload`.
+  M3 is a stub anchor: `transaction_hash = 0x0...0` (64 hex zeros),
+  EVM-only `smart_contract_address = 0x0...0` (40 hex zeros), qTSA
+  `tsa_provider = "stub"`, EVM `network = "sepolia"`,
+  `sender_account_address = service eth addr`. `merkle_proof` is the
+  RFC 9162 inclusion proof against the persisted root, verified inside
+  the M3 round-trip test.
+* The Signature is EIP-191 over the canonical pre-signature JSON
+  (`Secp256k1Signer`), `signer = identity.server_did`.
+
+The task spec asked for `epoch_id` inside the payload. The SDK template
+schemas (`timestamp_evm.json` / `timestamp_tsa.json`) declare
+`additionalProperties: false`, so a payload carrying `epoch_id` would
+fail `create_object_util` validation. Because the project rule is
+"SDK is authoritative", `epoch_id` lives only in storage
+(`TipPairIndex.epoch_id`) and not in the witness payload. The information
+is reachable via `GET /trees?epoch=...&method=...` and `GET /v1/epochs`.
+
+### Storage partitions added
+
+* `witness_revisions`: 32-byte revision hash -> `serde_json` bytes of the
+  `AnyRevision`. JSON (not postcard) so the value is byte-equal to what
+  goes into the HTTP response.
+* `leaf_to_tips`: `leaf (32 bytes) || method_byte (1 byte)` ->
+  signature-revision hash. `method_byte = 0x01` for `evm`, `0x02` for
+  `qtsa`.
+* `leaf_owner`: leaf -> submitter DID UTF-8. Lets `/trees/by-leaf/...`
+  answer 404 vs 403 without scanning the per-epoch prefix.
+* `tip_to_pair`: signature hash -> postcard-encoded `TipPairIndex`
+  carrying `(object_hash, signature_hash, leaf, method_byte, epoch_id,
+  submitter_did, object_file_name, signature_file_name)`.
+
+The seal commits the `EpochRecord`, the full leaf-set, every
+`leaf_owner` mapping, and every witness revision through a single fjall
+`Batch` + `SyncAll` so the durability story is unchanged from M2.
+
+### Files of interest
+
+* `crates/aqua-timestamp-core/src/witness.rs` (new): minter.
+* `crates/aqua-timestamp-core/src/sealer.rs`: `seal_once` is now async,
+  takes `Option<&WitnessContext>`, returns `(EpochRecord, Vec<MintedWitness>)`.
+* `crates/aqua-timestamp-core/src/storage.rs`: partitions + queries.
+* `crates/aqua-timestamp/src/routes.rs`: `/trees`, `/trees/{tip}`,
+  `/trees/by-leaf/{leaf}` handlers.
+* `crates/aqua-timestamp/src/config.rs`: new `AnchorConfig`
+  (`evm_network`, defaulting to `"sepolia"`).
+* `crates/aqua-timestamp/tests/witness_flow.rs`: 9 integration tests
+  covering the round trip, isolation, restart durability, response
+  shape, and query validation.
+
+### M4 hand-off
+
+The witness minter currently writes stub anchor outputs. M4 replaces
+the EVM stub by:
+
+1. Submitting a `witness(bytes32)` tx to the on-chain witness contract
+   on Sepolia (selector `0x114ee197`, see
+   `aqua_rs_sdk::primitives::estimate_timestamp_gas`).
+2. Awaiting the receipt to learn the real `transaction_hash` and the
+   resolved `smart_contract_address`.
+3. Threading those values into `mint_witnesses_for_epoch` instead of
+   the zero placeholders. The signature payload, persistence path, and
+   endpoint shapes need no change.
+
+M5 swaps the qTSA stub for a real RFC 3161 client. Same shape.
+
 ## M1 addendum (shipped 2026-05-17)
 
 M1 added identity + SIWE auth on top of the M0 binary. Notes for the next

@@ -12,11 +12,13 @@ pub mod state;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use aqua_rs_sdk::Secp256k1Signer;
 use aqua_timestamp_core::{
     accumulator::Accumulator,
-    sealer::{run_sealer_with_channel, run_sealer_with_interval, SealTick},
+    sealer::{run_sealer_with_channel, run_sealer_with_interval, SealTick, WitnessContext},
     storage::Store,
     time::{Clock, SystemClock},
+    witness::AnchorMethod,
 };
 use axum::{
     routing::{get, post},
@@ -31,7 +33,8 @@ use crate::{
     config::Config,
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
-        aqua_identity, health, landing_page, list_epochs, not_found, schedule, submit_leaves,
+        aqua_identity, get_tree_by_leaf, get_tree_by_tip, health, landing_page, list_epochs,
+        list_or_query_trees, not_found, schedule, submit_leaves,
     },
     state::AppState,
 };
@@ -102,6 +105,18 @@ pub async fn build_app(
         "accumulator opened"
     );
 
+    // The sealer (M3) signs every minted witness with the service key.
+    // We construct the EIP-191 signer once at boot and share it via Arc
+    // so both the sealer task and any future on-demand minter paths reuse
+    // the same in-memory key material.
+    let signer = Arc::new(Secp256k1Signer::new(identity.private_key.as_ref().clone()));
+    let witness_ctx = WitnessContext::new(
+        Arc::clone(&signer),
+        format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
+        cfg.anchor.evm_network.clone(),
+        vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
+    );
+
     // Spawn the seal task.
     match seal_driver {
         SealDriver::Interval => {
@@ -110,6 +125,7 @@ pub async fn build_app(
                 store.clone(),
                 clock,
                 cfg.epoch.duration_secs,
+                Some(witness_ctx.clone()),
             );
         }
         SealDriver::Channel(rx) => {
@@ -118,6 +134,7 @@ pub async fn build_app(
                 store.clone(),
                 rx,
                 cfg.epoch.duration_secs,
+                Some(witness_ctx.clone()),
             );
         }
         SealDriver::Off => {}
@@ -132,6 +149,8 @@ pub async fn build_app(
         sessions,
         accumulator,
         store,
+        signer,
+        witness_ctx,
     });
 
     let router = Router::new()
@@ -143,6 +162,9 @@ pub async fn build_app(
         .route("/v1/leaves", post(submit_leaves))
         .route("/v1/schedule", get(schedule))
         .route("/v1/epochs", get(list_epochs))
+        .route("/trees", get(list_or_query_trees))
+        .route("/trees/{tip_hex}", get(get_tree_by_tip))
+        .route("/trees/by-leaf/{leaf_hex}", get(get_tree_by_leaf))
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::clone(&state));
