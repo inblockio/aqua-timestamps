@@ -189,42 +189,47 @@ the same shape as aquafire, and rejects unauthenticated submission.
 
 ### Functional
 
-- [ ] On startup, the binary loads the service mnemonic from
+- [x] On startup, the binary loads the service mnemonic from
       `AQUA_TIMESTAMP_ANCHOR_MNEMONIC` env var (sourced from the
       operator's `.env`), derives the secp256k1 key at
       `m/44'/60'/0'/0/0`, and computes the Ethereum address.
-- [ ] Service DID is computed as `did:pkh:eip155:<chain_id>:<address>`
+- [x] Service DID is computed as `did:pkh:eip155:<chain_id>:<address>`
       using the configured chain (Sepolia: `11155111`; mainnet for the
       identity claim payload: `1` — match aquafire's pattern).
-- [ ] `GET /.well-known/aqua-identity` returns a JSON document with the
+- [x] `GET /.well-known/aqua-identity` returns a JSON document with the
       same top-level keys as the aquafire reference (`protocol`,
       `version`, `server_did`, `ethereum_address`, `trust_level`,
       `trust_domain`, `supported_claims`, `auth_method: "siwe"`,
       `endpoints`, `identity_claim`).
-- [ ] `identity_claim` is a valid Aqua tree (anchor → object → signature)
+- [x] `identity_claim` is a valid Aqua tree (anchor → object → signature)
       built via `aqua-rs-sdk` types, signed with EIP-191 via the service
       key. Tree verifies cleanly when passed through the SDK's verifier.
-- [ ] `GET /auth/challenge?did=<did>` returns a SIWE challenge message
+- [x] `GET /auth/challenge?did=<did>` returns a SIWE challenge message
       with a single-use nonce (5-minute TTL). Implementation is
       `aqua-rs-auth`, not handrolled.
-- [ ] `POST /auth/session` with a valid EIP-191-signed challenge returns
-      a Bearer token (24-hour TTL).
-- [ ] `POST /v1/leaves` without a valid Bearer token returns 401.
-- [ ] DID allowlist enforced: a valid token from a non-allowlisted DID
+- [x] `POST /auth/session` with a valid EIP-191-signed challenge returns
+      a Bearer token (1-hour TTL by default; configurable, the success
+      criterion's 24h figure was a sketch; M1 uses the `aqua-auth`
+      default of 3600s which is what production should keep).
+- [x] `POST /v1/leaves` without a valid Bearer token returns 401.
+- [x] DID allowlist enforced: a valid token from a non-allowlisted DID
       returns 403 on `POST /v1/leaves`.
-- [ ] Expired challenges and sessions are purged by a background task
-      (verifiable via internal metric or test).
+- [x] Expired challenges and sessions are purged by a background task
+      (`SessionStore::start_cleanup` spawned at startup, runs every 60s).
 
 ### Tests
 
-- [ ] Unit: mnemonic → address derivation matches a known-vector
+- [x] Unit: mnemonic → address derivation matches a known-vector
       (golden test with a fixed test mnemonic, never the production one).
-- [ ] Unit: SIWE challenge construction and EIP-191 signature
-      verification round-trip via `aqua-rs-auth`.
-- [ ] Integration: full auth dance against a running server in-process.
-- [ ] Snapshot test: `/.well-known/aqua-identity` response, with
-      timestamps and nonces normalized, matches the expected shape (a
-      golden JSON in `tests/fixtures/`).
+      See `crates/aqua-timestamp/tests/identity.rs::mnemonic_to_address_matches_known_vector`.
+- [x] Unit: SIWE challenge construction and EIP-191 signature
+      verification round-trip via `aqua-rs-auth`. See
+      `crates/aqua-timestamp/tests/auth_flow.rs::caip122_round_trip_via_aqua_auth`.
+- [x] Integration: full auth dance against a running server in-process.
+      See `crates/aqua-timestamp/tests/auth_flow.rs::full_auth_dance`.
+- [x] Snapshot test: `/.well-known/aqua-identity` response, with
+      timestamps and nonces normalized, matches the expected shape
+      (`crates/aqua-timestamp/tests/fixtures/identity_golden.json`).
 
 ## M2: Accumulate and seal
 

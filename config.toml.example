@@ -1,2 +1,19 @@
 [server]
 listen = "0.0.0.0:8080"
+
+[identity]
+# Chain id used inside the published `did:pkh` (1 = Ethereum mainnet,
+# mirrors aquafire's pattern). The actual anchor chain is a separate
+# concern, configured in M4.
+chain_id     = 1
+trust_domain = "timestamp"
+dns          = "timestamp.inblock.io"
+ip           = "139.59.144.60"
+
+[auth]
+challenge_ttl_secs = 300
+session_ttl_secs   = 3600
+# Empty list = accept any authenticated DID at M1.
+allowed_dids = [
+  # "did:pkh:eip155:1:0x0000000000000000000000000000000000000000",
+]

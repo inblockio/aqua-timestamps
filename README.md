@@ -120,8 +120,13 @@ cargo test --workspace
 
 ```sh
 cp config.toml.example config.toml
+# The mnemonic is required from M1 on; it never lives in config.toml.
+# In production it comes from the gnome-keyring via the .env on the
+# server; for local dev, a test mnemonic is fine.
+export AQUA_TIMESTAMP_ANCHOR_MNEMONIC="test test test test test test test test test test test junk"
 cargo run --bin aqua-timestamp -- --config config.toml
 # http://127.0.0.1:8080/health
+# http://127.0.0.1:8080/.well-known/aqua-identity
 ```
 
 ### Docker build
@@ -155,7 +160,7 @@ buildx there, `docker compose up -d` against
 | Milestone | State |
 |---|---|
 | **M0** Skeleton on the wire | shipped 2026-05-17 (`https://timestamp.inblock.io/health` live) |
-| M1 Identity + SIWE auth | in progress |
+| **M1** Identity + SIWE auth | shipped 2026-05-17 |
 | M2 Accumulate + seal | pending |
 | M3 Witness revisions | pending |
 | M-E2E Live roundtrip | pending |

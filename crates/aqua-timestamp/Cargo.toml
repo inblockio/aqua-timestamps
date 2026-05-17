@@ -6,6 +6,10 @@ license     = { workspace = true }
 repository  = { workspace = true }
 description = "Aqua Aggregator: batches revision hashes and dual-anchors them per epoch."
 
+[lib]
+name = "aqua_timestamp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aqua-timestamp"
 path = "src/main.rs"
@@ -37,3 +41,9 @@ hex                = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
+tokio   = { workspace = true }
+serde_json = { workspace = true }
+tower   = { workspace = true, features = ["util"] }
+sha3    = { workspace = true }
+hex     = { workspace = true }
+k256    = { version = "0.13", features = ["ecdsa"] }

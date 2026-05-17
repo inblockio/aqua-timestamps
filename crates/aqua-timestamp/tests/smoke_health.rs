@@ -30,6 +30,11 @@ async fn wait_for(url: &str, attempts: u32) -> Option<reqwest::Response> {
     None
 }
 
+/// Well-known Hardhat test mnemonic. Address derived at `m/44'/60'/0'/0/0`
+/// is `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`. Never used in
+/// production; never funded.
+const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
 #[tokio::test]
 async fn smoke_health_and_landing() {
     let root = workspace_root();
@@ -37,7 +42,13 @@ async fn smoke_health_and_landing() {
     let cfg_path = std::env::temp_dir().join(format!("aqua-timestamp-{port}.toml"));
     std::fs::write(
         &cfg_path,
-        format!("[server]\nlisten = \"127.0.0.1:{port}\"\n"),
+        format!(
+            "[server]\nlisten = \"127.0.0.1:{port}\"\n\
+             [identity]\nchain_id = 1\ntrust_domain = \"timestamp\"\n\
+             dns = \"timestamp.test\"\nip = \"127.0.0.1\"\n\
+             [auth]\nchallenge_ttl_secs = 60\nsession_ttl_secs = 600\n\
+             allowed_dids = []\n"
+        ),
     )
     .unwrap();
 
@@ -50,6 +61,7 @@ async fn smoke_health_and_landing() {
 
     let mut child = Command::new(&bin)
         .args(["--config", cfg_path.to_str().unwrap()])
+        .env("AQUA_TIMESTAMP_ANCHOR_MNEMONIC", TEST_MNEMONIC)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
