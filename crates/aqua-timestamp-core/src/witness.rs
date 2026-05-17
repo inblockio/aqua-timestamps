@@ -173,6 +173,30 @@ impl MethodAnchorOutcome {
             tsa_provider: String::new(),
         }
     }
+
+    /// Build a qTSA outcome from a [`TimestampValue`] returned by a live
+    /// RFC 3161 provider (the SDK's `TsaTimestamper`). The TSA value carries
+    /// the response identifier in `transaction_hash`, the publisher name
+    /// in `tsa_provider`, and the request URL in `smart_contract_address`
+    /// (the SDK overloads this field as the TSA endpoint). The SDK leaves
+    /// `sender_account_address` empty; the `TsaTimestampPayload` schema
+    /// (`aqua-rs-sdk/src/schema/timestamp.rs`) requires it non-empty, so
+    /// we fall back to the configured `network_label` for parity with
+    /// what the EVM path puts in its sender slot.
+    pub fn from_tsa_timestamp_value(value: &TimestampValue) -> Self {
+        let sender = if value.sender_account_address.is_empty() {
+            value.tsa_provider.clone()
+        } else {
+            value.sender_account_address.clone()
+        };
+        Self {
+            transaction_hash: value.transaction_hash.clone(),
+            sender_account_address: sender,
+            smart_contract_address: value.smart_contract_address.clone(),
+            network: value.network.clone(),
+            tsa_provider: value.tsa_provider.clone(),
+        }
+    }
 }
 
 /// One (TimestampObject, Signature) pair produced by the minter, plus the

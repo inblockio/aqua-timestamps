@@ -12,7 +12,7 @@ pub mod state;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use aqua_rs_sdk::{CliEthTimestamper, Secp256k1Signer};
+use aqua_rs_sdk::{web::tsa::TsaTimestamper, CliEthTimestamper, Secp256k1Signer};
 use aqua_timestamp_core::{
     accumulator::Accumulator,
     anchors::AnchorProvider,
@@ -137,6 +137,26 @@ pub async fn build_app(
         info!("evm anchor disabled: minting stub witnesses for evm method");
         None
     };
+    // M5: parallel wiring for qTSA. Same shape as EVM, just a different
+    // SDK provider. `TsaTimestamper::new(url, Some(duration))` honours
+    // the rate-limit guidance the SDK's own docstring gives for
+    // eIDAS-qualified endpoints; `None` disables the throttle.
+    let qtsa_anchor_cfg = cfg.anchors.qtsa.clone();
+    let qtsa_anchor: Option<Arc<dyn AnchorProvider>> = if qtsa_anchor_cfg.enabled {
+        info!(
+            url = %qtsa_anchor_cfg.url,
+            min_request_interval_secs = qtsa_anchor_cfg.min_request_interval_secs,
+            network_label = %qtsa_anchor_cfg.network_label,
+            "qtsa anchor enabled (TsaTimestamper)"
+        );
+        let timestamper =
+            TsaTimestamper::new(qtsa_anchor_cfg.url.clone(), qtsa_anchor_cfg.throttle());
+        Some(Arc::new(timestamper) as Arc<dyn AnchorProvider>)
+    } else {
+        info!("qtsa anchor disabled: minting stub witnesses for qtsa method");
+        None
+    };
+
     let mut witness_ctx = WitnessContext::new(
         Arc::clone(&signer),
         format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
@@ -145,6 +165,9 @@ pub async fn build_app(
     );
     if let Some(anchor) = evm_anchor {
         witness_ctx = witness_ctx.with_evm_anchor(anchor);
+    }
+    if let Some(anchor) = qtsa_anchor {
+        witness_ctx = witness_ctx.with_qtsa_anchor(anchor);
     }
 
     // Spawn the seal task.

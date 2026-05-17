@@ -146,6 +146,8 @@ impl Default for AnchorConfig {
 pub struct AnchorsConfig {
     #[serde(default)]
     pub evm: EvmAnchorConfig,
+    #[serde(default)]
+    pub qtsa: QtsaAnchorConfig,
 }
 
 /// `[anchors.evm]`. Every field has a default so an M3 config without the
@@ -195,6 +197,75 @@ impl Default for EvmAnchorConfig {
             rpc_url: default_evm_rpc_url(),
             chain: default_evm_chain(),
             network_label: default_evm_network(),
+        }
+    }
+}
+
+/// `[anchors.qtsa]`. Defaults to the operator's Sectigo-qualified
+/// endpoint with the 16-second throttle the SDK's docstring recommends
+/// for that provider. A free standard TSA (`http://timestamp.digicert.com`,
+/// `min_request_interval_secs = 0`) is the simplest M5 alternative.
+#[derive(Debug, Deserialize, Clone)]
+pub struct QtsaAnchorConfig {
+    /// Live anchor toggle. `true` (default) constructs an
+    /// [`aqua_rs_sdk::web::tsa::TsaTimestamper`] at boot. `false` keeps
+    /// the M3/M4 stub: qTSA witnesses are minted with zero
+    /// `transaction_hash` and `tsa_provider = "stub"`.
+    #[serde(default = "default_qtsa_enabled")]
+    pub enabled: bool,
+
+    /// RFC 3161 TSA endpoint. Eg.
+    /// `http://timestamp.sectigo.com/qualified` (eIDAS-qualified) or
+    /// `http://timestamp.digicert.com` (standard, no auth).
+    #[serde(default = "default_qtsa_url")]
+    pub url: String,
+
+    /// Minimum spacing between requests, in seconds. The SDK's docstring
+    /// recommends 16 for Sectigo qualified (and any eIDAS-qualified
+    /// endpoint with similar rate-limit guidance). `0` disables the
+    /// throttle entirely (suitable for free standard TSAs like DigiCert).
+    #[serde(default = "default_qtsa_min_request_interval_secs")]
+    pub min_request_interval_secs: u64,
+
+    /// Free-form network label the witness payload's `network` field
+    /// carries. Sectigo-qualified deployments use
+    /// `"sectigo-qualified-tsa"`; a free standard TSA might pick `"tsa"`.
+    #[serde(default = "default_qtsa_network_label")]
+    pub network_label: String,
+}
+
+fn default_qtsa_enabled() -> bool {
+    true
+}
+fn default_qtsa_url() -> String {
+    "http://timestamp.sectigo.com/qualified".to_string()
+}
+fn default_qtsa_min_request_interval_secs() -> u64 {
+    16
+}
+fn default_qtsa_network_label() -> String {
+    "sectigo-qualified-tsa".to_string()
+}
+
+impl Default for QtsaAnchorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_qtsa_enabled(),
+            url: default_qtsa_url(),
+            min_request_interval_secs: default_qtsa_min_request_interval_secs(),
+            network_label: default_qtsa_network_label(),
+        }
+    }
+}
+
+impl QtsaAnchorConfig {
+    pub fn throttle(&self) -> Option<std::time::Duration> {
+        if self.min_request_interval_secs == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(
+                self.min_request_interval_secs,
+            ))
         }
     }
 }

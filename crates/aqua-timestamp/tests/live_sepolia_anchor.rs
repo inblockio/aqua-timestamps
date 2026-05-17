@@ -30,7 +30,7 @@ use aqua_timestamp::{
     build_app,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
-        IdentityConfig, ServerConfig, StorageConfig,
+        IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -79,6 +79,12 @@ fn cfg(allow: Vec<String>, storage: PathBuf) -> Config {
                 rpc_url: SEPOLIA_RPC.to_string(),
                 chain: "sepolia".to_string(),
                 network_label: "sepolia".to_string(),
+            },
+            // The Sepolia anchor test exercises only the EVM path; leave
+            // qTSA off so the test does not depend on Sectigo reachability.
+            qtsa: QtsaAnchorConfig {
+                enabled: false,
+                ..QtsaAnchorConfig::default()
             },
         },
     }

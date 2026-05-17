@@ -11,7 +11,7 @@ use aqua_timestamp::{
     build_app,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
-        IdentityConfig, ServerConfig, StorageConfig,
+        IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -58,6 +58,10 @@ fn service_config(allowed_dids: Vec<String>, storage_path: std::path::PathBuf) -
             evm: EvmAnchorConfig {
                 enabled: false,
                 ..EvmAnchorConfig::default()
+            },
+            qtsa: QtsaAnchorConfig {
+                enabled: false,
+                ..QtsaAnchorConfig::default()
             },
         },
     }

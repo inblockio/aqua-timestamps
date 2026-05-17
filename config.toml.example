@@ -47,3 +47,23 @@ chain         = "sepolia"
 # `chain`. Kept separate so `custom:<id>` setups can still surface a
 # human-readable name in witnesses.
 network_label = "sepolia"
+
+[anchors.qtsa]
+# Live qTSA toggle. `true` constructs an `aqua-rs-sdk`
+# `TsaTimestamper` at boot and submits one RFC 3161 request per
+# non-empty epoch. `false` mints stub qTSA witnesses
+# (`transaction_hash = 0x...000`, `tsa_provider = "stub"`).
+enabled                  = true
+# RFC 3161 TSA endpoint. Examples:
+#   eIDAS-qualified : http://timestamp.sectigo.com/qualified
+#                     http://timestamp.dtrust.de
+#                     http://qts.identrust.com
+#   free standard   : http://timestamp.digicert.com
+#                     http://timestamp.sectigo.com
+url                      = "http://timestamp.sectigo.com/qualified"
+# Minimum spacing between requests. Sectigo's qualified endpoint asks
+# for 16s. Set to 0 for free standard TSAs (no throttle).
+min_request_interval_secs = 16
+# `network` field embedded in the qTSA witness payload. Free-form;
+# distinguishes which TSA provider produced the witness.
+network_label            = "sectigo-qualified-tsa"

@@ -24,3 +24,9 @@ enabled       = true
 rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
 chain         = "sepolia"
 network_label = "sepolia"
+
+[anchors.qtsa]
+enabled                  = true
+url                      = "http://timestamp.sectigo.com/qualified"
+min_request_interval_secs = 16
+network_label            = "sectigo-qualified-tsa"

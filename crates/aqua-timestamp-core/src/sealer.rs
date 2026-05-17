@@ -194,14 +194,52 @@ async fn resolve_method_outcomes(
                 resolve_evm_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
             }
             AnchorMethod::Qtsa => {
-                // qTSA stays stubbed until M5; the live provider slot is
-                // wired for symmetry only and ignored on the seal path.
-                MethodAnchorOutcome::stub_qtsa()
+                resolve_qtsa_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
             }
         };
         out.push((*method, outcome));
     }
     out
+}
+
+async fn resolve_qtsa_outcome(
+    ctx: &WitnessContext,
+    epoch_id: u64,
+    merkle_root_hex: &str,
+    snapshot: &SealedSnapshot,
+) -> MethodAnchorOutcome {
+    let stub = MethodAnchorOutcome::stub_qtsa;
+    let Some(anchor) = ctx.qtsa_anchor.as_ref() else {
+        return stub();
+    };
+    // Same guard as EVM: empty epoch never triggers a live RFC 3161
+    // request even if a provider is attached.
+    if snapshot.leaves.is_empty() {
+        return stub();
+    }
+    match anchor.create_timestamp(merkle_root_hex).await {
+        Ok(value) => {
+            info!(
+                epoch_id,
+                merkle_root_hex,
+                tx_hash = %value.transaction_hash,
+                tsa_provider = %value.tsa_provider,
+                tsa_url = %value.smart_contract_address,
+                gen_time = value.timestamp,
+                "qtsa anchor submitted"
+            );
+            MethodAnchorOutcome::from_tsa_timestamp_value(&value)
+        }
+        Err(e) => {
+            warn!(
+                epoch_id,
+                merkle_root_hex,
+                error = %e,
+                "qtsa anchor failed, falling back to stub"
+            );
+            stub()
+        }
+    }
 }
 
 async fn resolve_evm_outcome(
@@ -492,6 +530,132 @@ mod tests {
         assert_eq!(rec.leaf_count, 0);
         assert!(witnesses.is_empty());
         assert_eq!(n.load(Ordering::SeqCst), 0, "no anchor call on empty epoch");
+    }
+
+    fn canned_tsa_value() -> TimestampValue {
+        TimestampValue {
+            merkle_proof: vec![],
+            sender_account_address: String::new(),
+            tsa_provider: "Sectigo Limited".into(),
+            transaction_hash: "0xfee1de1efee1de1efee1de1efee1de1efee1de1efee1de1efee1de1efee1de1e"
+                .into(),
+            smart_contract_address: "http://timestamp.sectigo.com/qualified".into(),
+            network: "tsa".into(),
+            merkle_root: "0x00".into(),
+            timestamp: 1779010800,
+            batch_tree_size: 1,
+            batch_leaf_index: 0,
+        }
+    }
+
+    fn extract_qtsa_payloads(witnesses: &[MintedWitness]) -> Vec<serde_json::Value> {
+        witnesses
+            .iter()
+            .filter(|w| w.method == AnchorMethod::Qtsa)
+            .filter_map(|w| match &w.object_revision {
+                AnyRevision::Typed(obj) => {
+                    let value = serde_json::to_value(obj).unwrap();
+                    value.get("payloads").cloned()
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn happy_path_live_qtsa_anchor_populates_payloads() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Accumulator::new(1, 0, 60);
+        acc.append_batch(&[[1u8; 32]], DID_A);
+        let signer = build_signer().await;
+        let mock: Arc<dyn AnchorProvider> = Arc::new(MockProvider {
+            value: canned_tsa_value(),
+        });
+        let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&mock));
+        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
+        assert_eq!(qtsa_payloads.len(), 1);
+        let p = &qtsa_payloads[0];
+        assert_eq!(
+            p["transaction_hash"].as_str().unwrap(),
+            "0xfee1de1efee1de1efee1de1efee1de1efee1de1efee1de1efee1de1efee1de1e"
+        );
+        assert_eq!(p["tsa_provider"].as_str().unwrap(), "Sectigo Limited");
+    }
+
+    #[tokio::test]
+    async fn fall_back_path_failing_qtsa_does_not_fail_seal() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Accumulator::new(1, 0, 60);
+        acc.append_batch(&[[2u8; 32]], DID_A);
+        let signer = build_signer().await;
+        let failing: Arc<dyn AnchorProvider> = Arc::new(FailingProvider {
+            message: "tsa unreachable".into(),
+        });
+        let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&failing));
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        assert_eq!(rec.leaf_count, 1);
+        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
+        assert_eq!(qtsa_payloads.len(), 1);
+        let p = &qtsa_payloads[0];
+        assert_eq!(
+            p["transaction_hash"].as_str().unwrap(),
+            format!("0x{}", "0".repeat(64))
+        );
+        assert_eq!(p["tsa_provider"].as_str().unwrap(), "stub");
+    }
+
+    #[tokio::test]
+    async fn disabled_path_no_qtsa_provider_uses_stub() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Accumulator::new(1, 0, 60);
+        acc.append_batch(&[[3u8; 32]], DID_A);
+        let signer = build_signer().await;
+        let ctx = base_ctx(signer);
+        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
+        assert_eq!(qtsa_payloads.len(), 1);
+        assert_eq!(
+            qtsa_payloads[0]["transaction_hash"].as_str().unwrap(),
+            format!("0x{}", "0".repeat(64))
+        );
+        assert_eq!(qtsa_payloads[0]["tsa_provider"].as_str().unwrap(), "stub");
+    }
+
+    #[tokio::test]
+    async fn empty_epoch_skips_qtsa_anchor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting {
+            n: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AnchorProvider for Counting {
+            async fn create_timestamp(
+                &self,
+                _root: &str,
+            ) -> Result<TimestampValue, crate::anchors::AnchorError> {
+                self.n.fetch_add(1, Ordering::SeqCst);
+                Ok(canned_tsa_value())
+            }
+        }
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Accumulator::new(1, 0, 60);
+        let signer = build_signer().await;
+        let n = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn AnchorProvider> = Arc::new(Counting { n: Arc::clone(&n) });
+        let ctx = base_ctx(signer).with_qtsa_anchor(provider);
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        assert_eq!(rec.leaf_count, 0);
+        assert!(witnesses.is_empty());
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            0,
+            "no qtsa request on empty epoch"
+        );
     }
 
     #[tokio::test]
