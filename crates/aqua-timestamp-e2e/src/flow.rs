@@ -720,6 +720,187 @@ pub async fn run_full_flow(
         &format!("L3 ok: EIP-191 signature recovers to {recovered} (== server_did address)"),
     );
 
+    // ── 9d. qTSA witness retrieval + verification ────────────────────────
+    //
+    // Same shape as the EVM path: fetch `/trees/by-leaf/{leaf}?method=qtsa`,
+    // assert L1 (revision rehash), L2 (Merkle proof against the same root),
+    // L3 (signature recovers to the same server address). Only the
+    // TimestampObject payload differs (network = sectigo-qualified-tsa,
+    // tsa_provider = the TSA publisher, transaction_hash = the RFC 3161
+    // TimeStampResp base64). A 404 here doesn't fail the run (qTSA may be
+    // disabled in a given deployment); the fields are checked only when
+    // present.
+    let by_leaf_qtsa_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=qtsa");
+    let resp_q = http_get(&client, &by_leaf_qtsa_url, Some(&token_primary)).await?;
+    if resp_q.status() == StatusCode::NOT_FOUND {
+        log(
+            9,
+            "qTSA witness not present for this epoch (skipping qtsa verification)",
+        );
+    } else if !resp_q.status().is_success() {
+        let s = resp_q.status();
+        let b = resp_q.text().await.unwrap_or_default();
+        bail!("GET /trees/by-leaf?method=qtsa: HTTP {s} body={b}");
+    } else {
+        let qtsa_tree_value: Value = resp_q.json().await.context("qtsa tree json")?;
+        let _qtsa_tree: Tree = serde_json::from_value(qtsa_tree_value.clone())
+            .context("qtsa tree deserialises to SDK Tree")?;
+        let qtsa_revisions = qtsa_tree_value
+            .get("revisions")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("qtsa tree.revisions missing"))?;
+        if qtsa_revisions.len() != 2 {
+            bail!(
+                "qtsa witness should have 2 revisions, got {}",
+                qtsa_revisions.len()
+            );
+        }
+
+        // L1
+        for (declared_hash, rev_value) in qtsa_revisions {
+            let rev: AnyRevision = serde_json::from_value(rev_value.clone())?;
+            let computed = match &rev {
+                AnyRevision::Typed(obj) => aqua_rs_sdk::verification::Linkable::calculate_link(obj),
+                AnyRevision::Signature(sig) => {
+                    aqua_rs_sdk::verification::Linkable::calculate_link(sig)
+                }
+                AnyRevision::Template(t) => aqua_rs_sdk::verification::Linkable::calculate_link(t),
+                AnyRevision::Anchor(a) => aqua_rs_sdk::verification::Linkable::calculate_link(a),
+            }
+            .map_err(|e| anyhow!("calculate_link({declared_hash}): {e:?}"))?;
+            let computed_hex = format!("0x{}", hex::encode(computed.as_ref()));
+            if !computed_hex.eq_ignore_ascii_case(declared_hash) {
+                bail!("qtsa L1: rev {declared_hash} re-hashes to {computed_hex}");
+            }
+        }
+        log(
+            9,
+            "qtsa L1 ok: every revision JSON re-hashes to its declared link",
+        );
+
+        // L2 + L3
+        let mut q_obj: Option<&Value> = None;
+        let mut q_sig: Option<&Value> = None;
+        let mut q_obj_hash: Option<String> = None;
+        for (h, v) in qtsa_revisions {
+            let rev: AnyRevision = serde_json::from_value(v.clone())?;
+            match rev {
+                AnyRevision::Typed(_) => {
+                    q_obj = Some(v);
+                    q_obj_hash = Some(h.clone());
+                }
+                AnyRevision::Signature(_) => {
+                    q_sig = Some(v);
+                }
+                _ => {}
+            }
+        }
+        let q_obj = q_obj.ok_or_else(|| anyhow!("qtsa witness missing TimestampObject"))?;
+        let q_sig = q_sig.ok_or_else(|| anyhow!("qtsa witness missing Signature"))?;
+
+        let q_payloads = q_obj
+            .get("payloads")
+            .ok_or_else(|| anyhow!("qtsa payloads missing"))?;
+        let q_root_hex = q_payloads
+            .get("merkle_root")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("qtsa merkle_root missing"))?
+            .to_string();
+        let q_root = parse_hex32(&q_root_hex)?;
+        let q_size = q_payloads
+            .get("batch_tree_size")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("qtsa batch_tree_size missing"))? as usize;
+        let q_idx = q_payloads
+            .get("batch_leaf_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("qtsa batch_leaf_index missing"))? as usize;
+        let q_proof_arr = q_payloads
+            .get("merkle_proof")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("qtsa merkle_proof missing"))?;
+        let q_proof: Result<Vec<Vec<u8>>> = q_proof_arr
+            .iter()
+            .map(|v| {
+                Ok(parse_hex32(
+                    v.as_str()
+                        .ok_or_else(|| anyhow!("non-string proof entry"))?,
+                )?
+                .to_vec())
+            })
+            .collect();
+        let q_proof = q_proof?;
+        let q_ok = verify_inclusion(
+            &leaf_bytes,
+            q_idx,
+            q_size,
+            &q_proof,
+            &q_root,
+            &HashType::Sha3_256,
+        );
+        if !q_ok {
+            bail!("qtsa L2: inclusion proof failed against {q_root_hex}");
+        }
+        let q_prev = q_obj
+            .get("previous_revision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("qtsa previous_revision missing"))?;
+        if !q_prev.eq_ignore_ascii_case(&leaf_hex) {
+            bail!("qtsa L2: previous_revision {q_prev} != leaf {leaf_hex}");
+        }
+        log(
+            9,
+            &format!(
+                "qtsa L2 ok: inclusion proof verifies (root={q_root_hex}, idx={q_idx}, size={q_size})"
+            ),
+        );
+
+        let q_recovered = verify_signature_revision(q_sig)?;
+        if !q_recovered.eq_ignore_ascii_case(&server_addr) {
+            bail!("qtsa L3: recovered {q_recovered} != server addr {server_addr}");
+        }
+        let q_sig_prev = q_sig
+            .get("previous_revision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("qtsa sig previous_revision missing"))?;
+        let q_obj_hash = q_obj_hash.unwrap();
+        if !q_sig_prev.eq_ignore_ascii_case(&q_obj_hash) {
+            bail!("qtsa L3: sig prev {q_sig_prev} != obj hash {q_obj_hash}");
+        }
+        log(
+            9,
+            &format!("qtsa L3 ok: EIP-191 signature recovers to {q_recovered}"),
+        );
+
+        // Surface the qTSA-specific payload fields so the transcript shows
+        // the RFC 3161 evidence the operator's eIDAS-qualified provider
+        // returned: who signed (publisher), what TSA URL produced it, and
+        // when the qualified TSA's `genTime` stamped the root.
+        let tsa_provider = q_payloads
+            .get("tsa_provider")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let tsa_url = q_payloads
+            .get("smart_contract_address")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let tsa_time = q_payloads
+            .get("timestamp")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let tsa_tx_len = q_payloads
+            .get("transaction_hash")
+            .and_then(Value::as_str)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        log(
+            9,
+            &format!(
+                "qtsa payload: provider={tsa_provider} url={tsa_url} gen_time={tsa_time} response_bytes={tsa_tx_len}"
+            ),
+        );
+    }
+
     // ── 10a. Negative: a *different* DID's token is 403 on this leaf. ────
     let secondary = ClientKey::random(SignatureMethod::Secp256k1Eip191)?;
     let token_secondary = mint_bearer(&client, base_url, &secondary).await?;
