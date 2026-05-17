@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use aqua_timestamp::{
     build_app,
     config::{
-        AnchorConfig, AuthConfig, Config, EpochConfig, IdentityConfig, ServerConfig, StorageConfig,
+        AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
+        IdentityConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -123,7 +124,13 @@ async fn build_in_process(
             duration_secs: 60,
             max_leaves_per_request: 10_000,
         },
-        anchor: AnchorConfig::default(),
+        anchor_legacy: AnchorConfig::default(),
+        anchors: AnchorsConfig {
+            evm: EvmAnchorConfig {
+                enabled: false,
+                ..EvmAnchorConfig::default()
+            },
+        },
     };
 
     let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
