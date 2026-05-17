@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use aqua_timestamp::{
     build_app, config,
     identity::{IdentityClaimOverrides, ServiceIdentity},
+    SealDriver,
 };
 use clap::Parser;
 use tracing::info;
@@ -40,7 +41,13 @@ async fn main() -> Result<()> {
         "service identity loaded"
     );
 
-    let (app, _state) = build_app(cfg, identity, IdentityClaimOverrides::default()).await?;
+    let (app, _state) = build_app(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Interval,
+    )
+    .await?;
 
     info!(%addr, "aqua-timestamp starting");
 

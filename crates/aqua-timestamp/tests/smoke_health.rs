@@ -40,6 +40,9 @@ async fn smoke_health_and_landing() {
     let root = workspace_root();
     let port = free_port();
     let cfg_path = std::env::temp_dir().join(format!("aqua-timestamp-{port}.toml"));
+    let state_path = std::env::temp_dir().join(format!("aqua-timestamp-{port}-state"));
+    let _ = std::fs::remove_dir_all(&state_path);
+    let state_str = state_path.to_string_lossy().replace('\\', "/");
     std::fs::write(
         &cfg_path,
         format!(
@@ -47,7 +50,9 @@ async fn smoke_health_and_landing() {
              [identity]\nchain_id = 1\ntrust_domain = \"timestamp\"\n\
              dns = \"timestamp.test\"\nip = \"127.0.0.1\"\n\
              [auth]\nchallenge_ttl_secs = 60\nsession_ttl_secs = 600\n\
-             allowed_dids = []\n"
+             allowed_dids = []\n\
+             [storage]\npath = \"{state_str}\"\n\
+             [epoch]\nduration_secs = 600\nmax_leaves_per_request = 10000\n"
         ),
     )
     .unwrap();
@@ -93,4 +98,5 @@ async fn smoke_health_and_landing() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_dir_all(&state_path);
 }

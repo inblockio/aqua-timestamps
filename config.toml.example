@@ -17,3 +17,17 @@ session_ttl_secs   = 3600
 allowed_dids = [
   # "did:pkh:eip155:1:0x0000000000000000000000000000000000000000",
 ]
+
+[storage]
+# Directory the fjall keyspace lives in. Created on first start. In Docker
+# this is the named volume mounted from `deploy/docker-compose.yml`.
+path = "/var/lib/aqua-timestamp/state"
+
+[epoch]
+# Wall-clock duration of one accumulation window before the seal task
+# fires. 600s (10 min) matches the design-spec target. Lower values are
+# useful when running locally against a faucet.
+duration_secs = 600
+# Hard cap on the leaves array in a single `POST /v1/leaves`. Requests
+# above this are rejected with 400.
+max_leaves_per_request = 10000

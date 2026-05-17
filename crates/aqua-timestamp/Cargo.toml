@@ -38,6 +38,7 @@ thiserror          = { workspace = true }
 
 chrono             = { workspace = true }
 hex                = { workspace = true }
+fjall              = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
@@ -47,3 +48,5 @@ tower   = { workspace = true, features = ["util"] }
 sha3    = { workspace = true }
 hex     = { workspace = true }
 k256    = { version = "0.13", features = ["ecdsa"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }

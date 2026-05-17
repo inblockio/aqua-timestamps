@@ -17,3 +17,11 @@ sha3       = { workspace = true }
 thiserror  = { workspace = true }
 chrono     = { workspace = true }
 tracing    = { workspace = true }
+
+fjall    = { workspace = true }
+postcard = { workspace = true }
+tokio    = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

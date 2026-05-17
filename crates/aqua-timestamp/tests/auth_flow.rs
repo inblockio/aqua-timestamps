@@ -9,8 +9,9 @@
 
 use aqua_timestamp::{
     build_app,
-    config::{AuthConfig, Config, IdentityConfig, ServerConfig},
+    config::{AuthConfig, Config, EpochConfig, IdentityConfig, ServerConfig, StorageConfig},
     identity::{IdentityClaimOverrides, ServiceIdentity},
+    SealDriver,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -18,6 +19,7 @@ use axum::{
 };
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
+use tempfile::TempDir;
 use tower::ServiceExt;
 
 /// Hardhat test mnemonic.
@@ -27,7 +29,7 @@ const TEST_MNEMONIC: &str = "test test test test test test test test test test t
 const TEST_PRIVATE_KEY_HEX: &str =
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-fn service_config(allowed_dids: Vec<String>) -> Config {
+fn service_config(allowed_dids: Vec<String>, storage_path: std::path::PathBuf) -> Config {
     Config {
         server: ServerConfig {
             listen: "127.0.0.1:0".into(),
@@ -43,18 +45,29 @@ fn service_config(allowed_dids: Vec<String>) -> Config {
             session_ttl_secs: 600,
             allowed_dids,
         },
+        storage: StorageConfig { path: storage_path },
+        epoch: EpochConfig {
+            duration_secs: 600,
+            max_leaves_per_request: 10_000,
+        },
     }
 }
 
-async fn build(allowed: Vec<String>) -> axum::Router {
-    let cfg = service_config(allowed);
+async fn build(allowed: Vec<String>) -> (axum::Router, TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = service_config(allowed, tmp.path().to_path_buf());
     let identity = ServiceIdentity::from_mnemonic(TEST_MNEMONIC, &cfg.identity)
         .await
         .expect("identity");
-    let (router, _state) = build_app(cfg, identity, IdentityClaimOverrides::default())
-        .await
-        .expect("build_app");
-    router
+    let (router, _state) = build_app(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Off,
+    )
+    .await
+    .expect("build_app");
+    (router, tmp)
 }
 
 fn eip191_sign(message: &str, private_key_hex: &str) -> Vec<u8> {
@@ -86,7 +99,7 @@ async fn read_body(resp: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn full_auth_dance() {
-    let router = build(vec![CLIENT_DID.to_string()]).await;
+    let (router, _tmp) = build(vec![CLIENT_DID.to_string()]).await;
 
     // 1. challenge
     let req = Request::builder()
@@ -127,21 +140,27 @@ async fn full_auth_dance() {
     assert!(body["valid_until"].is_number());
     assert!(body["created_at"].is_number());
 
-    // 3. protected route, no auth → 401
+    // 3. protected route, no auth: bearer is the first extractor so a
+    //    request with no auth header is rejected before the JSON body
+    //    is inspected.
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/leaves")
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"leaves":["0x11"]}"#))
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-    // 4. protected route, valid bearer → 202
+    // 4. protected route, valid bearer + valid batch → 202.
+    let leaf = format!("0x{}", "11".repeat(32));
+    let payload = serde_json::json!({ "leaves": [leaf] }).to_string();
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/leaves")
         .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(payload))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -150,7 +169,7 @@ async fn full_auth_dance() {
 #[tokio::test]
 async fn non_allowlisted_did_is_forbidden() {
     let other_did = "did:pkh:eip155:1:0x0000000000000000000000000000000000000001";
-    let router = build(vec![other_did.to_string()]).await;
+    let (router, _tmp) = build(vec![other_did.to_string()]).await;
 
     // Get challenge for client DID.
     let req = Request::builder()
@@ -181,11 +200,14 @@ async fn non_allowlisted_did_is_forbidden() {
     let body = read_body(resp).await;
     let token = body["token"].as_str().unwrap().to_string();
 
+    let leaf = format!("0x{}", "22".repeat(32));
+    let payload = serde_json::json!({ "leaves": [leaf] }).to_string();
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/leaves")
         .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(payload))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -193,12 +215,13 @@ async fn non_allowlisted_did_is_forbidden() {
 
 #[tokio::test]
 async fn bad_bearer_is_rejected() {
-    let router = build(vec![]).await;
+    let (router, _tmp) = build(vec![]).await;
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/leaves")
         .header("authorization", "Bearer not-a-real-token")
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"leaves":[]}"#))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

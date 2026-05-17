@@ -1,7 +1,15 @@
 //! aqua-timestamp-core: shared types and primitives for the aggregator.
 //!
-//! M0 carries only the marker module so the workspace resolves; epoch,
-//! accumulator, witness-minter, and store modules land in M2/M3.
+//! M0 carried only the marker module; M2 fills in the accumulator, the
+//! epoch sealer, and the fjall-backed storage. Witness minting and the
+//! aqua-node-compatible tree shapes land in M3.
+
+pub mod accumulator;
+pub mod epoch;
+pub mod merkle;
+pub mod sealer;
+pub mod storage;
+pub mod time;
 
 pub mod version {
     pub const PROTOCOL: &str = "aqua";

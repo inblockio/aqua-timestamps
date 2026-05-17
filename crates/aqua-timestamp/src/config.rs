@@ -5,7 +5,7 @@
 //! key material never sits next to anything that might end up in version
 //! control or a container image.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -17,6 +17,10 @@ pub struct Config {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub epoch: EpochConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -69,6 +73,29 @@ pub struct AuthConfig {
     pub allowed_dids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    /// Directory the fjall keyspace lives in. Created on first start.
+    /// In Docker this should be a named volume; the deploy default
+    /// mirrors `/var/lib/aqua-timestamp/state`.
+    #[serde(default = "default_storage_path")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EpochConfig {
+    /// How long a single accumulator window is open before the seal task
+    /// fires. Default 600s (10 min) matches the design-spec target.
+    #[serde(default = "default_epoch_duration")]
+    pub duration_secs: u64,
+
+    /// Hard cap on leaves per submission. The aggregator returns 400 for
+    /// requests above this; M3 will rely on this bound when sizing the
+    /// per-batch witness work.
+    #[serde(default = "default_max_leaves_per_request")]
+    pub max_leaves_per_request: usize,
+}
+
 fn default_chain_id() -> u64 {
     1
 }
@@ -86,6 +113,15 @@ fn default_challenge_ttl() -> u64 {
 }
 fn default_session_ttl() -> u64 {
     3600
+}
+fn default_storage_path() -> PathBuf {
+    PathBuf::from("/var/lib/aqua-timestamp/state")
+}
+fn default_epoch_duration() -> u64 {
+    600
+}
+fn default_max_leaves_per_request() -> usize {
+    10_000
 }
 
 impl Default for IdentityConfig {
@@ -105,6 +141,23 @@ impl Default for AuthConfig {
             challenge_ttl_secs: default_challenge_ttl(),
             session_ttl_secs: default_session_ttl(),
             allowed_dids: Vec::new(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: default_storage_path(),
+        }
+    }
+}
+
+impl Default for EpochConfig {
+    fn default() -> Self {
+        Self {
+            duration_secs: default_epoch_duration(),
+            max_leaves_per_request: default_max_leaves_per_request(),
         }
     }
 }

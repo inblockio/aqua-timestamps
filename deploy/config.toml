@@ -11,3 +11,10 @@ ip           = "139.59.144.60"
 challenge_ttl_secs = 300
 session_ttl_secs   = 3600
 allowed_dids = []
+
+[storage]
+path = "/var/lib/aqua-timestamp/state"
+
+[epoch]
+duration_secs          = 600
+max_leaves_per_request = 10000

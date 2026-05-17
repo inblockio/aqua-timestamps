@@ -3,6 +3,7 @@
 use std::{sync::Arc, time::Instant};
 
 use aqua_auth::{ChallengeStore, SessionStore};
+use aqua_timestamp_core::{accumulator::Accumulator, storage::Store};
 
 use crate::{config::Config, identity::ServiceIdentity};
 
@@ -13,6 +14,8 @@ pub struct AppState {
     pub identity_response_json: serde_json::Value,
     pub challenges: Arc<ChallengeStore>,
     pub sessions: Arc<SessionStore>,
+    pub accumulator: Arc<Accumulator>,
+    pub store: Store,
 }
 
 impl AppState {
