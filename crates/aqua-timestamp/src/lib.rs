@@ -35,8 +35,9 @@ use crate::{
     config::Config,
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
-        aqua_identity, docs_page, docs_skill_md, get_tree_by_leaf, get_tree_by_tip, health,
-        landing_page, list_epochs, list_or_query_trees, not_found, schedule, submit_leaves,
+        aqua_identity, docs_page, get_tree_by_leaf, get_tree_by_tip, health, landing_page,
+        list_epochs, list_or_query_trees, not_found, schedule, submit_leaves,
+        well_known_skill_auth_md, well_known_skill_md,
     },
     state::AppState,
 };
@@ -195,7 +196,8 @@ pub async fn build_app(
     }
 
     let rendered_docs_html = docs::render_html(&identity);
-    let rendered_docs_skill_md = docs::render_skill_md(&identity);
+    let rendered_skill_md = docs::render_skill_md(&identity);
+    let rendered_skill_auth_md = docs::render_skill_auth_md(&identity);
 
     let state = Arc::new(AppState {
         started_at: std::time::Instant::now(),
@@ -209,14 +211,19 @@ pub async fn build_app(
         signer,
         witness_ctx,
         docs_html: rendered_docs_html,
-        docs_skill_md: rendered_docs_skill_md,
+        well_known_skill_md: rendered_skill_md,
+        well_known_skill_auth_md: rendered_skill_auth_md,
     });
 
     let router = Router::new()
         .route("/health", get(health))
         .route("/", get(landing_page))
         .route("/docs", get(docs_page))
-        .route("/docs/skill.md", get(docs_skill_md))
+        .route("/.well-known/aqua-skill.md", get(well_known_skill_md))
+        .route(
+            "/.well-known/aqua-skill-auth.md",
+            get(well_known_skill_auth_md),
+        )
         .route("/.well-known/aqua-identity", get(aqua_identity))
         .route("/auth/challenge", get(challenge))
         .route("/auth/session", post(session))

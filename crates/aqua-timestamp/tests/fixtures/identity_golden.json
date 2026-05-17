@@ -15,7 +15,8 @@
     "submit": "/v1/leaves",
     "verify": "/api/explorer/trees/{tip}/verify",
     "docs": "/docs",
-    "docs_skill": "/docs/skill.md"
+    "well_known_skill": "/.well-known/aqua-skill.md",
+    "well_known_skill_auth": "/.well-known/aqua-skill-auth.md"
   },
   "identity_claim": {
     "revisions": {

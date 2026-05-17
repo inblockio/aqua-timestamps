@@ -36,8 +36,10 @@ pub const HTML: &str = r##"<!doctype html>
     <strong>Integrating an agent or client?</strong> Read
     <a href="/docs"><code>/docs</code></a> (or fetch the same content as a
     machine-readable skill at
-    <a href="/docs/skill.md"><code>/docs/skill.md</code></a>). It covers
-    SIWE authentication for <code>eip155</code> / <code>ed25519</code> /
+    <a href="/.well-known/aqua-skill.md"><code>/.well-known/aqua-skill.md</code></a>,
+    with the SIWE auth deep-dive at
+    <a href="/.well-known/aqua-skill-auth.md"><code>/.well-known/aqua-skill-auth.md</code></a>).
+    Covers SIWE authentication for <code>eip155</code> / <code>ed25519</code> /
     <code>p256</code> DIDs, leaf submission, witness retrieval, and
     offline verification.
   </div>
@@ -56,7 +58,8 @@ pub const HTML: &str = r##"<!doctype html>
   <h2>Endpoints</h2>
   <ul>
     <li><a href="/docs"><code>GET /docs</code></a> — agent integration guide (HTML)</li>
-    <li><a href="/docs/skill.md"><code>GET /docs/skill.md</code></a> — agent integration guide (raw markdown)</li>
+    <li><a href="/.well-known/aqua-skill.md"><code>GET /.well-known/aqua-skill.md</code></a> — main agent skill (raw markdown)</li>
+    <li><a href="/.well-known/aqua-skill-auth.md"><code>GET /.well-known/aqua-skill-auth.md</code></a> — SIWE auth deep-dive (raw markdown)</li>
     <li><a href="/.well-known/aqua-identity"><code>GET /.well-known/aqua-identity</code></a> — service identity claim</li>
     <li><a href="/health"><code>GET /health</code></a> — health and uptime</li>
     <li><a href="/v1/schedule"><code>GET /v1/schedule</code></a> — current / last-sealed epoch</li>

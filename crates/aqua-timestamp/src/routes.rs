@@ -66,14 +66,26 @@ pub async fn docs_page(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-/// `GET /docs/skill.md` — raw markdown skill in the same shape Claude (and
-/// any other agent honoring the convention) consumes for
-/// `~/.claude/skills/<name>/SKILL.md`. Public, no auth.
-pub async fn docs_skill_md(State(state): State<Arc<AppState>>) -> Response {
+/// `GET /.well-known/aqua-skill.md` — main agent skill, in the same
+/// shape Claude (and any other agent honoring the convention) consumes
+/// for `~/.claude/skills/<name>/SKILL.md`. Public, no auth.
+pub async fn well_known_skill_md(State(state): State<Arc<AppState>>) -> Response {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        state.docs_skill_md.clone(),
+        state.well_known_skill_md.clone(),
+    )
+        .into_response()
+}
+
+/// `GET /.well-known/aqua-skill-auth.md` — SIWE / CAIP-122
+/// authentication deep-dive (sub-article). Linked from the main skill.
+/// Public, no auth.
+pub async fn well_known_skill_auth_md(State(state): State<Arc<AppState>>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        state.well_known_skill_auth_md.clone(),
     )
         .into_response()
 }

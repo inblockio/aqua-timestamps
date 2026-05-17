@@ -186,13 +186,18 @@ pub struct Endpoints {
     pub trees: String,
     pub submit: String,
     pub verify: String,
-    /// Browser-friendly agent integration guide. Mirrors the structure of
-    /// the markdown skill at [`docs_skill`].
+    /// Browser-friendly agent integration guide. Mirrors the structure
+    /// of the well-known skills below for humans.
     pub docs: String,
-    /// Machine-readable agent skill: same content as `docs`, in the
+    /// Machine-readable main agent skill in the
     /// `~/.claude/skills/<name>/SKILL.md` shape. Lets a remote agent
-    /// self-bootstrap without out-of-band documentation.
-    pub docs_skill: String,
+    /// self-bootstrap without out-of-band documentation. Under
+    /// `/.well-known/` so it lives in the same well-known namespace as
+    /// the identity claim above.
+    pub well_known_skill: String,
+    /// SIWE / CAIP-122 authentication deep-dive (sub-article). Linked
+    /// from the main skill; same well-known convention.
+    pub well_known_skill_auth: String,
 }
 
 impl IdentityResponse {
@@ -212,7 +217,8 @@ impl IdentityResponse {
                 submit: "/v1/leaves".to_string(),
                 verify: "/api/explorer/trees/{tip}/verify".to_string(),
                 docs: "/docs".to_string(),
-                docs_skill: "/docs/skill.md".to_string(),
+                well_known_skill: "/.well-known/aqua-skill.md".to_string(),
+                well_known_skill_auth: "/.well-known/aqua-skill-auth.md".to_string(),
             },
             identity_claim,
         }
