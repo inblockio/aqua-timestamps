@@ -1,0 +1,33 @@
+[package]
+name        = "aqua-timestamp-e2e"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Live + in-process end-to-end test client for the aqua-timestamp aggregator."
+
+[[bin]]
+name = "aqua-timestamp-e2e"
+path = "src/main.rs"
+
+[dependencies]
+aqua-rs-sdk        = { workspace = true }
+aqua-timestamp     = { path = "../aqua-timestamp" }
+aqua-timestamp-core = { path = "../aqua-timestamp-core" }
+
+tokio              = { workspace = true }
+axum               = { workspace = true }
+reqwest            = { workspace = true }
+
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+
+clap               = { version = "4", features = ["derive", "env"] }
+anyhow             = { workspace = true }
+hex                = { workspace = true }
+sha3               = { workspace = true }
+rand               = { workspace = true }
+tracing            = { workspace = true }
+tempfile           = { workspace = true }
+
+k256               = { version = "0.13", features = ["ecdsa"] }
