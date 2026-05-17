@@ -1,0 +1,29 @@
+services:
+  timestamp:
+    image: aqua-timestamp:latest
+    container_name: timestamp
+    restart: unless-stopped
+    networks:
+      - portal-net
+    expose:
+      - "8080"
+    volumes:
+      - timestamp-data:/var/lib/aqua-timestamp
+      - ./config.toml:/etc/aqua-timestamp/config.toml:ro
+    env_file:
+      - .env
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+networks:
+  portal-net:
+    external: true
+
+volumes:
+  timestamp-data:

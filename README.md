@@ -86,22 +86,82 @@ The aggregator publishes a signed service_claim tree at `/.well-known/aqua-ident
 
 ## Tech Stack
 
-- **Language:** Rust
+- **Language:** Rust (edition 2021, rustc 1.85+)
 - **HTTP:** Axum
 - **Storage:** fjall (LSM-tree)
-- **Auth:** aqua-rs-auth (CAIP-122)
+- **Auth:** aqua-rs-auth (SIWE / CAIP-122)
 - **Merkle:** aqua-rs-sdk (RFC 9162 primitives)
-- **Signing:** Ed25519 (ed25519-dalek)
-- **EVM:** aqua-rs-sdk TimestampProvider
-- **qTSA:** RFC 3161 via aqua-rs-sdk TsaTimestamper
+- **Signing:** secp256k1 + EIP-191 (aqua-rs-sdk `Secp256k1Signer`)
+- **EVM:** aqua-rs-sdk `TimestampProvider`
+- **qTSA:** RFC 3161 via aqua-rs-sdk `TsaTimestamper`
+
+## Build, run, deploy
+
+The repo expects its sister Rust SDKs to live alongside it under
+`~/projects/` (path deps in `Cargo.toml`):
+
+```text
+~/projects/
+├── aqua-timestamp/   (this repo)
+├── aqua-rs-sdk/
+└── aqua-rs-auth/
+```
+
+### Local build + tests
+
+```sh
+cargo build --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check
+cargo test --workspace
+```
+
+### Run locally
+
+```sh
+cp config.toml.example config.toml
+cargo run --bin aqua-timestamp -- --config config.toml
+# http://127.0.0.1:8080/health
+```
+
+### Docker build
+
+The Dockerfile (`deploy/Dockerfile`) expects a build context **one level
+above** this repo so it can `COPY` the sister SDKs:
+
+```sh
+cd ~/projects
+docker buildx build -t aqua-timestamp:latest \
+    -f aqua-timestamp/deploy/Dockerfile .
+```
+
+### Deploy to `timestamp.inblock.io`
+
+See [`docs/runbooks/m0-deploy-transcript-2026-05-17.md`](docs/runbooks/m0-deploy-transcript-2026-05-17.md)
+for the full sequence. Pattern: rsync source to the server, build with
+buildx there, `docker compose up -d` against
+[`deploy/docker-compose.yml`](deploy/docker-compose.yml), append the
+[Caddy snippet](deploy/caddyfile.snippet) to the existing
+`/home/portal/portal/Caddyfile`, `caddy reload`.
 
 ## Documentation
 
 - [Design Specification](docs/design-spec.md) - Full architecture, data flows, and protocol details
+- [Success Criteria](docs/success-criteria.md) - Per-milestone "done" checklist
+- [M0 Deploy Transcript](docs/runbooks/m0-deploy-transcript-2026-05-17.md)
 
 ## Status
 
-**Pre-implementation.** Architecture spec under review.
+| Milestone | State |
+|---|---|
+| **M0** Skeleton on the wire | shipped 2026-05-17 (`https://timestamp.inblock.io/health` live) |
+| M1 Identity + SIWE auth | in progress |
+| M2 Accumulate + seal | pending |
+| M3 Witness revisions | pending |
+| M-E2E Live roundtrip | pending |
+| M4 Real EVM anchor (Sepolia) | pending |
+| M5 Real qTSA anchor | pending |
+| M6 Production hardening | pending |
 
 ## License
 

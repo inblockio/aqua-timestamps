@@ -1,0 +1,39 @@
+[package]
+name        = "aqua-timestamp"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Aqua Aggregator: batches revision hashes and dual-anchors them per epoch."
+
+[[bin]]
+name = "aqua-timestamp"
+path = "src/main.rs"
+
+[dependencies]
+aqua-timestamp-core = { path = "../aqua-timestamp-core" }
+aqua-rs-sdk         = { workspace = true }
+aqua-auth           = { workspace = true }
+
+tokio              = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true }
+hyper              = { workspace = true }
+
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+toml               = { workspace = true }
+
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+
+chrono             = { workspace = true }
+hex                = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
