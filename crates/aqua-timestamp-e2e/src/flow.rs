@@ -97,58 +97,157 @@ pub struct E2eOutcome {
     pub recovered_signer_address: String,
 }
 
-/// One BIP39 mnemonic for the primary test client. Derived inside the
-/// flow so we never let it cross the API boundary as a function argument
-/// or struct field; only the resulting wallet does.
+/// Which DID method the test client is using. The three values match the
+/// three CAIP-122 namespaces that `aqua-rs-auth` verifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureMethod {
+    /// `did:pkh:eip155:1:0x{40 hex}`, EIP-191 personal_sign over keccak256.
+    Secp256k1Eip191,
+    /// `did:pkh:ed25519:0x{64 hex}`, Ed25519 sign over the raw message bytes.
+    Ed25519,
+    /// `did:pkh:p256:0x{66 hex compressed}`, P-256 ECDSA over the raw message
+    /// bytes. Sent as the 64-byte fixed-size encoding (the `r256` verifier
+    /// accepts DER too, but fixed-size is what `aqua-rs-auth`'s tests use).
+    P256,
+}
+
+impl SignatureMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Secp256k1Eip191 => "secp256k1+eip191",
+            Self::Ed25519 => "ed25519",
+            Self::P256 => "p256",
+        }
+    }
+}
+
+/// Test client material. The private key bytes live behind an enum so the
+/// flow logic stays the same shape across all three DID methods; only
+/// [`ClientKey::sign_challenge`] dispatches.
 pub struct ClientKey {
     pub did: String,
-    pub eth_addr_eip55: String,
-    pub private_key_hex: String,
+    /// Display string. For secp256k1 this is the EIP-55 address; for the
+    /// other methods it's the raw pubkey hex (still useful in the log line).
+    pub display_identifier: String,
+    pub method: SignatureMethod,
+    secret: KeyMaterial,
+}
+
+/// Held internally so callers cannot accidentally serialise it.
+enum KeyMaterial {
+    Secp256k1 {
+        private_key: [u8; 32],
+    },
+    Ed25519 {
+        signing_key: ed25519_dalek::SigningKey,
+    },
+    P256 {
+        signing_key: p256::ecdsa::SigningKey,
+    },
 }
 
 impl ClientKey {
+    /// Derive a secp256k1 client from a BIP39 mnemonic. This is the path
+    /// the production live test takes (mnemonic from the gnome-keyring).
     pub async fn from_mnemonic(mnemonic: &str) -> Result<Self> {
         let (_addr, eip55, priv_hex) = aqua_rs_sdk::primitives::get_wallet(mnemonic)
             .await
             .map_err(|e| anyhow!("get_wallet: {e}"))?;
         let did = format!("did:pkh:eip155:1:{eip55}");
-        let private_key_hex = priv_hex.trim_start_matches("0x").to_string();
+        let mut pk = [0u8; 32];
+        let decoded = hex::decode(priv_hex.trim_start_matches("0x")).context("priv hex")?;
+        if decoded.len() != 32 {
+            bail!("private key from get_wallet is not 32 bytes");
+        }
+        pk.copy_from_slice(&decoded);
         Ok(Self {
             did,
-            eth_addr_eip55: eip55,
-            private_key_hex,
+            display_identifier: eip55,
+            method: SignatureMethod::Secp256k1Eip191,
+            secret: KeyMaterial::Secp256k1 { private_key: pk },
         })
     }
 
-    /// Generate a fresh, random secp256k1 keypair for the negative-test
-    /// second client. The private key never leaves this struct.
-    pub fn random() -> Result<Self> {
-        use k256::ecdsa::SigningKey;
-        let mut sk_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut sk_bytes);
-        let _ =
-            SigningKey::from_slice(&sk_bytes).map_err(|e| anyhow!("random signing key: {e}"))?;
-        // Derive checksum address via aqua-rs-sdk's Secp256k1Signer to keep
-        // the EIP-55 logic centralised.
-        let signer = Secp256k1Signer::new(sk_bytes.to_vec());
-        let (did, addr) = signer
-            .derive_did_pkh()
-            .map_err(|e| anyhow!("derive_did_pkh: {e}"))?;
-        Ok(Self {
-            did,
-            eth_addr_eip55: addr.to_checksum(None),
-            private_key_hex: hex::encode(sk_bytes),
-        })
+    /// Generate a fresh random client for the requested method. Used both
+    /// for the negative-test foreign DID and for the multi-method live run
+    /// covering `ed25519` and `p256` clients.
+    pub fn random(method: SignatureMethod) -> Result<Self> {
+        match method {
+            SignatureMethod::Secp256k1Eip191 => {
+                let mut sk_bytes = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut sk_bytes);
+                let _ = k256::ecdsa::SigningKey::from_slice(&sk_bytes)
+                    .map_err(|e| anyhow!("random k256 signing key: {e}"))?;
+                let signer = Secp256k1Signer::new(sk_bytes.to_vec());
+                let (did, addr) = signer
+                    .derive_did_pkh()
+                    .map_err(|e| anyhow!("derive_did_pkh: {e}"))?;
+                Ok(Self {
+                    did,
+                    display_identifier: addr.to_checksum(None),
+                    method,
+                    secret: KeyMaterial::Secp256k1 {
+                        private_key: sk_bytes,
+                    },
+                })
+            }
+            SignatureMethod::Ed25519 => {
+                use ed25519_dalek::SigningKey;
+                let mut rng = rand::rngs::OsRng;
+                let signing_key = SigningKey::generate(&mut rng);
+                let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+                let did = format!("did:pkh:ed25519:0x{pubkey_hex}");
+                Ok(Self {
+                    did: did.clone(),
+                    display_identifier: format!("0x{pubkey_hex}"),
+                    method,
+                    secret: KeyMaterial::Ed25519 { signing_key },
+                })
+            }
+            SignatureMethod::P256 => {
+                use p256::ecdsa::SigningKey;
+                let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+                let compressed = signing_key.verifying_key().to_encoded_point(true);
+                let pubkey_hex = hex::encode(compressed.as_bytes());
+                let did = format!("did:pkh:p256:0x{pubkey_hex}");
+                Ok(Self {
+                    did,
+                    display_identifier: format!("0x{pubkey_hex}"),
+                    method,
+                    secret: KeyMaterial::P256 { signing_key },
+                })
+            }
+        }
+    }
+
+    /// Produce the `0x`-prefixed hex signature the server expects in the
+    /// `POST /auth/session` body. The byte format matches what
+    /// `aqua-rs-auth`'s verifier for this DID method consumes.
+    pub fn sign_challenge(&self, message: &str) -> Result<String> {
+        match &self.secret {
+            KeyMaterial::Secp256k1 { private_key } => {
+                let bytes = eip191_personal_sign(message, private_key)?;
+                Ok(format!("0x{}", hex::encode(bytes)))
+            }
+            KeyMaterial::Ed25519 { signing_key } => {
+                use ed25519_dalek::Signer;
+                let sig = signing_key.sign(message.as_bytes());
+                Ok(format!("0x{}", hex::encode(sig.to_bytes())))
+            }
+            KeyMaterial::P256 { signing_key } => {
+                use p256::ecdsa::{signature::Signer, Signature};
+                let sig: Signature = signing_key.sign(message.as_bytes());
+                Ok(format!("0x{}", hex::encode(sig.to_bytes())))
+            }
+        }
     }
 }
 
-/// Sign `message` (a UTF-8 SIWE challenge) with `private_key_hex` using
-/// EIP-191 personal_sign. Returns the 0x-prefixed 65-byte signature
-/// expected by `aqua-rs-auth`.
-fn eip191_sign(message: &str, private_key_hex: &str) -> Result<String> {
+/// EIP-191 personal_sign over keccak256(prefix || message). Returns the
+/// raw 65-byte `r || s || v` blob (with `v = recovery_id + 27`).
+fn eip191_personal_sign(message: &str, private_key: &[u8; 32]) -> Result<[u8; 65]> {
     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
-    let pk = hex::decode(private_key_hex).context("decode private key hex")?;
-    let signing_key = SigningKey::from_slice(&pk).context("k256 SigningKey")?;
+    let signing_key = SigningKey::from_slice(private_key).context("k256 SigningKey")?;
     let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
     let mut h = Keccak256::new();
     h.update(prefix.as_bytes());
@@ -160,7 +259,7 @@ fn eip191_sign(message: &str, private_key_hex: &str) -> Result<String> {
     let mut bytes = [0u8; 65];
     bytes[..64].copy_from_slice(&sig.to_bytes());
     bytes[64] = u8::from(rec_id) + 27;
-    Ok(format!("0x{}", hex::encode(bytes)))
+    Ok(bytes)
 }
 
 async fn http_get(client: &Client, url: &str, bearer: Option<&str>) -> Result<reqwest::Response> {
@@ -207,7 +306,7 @@ async fn mint_bearer(client: &Client, base_url: &str, key: &ClientKey) -> Result
         .ok_or_else(|| anyhow!("challenge response missing `nonce`"))?
         .to_string();
 
-    let signature = eip191_sign(&message, &key.private_key_hex)?;
+    let signature = key.sign_challenge(&message)?;
     let session_url = format!("{base_url}/auth/session");
     let payload = json!({ "did": key.did, "nonce": nonce, "signature": signature });
     let resp = http_post(client, &session_url, None, &payload).await?;
@@ -297,11 +396,11 @@ fn verify_signature_revision(sig_value: &Value) -> Result<String> {
     Ok(recovered_eip55)
 }
 
-/// The full M-E2E flow. Returns an [`E2eOutcome`] on success or surfaces
-/// the first failing assertion with `bail!`.
+/// The full M-E2E flow. Takes a pre-constructed primary [`ClientKey`] so
+/// the same flow drives secp256k1, ed25519, and p256 DIDs uniformly.
 pub async fn run_full_flow(
     base_url: &str,
-    primary_mnemonic: &str,
+    primary: &ClientKey,
     seal: SealTrigger,
     budget: PollBudget,
     log: StepLogger<'_>,
@@ -314,12 +413,13 @@ pub async fn run_full_flow(
         .context("build reqwest client")?;
 
     // ── 1. Test client identity ──────────────────────────────────────────
-    let primary = ClientKey::from_mnemonic(primary_mnemonic).await?;
     log(
         1,
         &format!(
-            "derived test client {} ({})",
-            primary.did, primary.eth_addr_eip55
+            "test client {} ({}) using method {}",
+            primary.did,
+            primary.display_identifier,
+            primary.method.label(),
         ),
     );
 
@@ -360,7 +460,7 @@ pub async fn run_full_flow(
     log(2, &format!("identity shape ok, server_did={server_did}"));
 
     // ── 3 + 4. SIWE handshake -> Bearer token for primary client ─────────
-    let token_primary = mint_bearer(&client, base_url, &primary).await?;
+    let token_primary = mint_bearer(&client, base_url, primary).await?;
     log(
         3,
         "auth/challenge signed and POST /auth/session returned a token",
@@ -621,7 +721,7 @@ pub async fn run_full_flow(
     );
 
     // ── 10a. Negative: a *different* DID's token is 403 on this leaf. ────
-    let secondary = ClientKey::random()?;
+    let secondary = ClientKey::random(SignatureMethod::Secp256k1Eip191)?;
     let token_secondary = mint_bearer(&client, base_url, &secondary).await?;
     let resp = http_get(&client, &by_leaf_url, Some(&token_secondary)).await?;
     if resp.status() != StatusCode::FORBIDDEN {
@@ -655,7 +755,7 @@ pub async fn run_full_flow(
     Ok(E2eOutcome {
         base_url: base_url.to_string(),
         server_did,
-        client_did: primary.did,
+        client_did: primary.did.clone(),
         leaf_hex,
         epoch_id,
         merkle_root_hex,

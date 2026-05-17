@@ -97,37 +97,35 @@ See memory [[reference-server-agentic-hub]] for full server details and
 
 ## Current state (handover, end of 2026-05-17)
 
-**Done this session:**
-- Repo cloned into this directory.
-- Deploy SSH key generated and authorized on both inblockio boxes.
-- Service / Sepolia anchor wallet generated; mnemonic in keyring.
-  **Owner action pending: fund `0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f`
-  on Sepolia** (~0.05 ETH from any public faucet).
-- `docs/success-criteria.md` extended with milestone ladder, e2e test
-  definition, hard requirements section, and wallet-provisioning
-  preconditions.
-- Both inblockio servers inventoried; deploy target conventions captured.
+**Shipped at end of 2026-05-17 overnight session (M0 -> M-E2E -> M4):**
+- M0: Rust + Axum skeleton, dockerized, deployed at `https://timestamp.inblock.io`.
+- M1: Identity loader + `service_claim_server` aqua-tree at `/.well-known/aqua-identity`, SIWE auth via `aqua-rs-auth`.
+- M2: leaf accumulator + epoch sealer + fjall storage (`epochs`, `epoch_leaves`).
+- M3: witness revision minter, aqua-node compatible `/trees/{tip}`, `/trees/by-leaf/{leaf}?method=`, `/trees?epoch=&method=`, DID isolation.
+- M4: real Sepolia anchor via `aqua_rs_sdk::CliEthTimestamper`. First live tx
+  `0x0db2eb94217596ad39c59c27f54778cd53911186ceb759d8c13ba8cb3bf81f3c`
+  anchored epoch 7's Merkle root at Sepolia block `0xa5d075` (10866805).
+- M-E2E: live + selfcheck client at `crates/aqua-timestamp-e2e/`. Wrapper at
+  `tests/e2e/live_roundtrip.sh` runs the full 10-step witness roundtrip
+  against the deployed service and exits `STATUS = OK`.
 
-**Not started:**
-- `Cargo.toml`, source layout, Axum scaffold, Dockerfile, deploy compose.
-- Sister-repo vendoring (blocked on `gh` auth).
-- Sepolia funding (owner action).
+**Full session log:** [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
+
+**Deferred (not blocking):**
+- M5 real qTSA anchor: the SDK already ships `aqua_rs_sdk::web::tsa::TsaTimestamper`
+  (a full `TimestampProvider` impl). Wiring is a `[anchors.qtsa]` config block
+  plus one slot on the sealer. A free standard TSA (`http://timestamp.digicert.com`)
+  works without auth for a smoke test; eIDAS-qualified providers need an account.
+- M6 production hardening (metrics, rate limits per DID, fjall pruning, WAL, chaos test).
+- GHCR push (no `gh auth` yet; image is built directly on the deploy server).
+- Image size trim (139 MB, target was <100 MB).
+- Em-dash sweep in legacy prose (landing.rs, some doc files).
 
 **Resume here (next session):**
-1. Clone `aqua-node` into `~/projects/` (5 of 6 sister repos already
-   present; this is the missing one). `gh auth login` if convenient,
-   else SSH clone.
-2. Owner: fund `0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f` on Sepolia
-   (only blocking once you reach M4).
-3. Scaffold the Cargo workspace per success-criteria.md §M0. Add
-   `aqua-rs-sdk` and `aqua-rs-auth` as path deps so resolution is
-   proven from day one.
-4. Build image locally (multi-stage Rust, non-root), ship via
-   `docker save | ssh -i ~/.ssh/timestamp_deploy_ed25519 root@timestamp.inblock.io docker load`.
-5. Drop a compose stack on the server (mirror `/home/portal/portal/`
-   shape), attach to `portal-net`, append a site block to
-   `/home/portal/portal/Caddyfile`, `docker exec portal-caddy-1 caddy reload`.
-6. Verify `https://timestamp.inblock.io/health` returns 200 from off-box.
+1. Read [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
+2. M5 if you want it: wire `[anchors.qtsa]` and plug `TsaTimestamper` into the
+   sealer's `qtsa_anchor` slot. The mint pipeline is identical to EVM.
+3. M6 otherwise: pick metrics or pruning first.
 
 ## M3 addendum (shipped 2026-05-17)
 
@@ -377,7 +375,7 @@ not by drift.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **aqua-timestamp** (209 symbols, 225 relationships, 0 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **aqua-timestamp** (944 symbols, 2000 relationships, 82 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -415,7 +413,5 @@ This project is indexed by GitNexus as **aqua-timestamp** (209 symbols, 225 rela
 | Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-| Work in the Tests area (4 symbols) | `.claude/skills/generated/tests/SKILL.md` |
-| Work in the Cluster_0 area (3 symbols) | `.claude/skills/generated/cluster-0/SKILL.md` |
 
 <!-- gitnexus:end -->

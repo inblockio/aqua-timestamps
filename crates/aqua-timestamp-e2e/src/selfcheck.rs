@@ -26,7 +26,7 @@ use aqua_timestamp_core::sealer::SealTick;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-use crate::flow::{run_full_flow, E2eOutcome, PollBudget, SealTrigger, StepLogger};
+use crate::flow::{run_full_flow, ClientKey, E2eOutcome, PollBudget, SealTrigger, StepLogger};
 
 /// The same Hardhat / Foundry default mnemonic used in
 /// `crates/aqua-timestamp/tests/witness_flow.rs` for the service identity.
@@ -79,14 +79,83 @@ pub async fn run(log: StepLogger<'_>) -> Result<E2eOutcome> {
     // In-process: seal fires on demand, so a short budget is fine.
     let budget = PollBudget::fast(15);
 
-    let outcome_result =
-        run_full_flow(&base_url, TEST_CLIENT_MNEMONIC, seal_trigger, budget, log).await;
+    let primary = ClientKey::from_mnemonic(TEST_CLIENT_MNEMONIC)
+        .await
+        .context("derive selfcheck client key")?;
+    let outcome_result = run_full_flow(&base_url, &primary, seal_trigger, budget, log).await;
 
     server_handle.abort();
     let _ = server_handle.await;
     drop(seal_tx);
 
     outcome_result
+}
+
+/// Multi-method variant: spins up one in-process server, then runs the
+/// full flow three times against it, once per [`SignatureMethod`]. Each
+/// pass uses a freshly-generated random keypair for that method. Returns
+/// one outcome per method on success; surfaces the first failure.
+pub async fn run_all_methods(
+    log: StepLogger<'_>,
+) -> Result<Vec<(crate::flow::SignatureMethod, E2eOutcome)>> {
+    use crate::flow::SignatureMethod;
+    let tmp = tempfile::tempdir().context("tempdir")?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind ephemeral")?;
+    let addr: SocketAddr = listener.local_addr().context("local_addr")?;
+    let base_url = format!("http://{addr}");
+
+    let (router, _state, seal_tx, _tmp_keep) = build_in_process(tmp).await?;
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service()).await;
+    });
+
+    let methods = [
+        SignatureMethod::Secp256k1Eip191,
+        SignatureMethod::Ed25519,
+        SignatureMethod::P256,
+    ];
+
+    let mut outcomes = Vec::with_capacity(methods.len());
+    let mut first_error: Option<anyhow::Error> = None;
+
+    for method in methods {
+        let key = match method {
+            SignatureMethod::Secp256k1Eip191 => ClientKey::from_mnemonic(TEST_CLIENT_MNEMONIC)
+                .await
+                .context("selfcheck secp256k1 client")?,
+            _ => ClientKey::random(method).context("selfcheck random client")?,
+        };
+        let trigger_tx = seal_tx.clone();
+        let trigger = SealTrigger::Driver(Box::new(move || {
+            let tx = trigger_tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(SealTick { now: 1_700_000_000 }).await;
+                for _ in 0..40 {
+                    tokio::task::yield_now().await;
+                }
+            }) as crate::flow::SealTriggerFuture
+        }));
+        let budget = PollBudget::fast(15);
+        match run_full_flow(&base_url, &key, trigger, budget, log).await {
+            Ok(o) => outcomes.push((method, o)),
+            Err(e) => {
+                first_error = Some(e.context(format!("method {} failed", method.label())));
+                break;
+            }
+        }
+    }
+
+    server_handle.abort();
+    let _ = server_handle.await;
+    drop(seal_tx);
+
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+    Ok(outcomes)
 }
 
 async fn build_in_process(

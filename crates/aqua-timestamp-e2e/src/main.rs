@@ -22,7 +22,7 @@ mod selfcheck;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::flow::{run_full_flow, PollBudget, SealTrigger};
+use crate::flow::{run_full_flow, ClientKey, PollBudget, SealTrigger, SignatureMethod};
 
 /// Public env var the shell wrapper exports before launching the binary.
 const ENV_TEST_CLIENT_MNEMONIC: &str = "AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC";
@@ -51,9 +51,25 @@ enum Cmd {
         #[arg(long, default_value_t = 1500)]
         max_wait_secs: u64,
     },
+    /// Run the live flow three times, once per DID method that
+    /// `aqua-rs-auth` supports (secp256k1+EIP-191, Ed25519, P-256). The
+    /// secp256k1 run uses the keyring-stored test mnemonic; the other two
+    /// use fresh random keypairs generated in-process. Each run uses its
+    /// own epoch, so this command takes up to `3 * 600s` against a 600s
+    /// production epoch. Exits 0 only if all three runs succeed.
+    LiveAll {
+        #[arg(long, env = "BASE_URL", default_value = "https://timestamp.inblock.io")]
+        base_url: String,
+        #[arg(long, default_value_t = 1500)]
+        max_wait_secs: u64,
+    },
     /// Run the same flow against an in-process server. Used by
     /// `cargo test --test selfcheck`.
     Selfcheck,
+    /// Run the in-process flow three times, once per DID method
+    /// (secp256k1+EIP-191, Ed25519, P-256). Used by
+    /// `cargo test --test multi_method`.
+    SelfcheckAll,
 }
 
 fn print_step(n: usize, msg: &str) {
@@ -68,32 +84,82 @@ async fn main() -> Result<()> {
             base_url,
             max_wait_secs,
         } => {
-            let mnemonic = std::env::var(ENV_TEST_CLIENT_MNEMONIC).with_context(|| {
-                format!(
-                    "{ENV_TEST_CLIENT_MNEMONIC} not set; the wrapper script should look it up from the keyring"
-                )
-            })?;
-            let mnemonic = mnemonic.trim();
-            if mnemonic.is_empty() {
-                return Err(anyhow!(
-                    "{ENV_TEST_CLIENT_MNEMONIC} is empty; keyring lookup likely returned nothing"
-                ));
-            }
-
+            let key = secp256k1_client_from_env().await?;
             println!("aqua-timestamp e2e :: live");
             println!("base_url = {base_url}");
-
-            let budget = PollBudget {
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs),
-                interval: std::time::Duration::from_secs(5),
-            };
-
-            let outcome =
-                run_full_flow(&base_url, mnemonic, SealTrigger::None, budget, &print_step)
-                    .await
-                    .context("live flow failed")?;
+            let budget = make_budget(max_wait_secs);
+            let outcome = run_full_flow(&base_url, &key, SealTrigger::None, budget, &print_step)
+                .await
+                .context("live flow failed")?;
             print_summary(&outcome);
             Ok(())
+        }
+        Cmd::LiveAll {
+            base_url,
+            max_wait_secs,
+        } => {
+            println!("aqua-timestamp e2e :: live-all (secp256k1 + ed25519 + p256)");
+            println!("base_url = {base_url}");
+
+            let keys: Vec<(SignatureMethod, ClientKey)> = vec![
+                (
+                    SignatureMethod::Secp256k1Eip191,
+                    secp256k1_client_from_env().await?,
+                ),
+                (
+                    SignatureMethod::Ed25519,
+                    ClientKey::random(SignatureMethod::Ed25519)?,
+                ),
+                (
+                    SignatureMethod::P256,
+                    ClientKey::random(SignatureMethod::P256)?,
+                ),
+            ];
+
+            let mut summaries: Vec<(SignatureMethod, crate::flow::E2eOutcome)> = Vec::new();
+            let mut failures: Vec<(SignatureMethod, anyhow::Error)> = Vec::new();
+            for (method, key) in keys {
+                println!();
+                println!("===== method = {} =====", method.label());
+                let budget = make_budget(max_wait_secs);
+                let labelled = move |n: usize, msg: &str| {
+                    println!("[{} step {n}] OK   {msg}", method.label());
+                };
+                match run_full_flow(&base_url, &key, SealTrigger::None, budget, &labelled).await {
+                    Ok(o) => summaries.push((method, o)),
+                    Err(e) => {
+                        eprintln!("[{} FAIL] {e:#}", method.label());
+                        failures.push((method, e));
+                    }
+                }
+            }
+
+            println!();
+            println!("====== live-all summary ======");
+            for (method, outcome) in &summaries {
+                println!(
+                    "[{}] STATUS=OK  client_did={}",
+                    method.label(),
+                    outcome.client_did
+                );
+                println!(
+                    "    leaf={}  epoch={}  tx_anchor={}",
+                    outcome.leaf_hex, outcome.epoch_id, outcome.merkle_root_hex
+                );
+            }
+            for (method, err) in &failures {
+                println!("[{}] STATUS=FAIL {err}", method.label());
+            }
+            if failures.is_empty() {
+                println!("OVERALL = OK ({} methods)", summaries.len());
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "{} of {} methods failed",
+                    failures.len(),
+                    summaries.len() + failures.len()
+                ))
+            }
         }
         Cmd::Selfcheck => {
             println!("aqua-timestamp e2e :: selfcheck");
@@ -101,7 +167,47 @@ async fn main() -> Result<()> {
             print_summary(&outcome);
             Ok(())
         }
+        Cmd::SelfcheckAll => {
+            println!("aqua-timestamp e2e :: selfcheck-all (secp256k1 + ed25519 + p256)");
+            let outcomes = selfcheck::run_all_methods(&print_step).await?;
+            println!();
+            println!("====== selfcheck-all summary ======");
+            for (method, outcome) in &outcomes {
+                println!(
+                    "[{}] STATUS=OK  client_did={}  epoch={}  root={}",
+                    method.label(),
+                    outcome.client_did,
+                    outcome.epoch_id,
+                    outcome.merkle_root_hex,
+                );
+            }
+            assert_eq!(outcomes.len(), 3, "expected one outcome per DID method");
+            println!("OVERALL = OK ({} methods)", outcomes.len());
+            Ok(())
+        }
     }
+}
+
+fn make_budget(max_wait_secs: u64) -> PollBudget {
+    PollBudget {
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs),
+        interval: std::time::Duration::from_secs(5),
+    }
+}
+
+async fn secp256k1_client_from_env() -> Result<ClientKey> {
+    let mnemonic = std::env::var(ENV_TEST_CLIENT_MNEMONIC).with_context(|| {
+        format!(
+            "{ENV_TEST_CLIENT_MNEMONIC} not set; the wrapper script should look it up from the keyring"
+        )
+    })?;
+    let mnemonic = mnemonic.trim();
+    if mnemonic.is_empty() {
+        return Err(anyhow!(
+            "{ENV_TEST_CLIENT_MNEMONIC} is empty; keyring lookup likely returned nothing"
+        ));
+    }
+    ClientKey::from_mnemonic(mnemonic).await
 }
 
 fn print_summary(outcome: &crate::flow::E2eOutcome) {

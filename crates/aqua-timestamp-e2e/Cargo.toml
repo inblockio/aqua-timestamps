@@ -31,3 +31,5 @@ tracing            = { workspace = true }
 tempfile           = { workspace = true }
 
 k256               = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek      = { version = "2", features = ["rand_core"] }
+p256               = { version = "0.13", features = ["ecdsa"] }
