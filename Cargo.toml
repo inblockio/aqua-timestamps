@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/aqua-timestamp",
     "crates/aqua-timestamp-core",
+    "crates/aqua-timestamp-e2e",
 ]
 
 [workspace.package]

@@ -776,6 +776,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqua-timestamp-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aqua-rs-sdk",
+ "aqua-timestamp",
+ "aqua-timestamp-core",
+ "axum",
+ "clap",
+ "hex",
+ "k256",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha3 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
