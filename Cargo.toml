@@ -18,7 +18,7 @@ rust-version = "1.85"
 # Sister-repo path deps. These prove workspace resolution at M0 and
 # carry their real load from M1 onward.
 aqua-rs-sdk = { path = "../aqua-rs-sdk", default-features = false, features = ["native", "blockchain", "web"] }
-aqua-auth   = { path = "../aqua-rs-auth", default-features = false }
+aqua-auth   = { path = "../aqua-auth", default-features = false }
 
 # Async + HTTP
 tokio    = { version = "1", features = ["full"] }

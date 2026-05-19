@@ -668,15 +668,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dashmap",
- "ed25519-dalek",
  "hex",
- "k256",
- "p256",
  "rand 0.8.6",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha3 0.10.9",
+ "siwx-core",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -4885,6 +4882,20 @@ dependencies = [
  "num-traits",
  "thiserror 2.0.18",
  "time",
+]
+
+[[package]]
+name = "siwx-core"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "ed25519-dalek",
+ "hex",
+ "k256",
+ "p256",
+ "serde",
+ "sha3 0.10.9",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

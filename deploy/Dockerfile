@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build. The repo is expected to be available alongside the
-# sister-repo path-deps under ../aqua-rs-sdk and ../aqua-rs-auth. The
+# sister-repo path-deps under ../aqua-rs-sdk and ../aqua-auth. The
 # build context root is therefore one level above this Dockerfile.
 
 # -------------------- BUILDER --------------------
@@ -20,10 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY aqua-rs-sdk   ./aqua-rs-sdk
-COPY aqua-rs-auth  ./aqua-rs-auth
-COPY aqua-timestamp ./aqua-timestamp
+COPY aqua-auth     ./aqua-auth
+COPY aqua-timestamps ./aqua-timestamps
 
-WORKDIR /src/aqua-timestamp
+WORKDIR /src/aqua-timestamps
 RUN cargo build --release --bin aqua-timestamp \
     && strip target/release/aqua-timestamp
 
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /var/lib/aqua-timestamp /etc/aqua-timestamp \
     && chown -R aqua:aqua /var/lib/aqua-timestamp
 
-COPY --from=builder /src/aqua-timestamp/target/release/aqua-timestamp /usr/local/bin/aqua-timestamp
+COPY --from=builder /src/aqua-timestamps/target/release/aqua-timestamp /usr/local/bin/aqua-timestamp
 
 USER aqua
 EXPOSE 8080
