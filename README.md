@@ -102,7 +102,7 @@ The repo expects its sister Rust SDKs to live alongside it under
 
 ```text
 ~/projects/
-├── aqua-timestamp/   (this repo)
+├── aqua-timestamps/  (this repo)
 ├── aqua-rs-sdk/
 └── aqua-rs-auth/
 ```
@@ -179,4 +179,4 @@ buildx there, `docker compose up -d` against
 
 ## License
 
-AGPL-3.0
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

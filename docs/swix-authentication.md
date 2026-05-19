@@ -168,7 +168,7 @@ submitted it.
 
 - **Challenge:** single-use, 5-minute TTL.
 - **Bearer / session:** 1-hour TTL by default
-  ([`auth.session_ttl_secs`](https://github.com/inblockio/aqua-timestamp/blob/main/deploy/config.toml)
+  ([`auth.session_ttl_secs`](https://github.com/inblockio/aqua-timestamps/blob/main/deploy/config.toml)
   on the server); refresh by repeating the three-step dance when it
   expires. Sessions are revoked on a normal server restart (the
   store is in-memory).
@@ -176,5 +176,5 @@ submitted it.
 ## Reference implementation
 
 A complete worked example in Rust (all three DID methods) lives at
-[`crates/aqua-timestamp-e2e/src/flow.rs`](https://github.com/inblockio/aqua-timestamp/blob/main/crates/aqua-timestamp-e2e/src/flow.rs)
+[`crates/aqua-timestamp-e2e/src/flow.rs`](https://github.com/inblockio/aqua-timestamps/blob/main/crates/aqua-timestamp-e2e/src/flow.rs)
 under `mint_bearer` + `ClientKey::sign_challenge`.

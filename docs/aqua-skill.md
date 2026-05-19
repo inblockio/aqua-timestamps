@@ -100,7 +100,7 @@ prehash / signature encoding per curve, working Rust snippets,
 failure-mode catalogue, lifetimes, reference implementation pointer.
 
 A complete worked client lives at
-[`crates/aqua-timestamp-e2e/src/flow.rs`](https://github.com/inblockio/aqua-timestamp/blob/main/crates/aqua-timestamp-e2e/src/flow.rs)
+[`crates/aqua-timestamp-e2e/src/flow.rs`](https://github.com/inblockio/aqua-timestamps/blob/main/crates/aqua-timestamp-e2e/src/flow.rs)
 under `mint_bearer` + `ClientKey::sign_challenge`.
 
 ## Submitting a leaf
@@ -254,7 +254,7 @@ status (`certificatePolicies` OID `1.3.6.1.4.1.6449.1.2.1.9.1`).
 ## Reference flow (Rust)
 
 A complete reference client lives in
-[aqua-timestamp-e2e](https://github.com/inblockio/aqua-timestamp/tree/main/crates/aqua-timestamp-e2e).
+[aqua-timestamp-e2e](https://github.com/inblockio/aqua-timestamps/tree/main/crates/aqua-timestamp-e2e).
 It runs the full flow + verification end-to-end against either the
 deployed service or an in-process server, for all three DID methods.
 
@@ -289,4 +289,4 @@ gnome-keyring, runs the SIWE -> submit -> wait-for-seal -> witness
 
 ## License
 
-AGPL-3.0. Source at <https://github.com/inblockio/aqua-timestamp>.
+Apache-2.0. Source at <https://github.com/inblockio/aqua-timestamps>.

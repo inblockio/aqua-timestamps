@@ -225,12 +225,12 @@ curl -sS -H 'authorization: Bearer &lt;token&gt;' \
 
   <h2>Reference client</h2>
   <p>A complete reference client (Rust) lives at
-  <a href="https://github.com/inblockio/aqua-timestamp/tree/main/crates/aqua-timestamp-e2e">crates/aqua-timestamp-e2e</a>
+  <a href="https://github.com/inblockio/aqua-timestamps/tree/main/crates/aqua-timestamp-e2e">crates/aqua-timestamp-e2e</a>
   in the project repo. It runs the full flow + verification against
   this deployment for all three DID methods.</p>
 
   <footer>
-    aqua-timestamp · <a href="https://github.com/inblockio/aqua-timestamp">github.com/inblockio/aqua-timestamp</a> · AGPL-3.0 · operated by <a href="https://inblock.io">inblock.io</a>
+    aqua-timestamp · <a href="https://github.com/inblockio/aqua-timestamps">github.com/inblockio/aqua-timestamps</a> · Apache-2.0 · operated by <a href="https://inblock.io">inblock.io</a>
   </footer>
 </body>
 </html>

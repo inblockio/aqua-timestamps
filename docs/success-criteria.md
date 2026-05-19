@@ -186,7 +186,7 @@ network.
 
 - [ ] `README.md` documents how to build, run locally (`cargo run`),
       run in Docker (`docker compose up`), and deploy.
-- [ ] `LICENSE` file matches the AGPL-3.0 stated in the existing README.
+- [ ] `LICENSE` file is Apache-2.0 with a `NOTICE` file.
 - [ ] `.gitignore` excludes `target/`, `.env`, fjall data dirs.
 - [ ] `CLAUDE.md` (project-scoped) documents the deployment workflow,
       the GHCR push pattern, and any non-obvious gotchas.

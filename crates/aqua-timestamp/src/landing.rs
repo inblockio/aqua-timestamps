@@ -68,9 +68,9 @@ pub const HTML: &str = r##"<!doctype html>
   </ul>
 
   <h2>Source</h2>
-  <p><a href="https://github.com/inblockio/aqua-timestamp">github.com/inblockio/aqua-timestamp</a></p>
+  <p><a href="https://github.com/inblockio/aqua-timestamps">github.com/inblockio/aqua-timestamps</a></p>
 
-  <footer>aqua-timestamp · dual-anchor: Sepolia + Sectigo qualified TSA · AGPL-3.0</footer>
+  <footer>aqua-timestamp · dual-anchor: Sepolia + Sectigo qualified TSA · Apache-2.0</footer>
 </body>
 </html>
 "##;
