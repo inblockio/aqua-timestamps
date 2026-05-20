@@ -36,6 +36,12 @@ pub struct Config {
     /// `[anchors.evm].enabled = false`.
     #[serde(default)]
     pub anchors: AnchorsConfig,
+    /// Adaptive publication rate based on wallet balance and gas cost.
+    /// When enabled, replaces the fixed-interval sealer with one that
+    /// adjusts epoch frequency via the bonding curve
+    /// `r = 1 - exp(-B / (g * n_half))`.
+    #[serde(default)]
+    pub bonding_curve: BondingCurveConfig,
 }
 
 impl Config {
@@ -266,6 +272,53 @@ impl QtsaAnchorConfig {
             Some(std::time::Duration::from_secs(
                 self.min_request_interval_secs,
             ))
+        }
+    }
+}
+
+/// `[bonding_curve]`. Adaptive epoch frequency driven by wallet balance
+/// and gas cost. Disabled by default; when enabled the fixed-interval
+/// sealer is replaced with one that polls balance/gas and computes the
+/// publication interval via `r = 1 - exp(-B / (g * n_half))`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BondingCurveConfig {
+    /// Master toggle. `false` (default) keeps the fixed-interval sealer.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Half-activation threshold: the number of affordable transactions
+    /// at which the publication rate reaches ~63%. Also serves as the
+    /// minimum guaranteed runway in blocks.
+    #[serde(default = "default_bonding_n_half")]
+    pub n_half: u64,
+
+    /// How often (seconds) to re-query balance and gas price. Defaults
+    /// to 12 (one Ethereum block).
+    #[serde(default = "default_bonding_poll_interval")]
+    pub poll_interval_secs: u64,
+
+    /// Safety margin: skip publishing when balance < multiplier * gas_cost.
+    #[serde(default = "default_bonding_min_balance_multiplier")]
+    pub min_balance_multiplier: u64,
+}
+
+fn default_bonding_n_half() -> u64 {
+    7200
+}
+fn default_bonding_poll_interval() -> u64 {
+    12
+}
+fn default_bonding_min_balance_multiplier() -> u64 {
+    2
+}
+
+impl Default for BondingCurveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            n_half: default_bonding_n_half(),
+            poll_interval_secs: default_bonding_poll_interval(),
+            min_balance_multiplier: default_bonding_min_balance_multiplier(),
         }
     }
 }

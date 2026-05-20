@@ -19,6 +19,20 @@ This file is the project-scoped bootstrapper. It refines the global
    the SDK in places (see "Hard requirements" below).
 3. [`README.md`](README.md) — the elevator pitch.
 
+## Economic design principles
+
+- **Fuel, not fee.** The service is free. Contributions are "fuel" that
+  powers the machine. Never use "fee" in specs, code, or docs.
+- **Complete orthogonality.** BTC and ETH are the same model in two
+  separate worlds. No cross-chain binding, no exchange rates, no shared
+  balances. They share only the BTC difficulty epoch as a clock.
+- **Forkability is governance.** The spec and service are open and meant
+  to be copied. Operational accountability comes from competitive
+  pressure, not from formulas or authorities. Never design for lock-in.
+  See `Spec_Aqua_Trust_Competition_Model.md`.
+- **Aqua-on-Aqua accountability.** The operational budget must be tracked
+  using the Aqua Protocol itself. This is structural, not optional.
+
 ## Hard requirements (recap; see success-criteria for the full list)
 
 - **One secp256k1 key** is the service identity, EIP-191 signer, and

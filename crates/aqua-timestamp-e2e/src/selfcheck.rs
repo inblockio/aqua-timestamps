@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use aqua_timestamp::{
     build_app,
     config::{
-        AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
-        IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
+        AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
+        EvmAnchorConfig, IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -204,6 +204,7 @@ async fn build_in_process(
                 ..QtsaAnchorConfig::default()
             },
         },
+        bonding_curve: BondingCurveConfig::default(),
     };
 
     let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)

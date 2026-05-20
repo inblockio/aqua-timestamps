@@ -67,3 +67,18 @@ min_request_interval_secs = 16
 # `network` field embedded in the qTSA witness payload. Free-form;
 # distinguishes which TSA provider produced the witness.
 network_label            = "sectigo-qualified-tsa"
+
+[bonding_curve]
+# Adaptive publication rate: adjusts epoch frequency based on wallet
+# balance and gas cost via r = 1 - exp(-B / (g * n_half)). Disabled by
+# default; when enabled, replaces the fixed-interval sealer. Uses the
+# same RPC URL and wallet as [anchors.evm].
+enabled = false
+# Half-activation threshold (affordable txs at ~63% publication rate).
+# Also the guaranteed minimum runway in blocks. 7200 = ~1 day.
+n_half = 7200
+# How often (seconds) to re-query balance and gas price. 12 = one
+# Ethereum block.
+poll_interval_secs = 12
+# Safety margin: skip publishing when balance < multiplier * gas_cost.
+min_balance_multiplier = 2

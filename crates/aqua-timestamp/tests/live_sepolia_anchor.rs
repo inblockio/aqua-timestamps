@@ -29,8 +29,8 @@ use aqua_rs_sdk::primitives::get_wallet;
 use aqua_timestamp::{
     build_app,
     config::{
-        AnchorConfig, AnchorsConfig, AuthConfig, Config, EpochConfig, EvmAnchorConfig,
-        IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
+        AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
+        EvmAnchorConfig, IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -73,6 +73,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf) -> Config {
             max_leaves_per_request: 1_000,
         },
         anchor_legacy: AnchorConfig::default(),
+        bonding_curve: BondingCurveConfig::default(),
         anchors: AnchorsConfig {
             evm: EvmAnchorConfig {
                 enabled: true,
