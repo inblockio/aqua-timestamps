@@ -332,6 +332,27 @@ discretion in the split.
 The contract also publishes `f_btc` as readable state so the BTC-side
 automation can consume it.
 
+**Contract ownership:**
+
+- The founder's key deploys and owns the contract at init.
+- **Ownership transfers exactly once.** The founder can hand off control to
+  a DAO, multisig, or successor via a single `transferOwnership` call.
+  After transfer, the original founder key has no special authority. There
+  is no chain of transfers; the transfer function is disabled after first
+  use.
+- This is the governance succession mechanism. The founder bootstraps the
+  service; the one-time transfer is how the founder steps back.
+
+**Wallet address management:**
+
+- The contract stores two mutable addresses: the **anchoring wallet** (A)
+  and the **operational wallet** (B).
+- The current owner (founder before transfer, successor after) can update
+  either address as many times as needed via the contract.
+- Address changes take effect at the next distribution. In-flight funds
+  already distributed are not affected.
+- Every address change emits an on-chain event for auditability.
+
 #### BTC side: Automated split transaction
 
 BTC fuel stays in the BTC world. The split is executed as a native Bitcoin
@@ -510,6 +531,8 @@ THEN terminal 1% fuel rate on both chains (permanent)
 8. **Only operational (B) funds cross the tBTC bridge** (one direction: BTC to ETH)
 9. **The Ethereum smart contract is the single source of truth for f_btc and f_eth**
 10. **All three BTC keys derive from the same mnemonic** (different paths)
+11. **Contract ownership transfers at most once** (one-shot succession)
+12. **Wallet addresses (A) and (B) are mutable by the current owner only**
 
 ### Risks
 
