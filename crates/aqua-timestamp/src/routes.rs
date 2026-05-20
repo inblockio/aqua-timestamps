@@ -307,6 +307,32 @@ pub async fn list_epochs(
     }))
 }
 
+pub async fn favicon_ico() -> Response {
+    static BYTES: &[u8] = include_bytes!("../assets/favicon.ico");
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        BYTES,
+    )
+        .into_response()
+}
+
+pub async fn apple_touch_icon() -> Response {
+    static BYTES: &[u8] = include_bytes!("../assets/favicon-180.png");
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        BYTES,
+    )
+        .into_response()
+}
+
 /// 404 fallback for routes we don't define yet (uniform JSON shape).
 pub async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })))

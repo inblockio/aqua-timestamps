@@ -40,9 +40,9 @@ use crate::{
     config::Config,
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
-        aqua_identity, aqua_orl, docs_page, get_tree_by_leaf, get_tree_by_tip, health,
-        landing_page, list_epochs, list_or_query_trees, not_found, schedule, sse_events,
-        submit_leaves, well_known_skill_auth_md, well_known_skill_md,
+        apple_touch_icon, aqua_identity, aqua_orl, docs_page, favicon_ico, get_tree_by_leaf,
+        get_tree_by_tip, health, landing_page, list_epochs, list_or_query_trees, not_found,
+        schedule, sse_events, submit_leaves, well_known_skill_auth_md, well_known_skill_md,
     },
     state::AppState,
 };
@@ -262,6 +262,8 @@ pub async fn build_app(
 
     let router = Router::new()
         .route("/health", get(health))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/apple-touch-icon.png", get(apple_touch_icon))
         .route("/", get(landing_page))
         .route("/docs", get(docs_page))
         .route("/.well-known/aqua-skill.md", get(well_known_skill_md))
