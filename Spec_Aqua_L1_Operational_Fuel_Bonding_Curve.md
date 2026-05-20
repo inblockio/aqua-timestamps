@@ -343,15 +343,48 @@ automation can consume it.
 - This is the governance succession mechanism. The founder bootstraps the
   service; the one-time transfer is how the founder steps back.
 
-**Wallet address management:**
+**Contract-managed addresses:**
 
-- The contract stores two mutable addresses: the **anchoring wallet** (A)
-  and the **operational wallet** (B).
+The contract stores four mutable addresses, all settable by the current
+owner:
+
+| Slot | Purpose | Consumer |
+|---|---|---|
+| **Anchoring wallet** (A) | Receives `(1-f)%` for ETH timestamping | Contract distribution logic |
+| **Operational wallet** (B) | Receives `f%` for infrastructure, dev | Contract distribution logic |
+| **Authentication address** | Authoritative CLI operations allowlist | Server reads at boot + on-change event |
+| **Governance delegation key** | Signs governance proposals | Off-chain governance tooling |
+
 - The current owner (founder before transfer, successor after) can update
-  either address as many times as needed via the contract.
-- Address changes take effect at the next distribution. In-flight funds
-  already distributed are not affected.
+  any address as many times as needed via the contract.
 - Every address change emits an on-chain event for auditability.
+- Wallet address changes (A, B) take effect at the next distribution.
+  In-flight funds already distributed are not affected.
+
+**Authentication address:**
+
+The server reads the authentication address from the contract and uses it
+as the authoritative allowlist for privileged CLI operations. When the
+on-chain value changes (detected via event subscription or polling), the
+server updates its local allowlist. This means the contract, not the server
+config, determines who can issue administrative commands.
+
+**Governance delegation key:**
+
+The contract stores an address used to sign governance proposals (e.g.,
+parameter changes, spec amendments, operational decisions). This on-chain
+record is **redundant** to the off-chain Aqua chains that declare the same
+delegation via templates. Both systems say the same thing:
+
+- **Primary path:** Off-chain Aqua chains (templates declare the delegation,
+  signed and tracked via the Aqua Protocol itself)
+- **Security fallback:** On-chain contract state (immutable ledger,
+  queryable by anyone, survives off-chain data loss or dispute)
+
+If the off-chain Aqua record and the on-chain record disagree, the on-chain
+value is the tie-breaker. This is the "Aqua-on-Aqua with on-chain anchor"
+pattern: the off-chain system is the working copy; the on-chain system is
+the notarized backup.
 
 #### BTC side: Automated split transaction
 
@@ -532,7 +565,8 @@ THEN terminal 1% fuel rate on both chains (permanent)
 9. **The Ethereum smart contract is the single source of truth for f_btc and f_eth**
 10. **All three BTC keys derive from the same mnemonic** (different paths)
 11. **Contract ownership transfers at most once** (one-shot succession)
-12. **Wallet addresses (A) and (B) are mutable by the current owner only**
+12. **All four contract-managed addresses are mutable by the current owner only**
+13. **On-chain governance delegation is the tie-breaker** when off-chain Aqua records disagree
 
 ### Risks
 
