@@ -1133,7 +1133,7 @@ section + section {
       <p>The more we are trusted, the faster our time-service becomes.
       We are built for resilience and lasting proof.</p>
       <p>A new standard of accountability and trust: OpenWitness.org as a
-      for trusted institutions. <a href="#">Learn more</a></p>
+      blueprint for trusted institutions. <a href="/blueprint">Learn more</a></p>
     </blockquote>
     <div class="value-pills">
       <span class="value-pill blue"><span class="dot"></span>Dual-anchored: EVM + eIDAS qTSA</span>
@@ -1413,6 +1413,7 @@ section + section {
   <div class="container">
     <div class="footer-links">
       <a href="/docs">Documentation</a>
+      <a href="/blueprint">Blueprint</a>
       <a href="/.well-known/aqua-identity">Service Identity</a>
       <a href="https://github.com/inblockio/aqua-timestamps">GitHub</a>
     </div>

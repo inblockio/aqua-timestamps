@@ -346,6 +346,7 @@ async fn mint_single_witness(
                 merkle_proof: proof_hex.to_vec(),
                 batch_tree_size: tree_size,
                 batch_leaf_index: leaf_index,
+                shielding_nonce: String::new(),
             };
             serde_json::to_value(&payload)?
         }
@@ -360,6 +361,7 @@ async fn mint_single_witness(
                 merkle_proof: proof_hex.to_vec(),
                 batch_tree_size: tree_size,
                 batch_leaf_index: leaf_index,
+                shielding_nonce: String::new(),
             };
             serde_json::to_value(&payload)?
         }

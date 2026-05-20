@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{AuthApiError, BearerDid},
-    landing,
+    blueprint, landing,
     state::AppState,
 };
 
@@ -56,6 +56,15 @@ pub async fn landing_page() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         Html(landing::HTML),
+    )
+        .into_response()
+}
+
+pub async fn blueprint_page() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(blueprint::HTML),
     )
         .into_response()
 }

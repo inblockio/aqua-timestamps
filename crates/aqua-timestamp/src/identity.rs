@@ -153,8 +153,14 @@ pub async fn build_identity_tree(
     let payload: Value =
         serde_json::to_value(&claim).context("failed to serialise service_claim_server payload")?;
 
-    let tree = create_object_util(template_link, None, payload, Method::Scalar)
-        .map_err(|e| anyhow!("failed to build identity object: {e:?}"))?;
+    let tree = create_object_util(
+        template_link,
+        None,
+        payload,
+        Method::Scalar,
+        aqua_rs_sdk::primitives::HashType::default(),
+    )
+    .map_err(|e| anyhow!("failed to build identity object: {e:?}"))?;
 
     let signer = Secp256k1Signer::new(identity.private_key.as_ref().clone());
     let wrapper = AquaTreeWrapper::new(tree, None, None);
