@@ -312,6 +312,7 @@ pub fn run_sealer_with_interval<C: Clock + 'static>(
     clock: C,
     duration_secs: u64,
     witness_ctx: Option<WitnessContext>,
+    event_bus: Option<crate::events::EventBus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(duration_secs.max(1)));
@@ -321,16 +322,123 @@ pub fn run_sealer_with_interval<C: Clock + 'static>(
         loop {
             interval.tick().await;
             let now = clock.now_secs();
-            if let Err(e) = seal_once(
-                &accumulator,
-                &store,
-                now,
-                duration_secs,
-                witness_ctx.as_ref(),
-            )
-            .await
-            {
-                error!(error = %e, "seal cycle failed");
+            match seal_once(&accumulator, &store, now, duration_secs, witness_ctx.as_ref()).await {
+                Ok((record, _witnesses)) => {
+                    if let Some(ref bus) = event_bus {
+                        bus.send(crate::events::SseEvent::EpochSealed {
+                            epoch_id: record.id,
+                            leaf_count: record.leaf_count,
+                            merkle_root: record.merkle_root_hex(),
+                            timestamp: now,
+                        });
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "seal cycle failed");
+                }
+            }
+        }
+    })
+}
+
+/// Bonding-curve parameters passed from the config layer.
+#[derive(Debug, Clone)]
+pub struct BondingCurveParams {
+    pub n_half: u64,
+    pub poll_interval_secs: u64,
+    pub min_balance_multiplier: u64,
+}
+
+/// Spawn an adaptive seal loop driven by the bonding curve. Instead of
+/// sealing on a fixed timer, this loop polls `oracle` for the current
+/// wallet balance and gas cost, computes the publication rate via
+/// `bonding_curve::publication_rate`, and seals when the resulting block
+/// interval has elapsed.
+///
+/// Falls back to the minimum-runway behaviour automatically: when funds
+/// are low the interval grows; when the oracle fails the loop retries
+/// after `poll_interval_secs` without sealing.
+pub fn run_sealer_with_bonding_curve<C: Clock + 'static>(
+    accumulator: Arc<Accumulator>,
+    store: Store,
+    clock: C,
+    oracle: Arc<dyn crate::bonding_curve::BalanceOracle>,
+    params: BondingCurveParams,
+    witness_ctx: Option<WitnessContext>,
+    event_bus: Option<crate::events::EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    use crate::bonding_curve;
+
+    tokio::spawn(async move {
+        let poll = Duration::from_secs(params.poll_interval_secs.max(1));
+        let mut last_seal_block: u64 = 0;
+        let mut virtual_block: u64 = 0;
+
+        loop {
+            tokio::time::sleep(poll).await;
+            virtual_block += 1;
+
+            let (balance, gas_cost) = match oracle.balance_and_gas_cost().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!(error = %e, "bonding curve oracle query failed, skipping cycle");
+                    continue;
+                }
+            };
+
+            if gas_cost == 0 {
+                warn!("oracle returned zero gas cost, skipping cycle");
+                continue;
+            }
+
+            let min_balance = gas_cost * params.min_balance_multiplier as u128;
+            if balance < min_balance {
+                info!(
+                    balance_wei = balance,
+                    min_balance_wei = min_balance,
+                    "balance below safety margin, skipping seal"
+                );
+                continue;
+            }
+
+            let rate = bonding_curve::publication_rate(balance, gas_cost, params.n_half);
+            let interval = bonding_curve::block_interval(rate);
+            let runway = bonding_curve::runway_blocks(balance, gas_cost, params.n_half);
+
+            if (virtual_block - last_seal_block) >= interval {
+                let now = clock.now_secs();
+                info!(
+                    rate = format!("{rate:.4}"),
+                    interval_blocks = interval,
+                    runway_blocks = format!("{runway:.0}"),
+                    balance_wei = balance,
+                    gas_cost_wei = gas_cost,
+                    "bonding curve seal triggered"
+                );
+                match seal_once(
+                    &accumulator,
+                    &store,
+                    now,
+                    params.poll_interval_secs,
+                    witness_ctx.as_ref(),
+                )
+                .await
+                {
+                    Ok((record, _witnesses)) => {
+                        if let Some(ref bus) = event_bus {
+                            bus.send(crate::events::SseEvent::EpochSealed {
+                                epoch_id: record.id,
+                                leaf_count: record.leaf_count,
+                                merkle_root: record.merkle_root_hex(),
+                                timestamp: now,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "bonding curve seal cycle failed");
+                    }
+                }
+                last_seal_block = virtual_block;
             }
         }
     })
@@ -343,10 +451,11 @@ pub fn run_sealer_with_channel(
     mut rx: mpsc::Receiver<SealTick>,
     duration_secs: u64,
     witness_ctx: Option<WitnessContext>,
+    event_bus: Option<crate::events::EventBus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(tick) = rx.recv().await {
-            if let Err(e) = seal_once(
+            match seal_once(
                 &accumulator,
                 &store,
                 tick.now,
@@ -355,7 +464,19 @@ pub fn run_sealer_with_channel(
             )
             .await
             {
-                error!(error = %e, "seal cycle failed");
+                Ok((record, _witnesses)) => {
+                    if let Some(ref bus) = event_bus {
+                        bus.send(crate::events::SseEvent::EpochSealed {
+                            epoch_id: record.id,
+                            leaf_count: record.leaf_count,
+                            merkle_root: record.merkle_root_hex(),
+                            timestamp: tick.now,
+                        });
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "seal cycle failed");
+                }
             }
         }
     })
@@ -701,7 +822,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SealTick>(8);
 
         let _clock = FixedClock::new(0);
-        let handle = run_sealer_with_channel(Arc::clone(&acc), store.clone(), rx, 60, None);
+        let handle = run_sealer_with_channel(Arc::clone(&acc), store.clone(), rx, 60, None, None);
 
         acc.append_batch(&[[7u8; 32]], DID_A);
         tx.send(SealTick { now: 60 }).await.unwrap();
@@ -715,5 +836,137 @@ mod tests {
         let rec = store.get_epoch(1).unwrap().expect("sealed");
         assert_eq!(rec.id, 1);
         assert_eq!(rec.leaf_count, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn bonding_curve_sealer_seals_on_computed_interval() {
+        use crate::bonding_curve::MockOracle;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Arc::new(Accumulator::new(1, 0, 60));
+        acc.append_batch(&[[8u8; 32]], DID_A);
+
+        let clock = FixedClock::new(60);
+        // 10 ETH balance, 0.00135 ETH gas => ~7407 txs => rate ~0.643 => interval 2
+        let oracle = Arc::new(MockOracle {
+            balance_wei: 10_000_000_000_000_000_000,
+            gas_cost_wei: 1_350_000_000_000_000,
+        }) as Arc<dyn crate::bonding_curve::BalanceOracle>;
+
+        let params = BondingCurveParams {
+            n_half: 7200,
+            poll_interval_secs: 1,
+            min_balance_multiplier: 2,
+        };
+
+        let handle = run_sealer_with_bonding_curve(
+            Arc::clone(&acc),
+            store.clone(),
+            clock,
+            oracle,
+            params,
+            None,
+            None,
+        );
+
+        // Advance one tick at a time, yielding between each so the
+        // spawned task processes each sleep wake-up.
+        for _ in 0..4 {
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+
+        handle.abort();
+        let _ = handle.await;
+
+        let rec = store.get_epoch(1).unwrap().expect("epoch 1 should be sealed");
+        assert_eq!(rec.leaf_count, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn bonding_curve_sealer_skips_on_low_balance() {
+        use crate::bonding_curve::MockOracle;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Arc::new(Accumulator::new(1, 0, 60));
+        acc.append_batch(&[[9u8; 32]], DID_A);
+
+        let clock = FixedClock::new(60);
+        // Balance < 2 * gas_cost: should not seal
+        let oracle = Arc::new(MockOracle {
+            balance_wei: 1_000_000_000_000_000, // 0.001 ETH
+            gas_cost_wei: 1_350_000_000_000_000, // 0.00135 ETH
+        }) as Arc<dyn crate::bonding_curve::BalanceOracle>;
+
+        let params = BondingCurveParams {
+            n_half: 7200,
+            poll_interval_secs: 1,
+            min_balance_multiplier: 2,
+        };
+
+        let handle = run_sealer_with_bonding_curve(
+            Arc::clone(&acc),
+            store.clone(),
+            clock,
+            oracle,
+            params,
+            None,
+            None,
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(
+            store.get_epoch(1).unwrap().is_none(),
+            "should not seal when balance is below safety margin"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn bonding_curve_sealer_survives_oracle_failure() {
+        use crate::bonding_curve::FailingOracle;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let acc = Arc::new(Accumulator::new(1, 0, 60));
+        acc.append_batch(&[[10u8; 32]], DID_A);
+
+        let clock = FixedClock::new(60);
+        let oracle = Arc::new(FailingOracle {
+            message: "rpc down".into(),
+        }) as Arc<dyn crate::bonding_curve::BalanceOracle>;
+
+        let params = BondingCurveParams {
+            n_half: 7200,
+            poll_interval_secs: 1,
+            min_balance_multiplier: 2,
+        };
+
+        let handle = run_sealer_with_bonding_curve(
+            Arc::clone(&acc),
+            store.clone(),
+            clock,
+            oracle,
+            params,
+            None,
+            None,
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(
+            store.get_epoch(1).unwrap().is_none(),
+            "should not seal when oracle fails"
+        );
     }
 }

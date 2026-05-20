@@ -7,6 +7,7 @@ pub mod config;
 pub mod docs;
 pub mod identity;
 pub mod landing;
+pub mod oracle;
 pub mod routes;
 pub mod state;
 
@@ -17,7 +18,11 @@ use aqua_rs_sdk::{web::tsa::TsaTimestamper, CliEthTimestamper, Secp256k1Signer};
 use aqua_timestamp_core::{
     accumulator::Accumulator,
     anchors::AnchorProvider,
-    sealer::{run_sealer_with_channel, run_sealer_with_interval, SealTick, WitnessContext},
+    bonding_curve::BalanceOracle,
+    sealer::{
+        run_sealer_with_bonding_curve, run_sealer_with_channel, run_sealer_with_interval,
+        BondingCurveParams, SealTick, WitnessContext,
+    },
     storage::Store,
     time::{Clock, SystemClock},
     witness::AnchorMethod,
@@ -174,6 +179,39 @@ pub async fn build_app(
 
     // Spawn the seal task.
     match seal_driver {
+        SealDriver::Interval if cfg.bonding_curve.enabled => {
+            let wallet_addr: alloy::primitives::Address =
+                identity.address_eip55.parse().with_context(|| {
+                    format!(
+                        "parsing service wallet address {:?}",
+                        identity.address_eip55
+                    )
+                })?;
+            let oracle: Arc<dyn BalanceOracle> = Arc::new(oracle::AlloyOracle::new(
+                evm_anchor_cfg.rpc_url.clone(),
+                wallet_addr,
+            ));
+            let params = BondingCurveParams {
+                n_half: cfg.bonding_curve.n_half,
+                poll_interval_secs: cfg.bonding_curve.poll_interval_secs,
+                min_balance_multiplier: cfg.bonding_curve.min_balance_multiplier,
+            };
+            info!(
+                n_half = params.n_half,
+                poll_interval_secs = params.poll_interval_secs,
+                rpc_url = %evm_anchor_cfg.rpc_url,
+                "bonding curve sealer enabled"
+            );
+            run_sealer_with_bonding_curve(
+                Arc::clone(&accumulator),
+                store.clone(),
+                clock,
+                oracle,
+                params,
+                Some(witness_ctx.clone()),
+                None,
+            );
+        }
         SealDriver::Interval => {
             run_sealer_with_interval(
                 Arc::clone(&accumulator),
@@ -181,6 +219,7 @@ pub async fn build_app(
                 clock,
                 cfg.epoch.duration_secs,
                 Some(witness_ctx.clone()),
+                None,
             );
         }
         SealDriver::Channel(rx) => {
@@ -190,6 +229,7 @@ pub async fn build_app(
                 rx,
                 cfg.epoch.duration_secs,
                 Some(witness_ctx.clone()),
+                None,
             );
         }
         SealDriver::Off => {}
