@@ -44,7 +44,7 @@ body {
   font-family: var(--sans);
   background: var(--bg);
   color: var(--text);
-  line-height: 1.6;
+  line-height: 1.7;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -72,6 +72,46 @@ section + section {
   border-top: 1px solid var(--border);
 }
 
+/* ── Top bar ─────────────────────────────────────────────────────── */
+
+.top-bar {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.top-bar .container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.top-bar-brand {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.top-bar-nav {
+  margin-left: auto;
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.85rem;
+}
+
+/* ── Section eyebrows ────────────────────────────────────────────── */
+
+.section-eyebrow {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
 /* ── Section 1: Hero ─────────────────────────────────────────────── */
 
 @keyframes hero-fade-up {
@@ -94,7 +134,7 @@ section + section {
   background-size: 40px 40px;
   mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
   -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
-  opacity: 0.45;
+  opacity: 0.35;
   pointer-events: none;
 }
 
@@ -1107,6 +1147,18 @@ section + section {
   </div>
 </div>
 
+<!-- Top bar -->
+<div class="top-bar">
+  <div class="container">
+    <a href="/" class="top-bar-brand">OpenWitness.org</a>
+    <nav class="top-bar-nav">
+      <a href="/blueprint">Blueprint</a>
+      <a href="/docs">Docs</a>
+      <a href="/.well-known/aqua-identity">Identity</a>
+    </nav>
+  </div>
+</div>
+
 <!-- Section 1: Hero -->
 <section class="hero">
   <div class="container">
@@ -1146,6 +1198,7 @@ section + section {
 <!-- Section 2: Operational Overview -->
 <section class="ops-section">
   <div class="container">
+    <div class="section-eyebrow">Service Status</div>
     <h2>Operational Overview</h2>
     <p class="ops-subtitle">Live anchoring channels and service statistics</p>
 
@@ -1281,6 +1334,7 @@ section + section {
 <!-- Section 2.5: Contributors -->
 <section class="contributors-section">
   <div class="container">
+    <div class="section-eyebrow">Leaderboard</div>
     <h2>Contributors</h2>
     <p class="contributors-subtitle">Public scoreboard of wallets fueling the service</p>
 
@@ -1317,6 +1371,7 @@ section + section {
 <!-- Section 3: Support the Project -->
 <section class="support-section">
   <div class="container">
+    <div class="section-eyebrow">Support</div>
     <h2>Help us build trust</h2>
     <p class="support-subtitle">This is a non-profit activity of inblock.io. All goals are aqua-verified and trackable.</p>
 
