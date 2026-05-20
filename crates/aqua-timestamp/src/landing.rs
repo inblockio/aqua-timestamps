@@ -3,7 +3,7 @@ pub const HTML: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Aqua Aggregator · timestamp.inblock.io</title>
+<title>OpenWitness.org · Free and Open Time Stamping</title>
 <link rel="icon" href="/favicon.ico" type="image/x-icon" />
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <style>
@@ -12,8 +12,8 @@ pub const HTML: &str = r##"<!doctype html>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --accent: #E8611A;
-  --accent-hover: #D4570F;
+  --accent: #5B9BD5;
+  --accent-hover: #4889BF;
   --define-blue: #4895ef;
   --enforce-amber: #d97706;
   --proof-green: #2a8a5a;
@@ -74,36 +74,213 @@ section + section {
 
 /* ── Section 1: Hero ─────────────────────────────────────────────── */
 
+@keyframes hero-fade-up {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .hero {
-  padding: 5rem 0 4rem;
+  padding: 6rem 0 5rem;
   text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  top: 15%;
+  left: 50%;
+  width: 700px;
+  height: 700px;
+  transform: translateX(-50%);
+  background: radial-gradient(circle, rgba(91, 155, 213, 0.06) 0%, transparent 55%);
+  pointer-events: none;
+}
+
+.hero > .container {
+  position: relative;
+  z-index: 1;
 }
 
 .hero-eyebrow {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.15em;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--accent);
-  margin-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  animation: hero-fade-up 0.7s ease both;
+}
+
+.hero-eyebrow::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: var(--accent);
+  border-radius: 1px;
+  transform: rotate(45deg);
 }
 
 .hero h1 {
-  font-size: clamp(1.75rem, 4vw, 2.75rem);
+  font-size: clamp(2rem, 5vw, 3.25rem);
   font-weight: 700;
-  line-height: 1.2;
-  margin-bottom: 1.25rem;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  margin-bottom: 1.5rem;
   max-width: 720px;
   margin-left: auto;
   margin-right: auto;
+  animation: hero-fade-up 0.7s ease 0.08s both;
 }
 
-.hero-body {
-  font-size: 1.05rem;
-  color: var(--dim);
+.hero-descriptor {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  color: var(--proof-green);
+  font-weight: 400;
   max-width: 640px;
-  margin: 0 auto 2rem;
+  margin: 0 auto 1.75rem;
+  line-height: 1.6;
+  padding: 0.5rem 1.25rem;
+  border: 1px solid rgba(42, 138, 90, 0.25);
+  border-radius: 10px;
+  display: inline-block;
+  background: rgba(42, 138, 90, 0.06);
+  animation: hero-fade-up 0.7s ease 0.16s both;
+}
+
+.hero-mission {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--text);
+  max-width: 640px;
+  margin: 0 auto 1.5rem;
+  line-height: 1.6;
+  animation: hero-fade-up 0.7s ease 0.22s both;
+}
+
+.mission-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  display: inline-block;
+  margin-bottom: 0.25rem;
+}
+
+.epoch-metric {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  margin: 0 auto 1.75rem;
+  cursor: pointer;
+  user-select: none;
+  animation: hero-fade-up 0.7s ease 0.26s both;
+}
+
+.epoch-metric-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.epoch-metric:hover .epoch-metric-inner {
+  border-color: rgba(91, 155, 213, 0.3);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+}
+
+.epoch-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(91, 155, 213, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(91, 155, 213, 0); }
+}
+
+.epoch-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.epoch-unit {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.epoch-vision {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  font-size: 0.82rem;
+  color: var(--dim);
+  line-height: 1.5;
+  max-width: 420px;
+  text-align: center;
+  transition: max-height 0.3s ease, opacity 0.3s ease, margin 0.3s ease;
+  margin-top: 0;
+}
+
+.epoch-vision.open {
+  max-height: 3rem;
+  opacity: 1;
+  margin-top: 0.5rem;
+}
+
+.hero-blockquote {
+  max-width: 580px;
+  margin: 0 auto 2.5rem;
+  padding: 1.25rem 1.5rem;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 10px 10px 0;
+  text-align: left;
+  animation: hero-fade-up 0.7s ease 0.28s both;
+}
+
+.hero-blockquote p {
+  font-size: 0.95rem;
+  color: var(--dim);
   line-height: 1.7;
+  margin: 0;
+}
+
+.hero-blockquote p + p {
+  margin-top: 0.75rem;
 }
 
 .value-pills {
@@ -111,6 +288,7 @@ section + section {
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.75rem;
+  animation: hero-fade-up 0.7s ease 0.38s both;
 }
 
 .value-pill {
@@ -121,8 +299,15 @@ section + section {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface);
-  font-size: 0.875rem;
+  font-size: 0.85rem;
   font-weight: 500;
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.value-pill:hover {
+  transform: translateY(-2px);
+  border-color: rgba(91, 155, 213, 0.3);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
 
 .value-pill .dot {
@@ -132,8 +317,7 @@ section + section {
   flex-shrink: 0;
 }
 
-.value-pill.blue .dot { background: var(--define-blue); }
-.value-pill.green .dot { background: var(--proof-green); }
+.value-pill .dot { background: var(--accent); box-shadow: 0 0 6px rgba(91, 155, 213, 0.4); }
 
 /* ── Section 2: Operational Overview ────────────────────────────── */
 
@@ -253,6 +437,51 @@ section + section {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 500;
+}
+
+/* ── Fuel the machine ──────────────────────────────────────────── */
+
+.fuel-heading {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 2.5rem 0 0.35rem;
+  text-align: center;
+}
+
+.fuel-subtitle {
+  text-align: center;
+  color: var(--dim);
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.fuel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.fuel-chain-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.fuel-chain-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.fuel-note {
+  font-size: 0.78rem;
+  color: var(--dim);
+  margin-top: 0.75rem;
+  font-style: italic;
 }
 
 /* ── Section 3: Support ──────────────────────────────────────────── */
@@ -400,7 +629,179 @@ section + section {
   font-style: italic;
 }
 
-/* ── ORL Badge ───────────────────────────────────────────────────── */
+/* ── Section 2.5: Contributors ──────────────────────────────────── */
+
+.contributors-section h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
+.contributors-subtitle {
+  text-align: center;
+  color: var(--dim);
+  margin-bottom: 2rem;
+  font-size: 0.95rem;
+}
+
+.chain-tabs {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1.5rem;
+}
+
+.chain-tab {
+  padding: 0.5rem 1.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: var(--sans);
+}
+
+.chain-tab:first-child { border-radius: 8px 0 0 8px; }
+.chain-tab:last-child { border-radius: 0 8px 8px 0; border-left: none; }
+
+.chain-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.chain-tab:not(.active):hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.leaderboard-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.leaderboard-header {
+  display: grid;
+  grid-template-columns: 3rem 1fr 7rem 6rem 5.5rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 3rem 1fr 7rem 6rem 5.5rem;
+  padding: 0.75rem 1.5rem;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+
+.leaderboard-row:last-child { border-bottom: none; }
+
+.leaderboard-row:hover { background: rgba(127, 127, 127, 0.04); }
+
+.lb-rank {
+  font-weight: 700;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.lb-rank.gold { color: #d4a017; }
+.lb-rank.silver { color: #94a3b8; }
+.lb-rank.bronze { color: #b45309; }
+
+.lb-did {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 1rem;
+}
+
+.lb-fuel {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-align: right;
+}
+
+.lb-hashes {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+.lb-active {
+  font-size: 0.8rem;
+  color: var(--dim);
+  text-align: right;
+}
+
+.pool-status {
+  margin-top: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: center;
+  font-size: 0.82rem;
+  color: var(--dim);
+}
+
+.pool-bar-wrap {
+  width: 120px;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.pool-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.leaderboard-empty {
+  padding: 3rem 1.5rem;
+  text-align: center;
+  color: var(--dim);
+}
+
+.leaderboard-empty-title {
+  font-size: 0.95rem;
+  margin-bottom: 0.35rem;
+}
+
+.leaderboard-empty-hint {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+@media (max-width: 640px) {
+  .leaderboard-header,
+  .leaderboard-row {
+    grid-template-columns: 2.5rem 1fr 5.5rem 4.5rem;
+  }
+  .lh-active,
+  .lb-active { display: none; }
+}
+
+/* ── ORL Badge & Panel ─────────────────────────────────────────── */
 
 .orl-badge {
   position: fixed;
@@ -415,14 +816,15 @@ section + section {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 500;
   user-select: none;
-  transition: box-shadow 0.2s;
+  transition: box-shadow 0.2s, border-color 0.2s;
 }
 
 .orl-badge:hover {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  border-color: rgba(249, 115, 22, 0.3);
 }
 
 .orl-dot {
@@ -433,7 +835,8 @@ section + section {
   flex-shrink: 0;
 }
 
-.orl-label { color: var(--text); }
+.orl-label-full { color: var(--text); }
+.orl-label-short { display: none; color: var(--text); }
 
 .orl-panel {
   display: none;
@@ -441,34 +844,40 @@ section + section {
   top: 3.5rem;
   right: 1rem;
   z-index: 101;
-  width: 340px;
+  width: 400px;
   max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 1.25rem;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
 }
 
 .orl-panel.open { display: block; }
 
 .orl-panel-title {
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
   margin-bottom: 0.25rem;
 }
 
-.orl-panel-desc {
-  font-size: 0.85rem;
+.orl-panel-current {
+  font-size: 0.82rem;
   color: var(--dim);
   margin-bottom: 1rem;
-  line-height: 1.5;
+}
+
+.orl-panel-current strong {
+  color: #F97316;
+  font-weight: 600;
 }
 
 .orl-progress {
   display: flex;
   gap: 4px;
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
 }
 
 .orl-segment {
@@ -478,38 +887,113 @@ section + section {
   background: var(--border);
 }
 
-.orl-segment.lit-red { background: #ef4444; }
-.orl-segment.lit-orange { background: #F97316; }
-
-.orl-checklist {
-  list-style: none;
-  font-size: 0.82rem;
-  margin-bottom: 1rem;
-}
-
-.orl-checklist li {
-  padding: 0.25rem 0;
+.orl-levels {
   display: flex;
-  align-items: flex-start;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 1.25rem;
 }
 
-.orl-checklist li::before {
+.orl-level {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  overflow: hidden;
+}
+
+.orl-level:hover {
+  background: rgba(127, 127, 127, 0.05);
+}
+
+.orl-level.expanded {
+  border-color: var(--border);
+  background: rgba(127, 127, 127, 0.04);
+}
+
+.orl-level-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+}
+
+.orl-level-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
   flex-shrink: 0;
-  font-size: 0.85rem;
-  line-height: 1.4;
+  background: var(--dot-color);
 }
 
-.orl-checklist li.met::before { content: "\2713"; color: var(--proof-green); }
-.orl-checklist li.unmet::before { content: "\2717"; color: var(--dim); }
-
-.orl-link {
+.orl-level-name {
   font-size: 0.82rem;
+  font-weight: 500;
+  flex: 1;
+}
+
+.orl-level.future .orl-level-name { color: var(--dim); }
+.orl-level.future .orl-level-dot { opacity: 0.35; }
+
+.orl-level-tag {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.orl-level-tag.tag-passed {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--proof-green);
+}
+
+.orl-level-tag.tag-current {
+  background: rgba(249, 115, 22, 0.15);
+  color: #F97316;
+}
+
+.orl-level-body {
+  display: none;
+  padding: 0 0.65rem 0.65rem;
+}
+
+.orl-level.expanded .orl-level-body { display: block; }
+
+.orl-level-body p {
+  font-size: 0.78rem;
+  color: var(--dim);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.orl-context {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+.orl-context p {
+  font-size: 0.78rem;
+  color: var(--dim);
+  line-height: 1.55;
+  margin: 0 0 0.5rem;
+}
+
+.orl-context a { color: var(--accent); }
+
+.orl-decl-link {
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 @media (max-width: 600px) {
-  .orl-label { display: none; }
-  .orl-badge { padding: 0.4rem; border-radius: 50%; }
+  .orl-label-full { display: none; }
+  .orl-label-short { display: inline; }
+  .orl-panel { width: calc(100vw - 2rem); }
 }
 
 /* ── Footer ──────────────────────────────────────────────────────── */
@@ -538,7 +1022,7 @@ section + section {
 
 @media (max-width: 640px) {
   section { padding: 2.5rem 0; }
-  .hero { padding: 3rem 0 2.5rem; }
+  .hero { padding: 3.5rem 0 2.5rem; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
 }
 </style>
@@ -548,45 +1032,113 @@ section + section {
 <!-- ORL Badge -->
 <div class="orl-badge" id="orl-badge" onclick="toggleOrl()">
   <span class="orl-dot"></span>
-  <span class="orl-label">ORL-2 Development</span>
+  <span class="orl-label-full">Operational Readiness Level (ORL-2)</span>
+  <span class="orl-label-short">ORL-2</span>
 </div>
 
 <div class="orl-panel" id="orl-panel">
-  <div class="orl-panel-title">ORL-2: Development</div>
-  <div class="orl-panel-desc">Maintained but unstable. Breaking changes possible. No SLA.</div>
+  <div class="orl-panel-title">Operational Readiness Level</div>
+  <div class="orl-panel-current">This service is at <strong>ORL-2: Development</strong></div>
+
   <div class="orl-progress">
-    <div class="orl-segment lit-red"></div>
-    <div class="orl-segment lit-orange"></div>
+    <div class="orl-segment" style="background: #EF4444"></div>
+    <div class="orl-segment" style="background: #F97316"></div>
     <div class="orl-segment"></div>
     <div class="orl-segment"></div>
     <div class="orl-segment"></div>
   </div>
-  <ul class="orl-checklist">
-    <li class="met">Source code published</li>
-    <li class="met">Automated build and deploy</li>
-    <li class="met">Health endpoint available</li>
-    <li class="met">Dual-anchor operational (EVM + qTSA)</li>
-    <li class="unmet">Security review not started</li>
-    <li class="unmet">Backup restore not verified</li>
-    <li class="unmet">Monitoring and alerting not active</li>
-    <li class="unmet">Dependency audit not completed</li>
-  </ul>
-  <a class="orl-link" href="/.well-known/aqua-orl">View ORL declaration (JSON)</a>
+
+  <div class="orl-levels" id="orl-levels">
+    <div class="orl-level passed" data-level="1" onclick="selectOrlLevel(1)">
+      <div class="orl-level-header">
+        <span class="orl-level-dot" style="--dot-color: #EF4444"></span>
+        <span class="orl-level-name">ORL-1: Experimental</span>
+        <span class="orl-level-tag tag-passed">Passed</span>
+      </div>
+      <div class="orl-level-body">
+        <p>Use at own risk. No backups, no security hardening, no uptime guarantee. May be taken down without notice. Data may be lost at any time.</p>
+      </div>
+    </div>
+
+    <div class="orl-level current expanded" data-level="2" onclick="selectOrlLevel(2)">
+      <div class="orl-level-header">
+        <span class="orl-level-dot" style="--dot-color: #F97316"></span>
+        <span class="orl-level-name">ORL-2: Development</span>
+        <span class="orl-level-tag tag-current">Current</span>
+      </div>
+      <div class="orl-level-body">
+        <p>Maintained but unstable. Someone is actively working on this. Breaking changes may happen but are communicated. Basic deployment exists. No SLA.</p>
+      </div>
+    </div>
+
+    <div class="orl-level future" data-level="3" onclick="selectOrlLevel(3)">
+      <div class="orl-level-header">
+        <span class="orl-level-dot" style="--dot-color: #EAB308"></span>
+        <span class="orl-level-name">ORL-3: Pre-production</span>
+      </div>
+      <div class="orl-level-body">
+        <p>Service is stabilizing. Safe to evaluate for production adoption. Breaking changes only with a migration path. Active monitoring, but no formal SLA yet.</p>
+      </div>
+    </div>
+
+    <div class="orl-level future" data-level="4" onclick="selectOrlLevel(4)">
+      <div class="orl-level-header">
+        <span class="orl-level-dot" style="--dot-color: #84CC16"></span>
+        <span class="orl-level-name">ORL-4: Operational (Limited)</span>
+      </div>
+      <div class="orl-level-body">
+        <p>Reliable for production use with documented limitations. Incidents will be responded to. Data is protected with automated backups and tested restore.</p>
+      </div>
+    </div>
+
+    <div class="orl-level future" data-level="5" onclick="selectOrlLevel(5)">
+      <div class="orl-level-header">
+        <span class="orl-level-dot" style="--dot-color: #22C55E"></span>
+        <span class="orl-level-name">ORL-5: Operational (Full)</span>
+      </div>
+      <div class="orl-level-body">
+        <p>Production-grade, fully supported service. Clear SLA with accountability. Proactive maintenance and monitoring. Comprehensive incident response.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="orl-context">
+    <p><a href="https://inblock.io">inblock.io</a> uses Operational Readiness Levels to transparently signal the maturity of its projects and services. We are committed to building open trust infrastructure.</p>
+  </div>
 </div>
 
 <!-- Section 1: Hero -->
 <section class="hero">
   <div class="container">
-    <div class="hero-eyebrow">Aqua Timestamp Service</div>
-    <h1>A free anchor of trust for a world that needs it</h1>
-    <p class="hero-body">
-      Trust is eroding. Uncertainty is rising. We made it our mission to provide
-      a free, public timestamping service that anchors data integrity across
-      jurisdictions and blockchains. No accounts. No fees. Just proof.
+    <div class="hero-eyebrow">OpenWitness.org</div>
+    <h1>Free and Open<br>Time Stamping Service</h1>
+    <p class="hero-descriptor">
+      Dual-anchored to Ethereum and qualified Timestamping Authorities
     </p>
+    <p class="hero-mission">
+      <span class="mission-label">Our Mission</span><br>
+      Highest-trust timestamping with cross-jurisdictional acceptance.
+    </p>
+    <div class="epoch-metric" id="epoch-metric" onclick="toggleEpochVision()">
+      <div class="epoch-metric-inner">
+        <span class="epoch-pulse"></span>
+        <span class="epoch-value mono" id="epoch-metric-value">...</span>
+        <span class="epoch-unit">min epoch</span>
+      </div>
+      <div class="epoch-vision" id="epoch-vision">
+        Our target: settle with every block on Ethereum mainnet and the Bitcoin network.
+      </div>
+    </div>
+    <blockquote class="hero-blockquote">
+      <p>The more we are trusted, the faster our time-service becomes.
+      We are built for resilience and lasting proof.</p>
+      <p>A new standard of accountability and trust: OpenWitness.org as a
+      for trusted institutions. <a href="#">Learn more</a></p>
+    </blockquote>
     <div class="value-pills">
-      <span class="value-pill blue"><span class="dot"></span> Fastest multi-chain publishing</span>
-      <span class="value-pill green"><span class="dot"></span> Most trusted cross-jurisdiction anchoring</span>
+      <span class="value-pill blue"><span class="dot"></span>Dual-anchored: EVM + eIDAS qTSA</span>
+      <span class="value-pill green"><span class="dot"></span>Self-auditing by protocol</span>
+      <span class="value-pill amber"><span class="dot"></span>Open Institutional Design</span>
     </div>
   </div>
 </section>
@@ -684,6 +1236,79 @@ section + section {
       <div class="stat-card">
         <div class="stat-value mono" id="stat-online-since">...</div>
         <div class="stat-label">Online since</div>
+      </div>
+    </div>
+
+    <h3 class="fuel-heading">Fuel the machine</h3>
+    <p class="fuel-subtitle">The service is free. Contributions are fuel that powers timestamping and operations.</p>
+
+    <div class="fuel-grid">
+      <div class="channel-card">
+        <div class="fuel-chain-label">
+          <span class="fuel-chain-dot" style="background: var(--define-blue)"></span>
+          Ethereum
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-label">Fuel</span>
+          <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f<span class="copied-tooltip">Copied</span></span>
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-label">Ops</span>
+          <span class="wallet-addr mono">FIXME</span>
+        </div>
+        <p class="fuel-note">Split governed by on-chain smart contract</p>
+      </div>
+
+      <div class="channel-card">
+        <div class="fuel-chain-label">
+          <span class="fuel-chain-dot" style="background: var(--enforce-amber)"></span>
+          Bitcoin
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-label">Fuel</span>
+          <span class="wallet-addr mono">FIXME</span>
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-label">Ops</span>
+          <span class="wallet-addr mono">FIXME</span>
+        </div>
+        <p class="fuel-note">Native split at each difficulty epoch (~2 weeks)</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2.5: Contributors -->
+<section class="contributors-section">
+  <div class="container">
+    <h2>Contributors</h2>
+    <p class="contributors-subtitle">Public scoreboard of wallets fueling the service</p>
+
+    <div class="chain-tabs">
+      <button class="chain-tab active" data-chain="eth" onclick="switchChain('eth')">ETH</button>
+      <button class="chain-tab" data-chain="btc" onclick="switchChain('btc')">BTC</button>
+    </div>
+
+    <div class="leaderboard-card">
+      <div class="leaderboard-header">
+        <span>#</span>
+        <span>Wallet</span>
+        <span class="lh-fuel" style="text-align:right">Fuel</span>
+        <span class="lh-hashes" style="text-align:right">Hashes</span>
+        <span class="lh-active" style="text-align:right">Active</span>
+      </div>
+      <div id="leaderboard-body">
+        <div class="leaderboard-empty">
+          <div class="leaderboard-empty-title">No contributors yet</div>
+          <div class="leaderboard-empty-hint">Send fuel to the wallet below to appear on the board</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pool-status">
+      <span>Pool: <span class="mono" id="pool-count">0</span> / <span class="mono">500</span></span>
+      <div class="pool-bar-wrap">
+        <div class="pool-bar-fill" id="pool-bar" style="width: 0%"></div>
       </div>
     </div>
   </div>
@@ -860,6 +1485,8 @@ section + section {
     var durSecs = data.epoch_duration_secs;
     if (durSecs) {
       $('evm-epoch-cycle').textContent = durSecs + 's';
+      var mins = (durSecs / 60).toFixed(1).replace(/\.0$/, '');
+      $('epoch-metric-value').textContent = mins;
     }
     if (data.last_sealed_at) {
       lastSealedAt = data.last_sealed_at;
@@ -878,6 +1505,98 @@ section + section {
     }
   }
 
+  /* ── Leaderboard ──────────────────────────────────────────────── */
+
+  var currentChain = 'eth';
+
+  function truncateDid(did) {
+    if (!did || did.length < 24) return did || '';
+    return did.slice(0, 18) + '…' + did.slice(-8);
+  }
+
+  function formatFuel(amount, chain) {
+    if (chain === 'btc') return (Number(amount) / 1e8).toFixed(6) + ' BTC';
+    return (Number(amount) / 1e18).toFixed(4) + ' ETH';
+  }
+
+  function rankClass(i) {
+    if (i === 0) return 'gold';
+    if (i === 1) return 'silver';
+    if (i === 2) return 'bronze';
+    return '';
+  }
+
+  function renderLeaderboard(entries, chain) {
+    var body = $('leaderboard-body');
+    if (!entries || entries.length === 0) {
+      body.innerHTML = '<div class="leaderboard-empty">' +
+        '<div class="leaderboard-empty-title">No contributors yet</div>' +
+        '<div class="leaderboard-empty-hint">Send fuel to the wallet below to appear on the board</div>' +
+        '</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var rc = rankClass(i);
+      var fuelVal = chain === 'btc' ? e.fuel_contributed_sat : e.fuel_contributed_wei;
+      html += '<div class="leaderboard-row">' +
+        '<span class="lb-rank ' + rc + '">' + (i + 1) + '</span>' +
+        '<span class="lb-did" title="' + (e.did || '') + '">' + truncateDid(e.did) + '</span>' +
+        '<span class="lb-fuel">' + formatFuel(fuelVal || 0, chain) + '</span>' +
+        '<span class="lb-hashes">' + (e.hashes_submitted || 0) + '</span>' +
+        '<span class="lb-active">' + timeAgo(e.last_active) + '</span>' +
+        '</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  function fetchLeaderboard(chain) {
+    fetch('/v1/leaderboard?chain=' + chain)
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var wallets = data.wallets || data;
+        renderLeaderboard(Array.isArray(wallets) ? wallets : [], chain);
+        if (data.pool_count != null) {
+          $('pool-count').textContent = String(data.pool_count);
+          var pct = Math.min(100, (data.pool_count / (data.max_pool || 500)) * 100);
+          $('pool-bar').style.width = pct + '%';
+        }
+      })
+      .catch(function () {
+        renderLeaderboard([], chain);
+      });
+  }
+
+  function fetchPoolStatus() {
+    fetch('/v1/pool/status')
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (data.current != null) {
+          $('pool-count').textContent = String(data.current);
+          var pct = Math.min(100, (data.current / (data.max || 500)) * 100);
+          $('pool-bar').style.width = pct + '%';
+        }
+      })
+      .catch(function () { /* API not yet available */ });
+  }
+
+  window.switchChain = function (chain) {
+    currentChain = chain;
+    var tabs = document.querySelectorAll('.chain-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var active = tabs[i].getAttribute('data-chain') === chain;
+      tabs[i].classList.toggle('active', active);
+    }
+    fetchLeaderboard(chain);
+  };
+
   /* ── Fetch initial data ───────────────────────────────────────── */
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -888,6 +1607,9 @@ section + section {
       updateHealth(results[0]);
       updateSchedule(results[1]);
     });
+
+    fetchLeaderboard('eth');
+    fetchPoolStatus();
 
     /* ── SSE subscription ──────────────────────────────────────── */
 
@@ -952,6 +1674,23 @@ section + section {
   window.toggleOrl = function () {
     var panel = document.getElementById('orl-panel');
     panel.classList.toggle('open');
+  };
+
+  window.toggleEpochVision = function () {
+    var v = document.getElementById('epoch-vision');
+    v.classList.toggle('open');
+  };
+
+  window.selectOrlLevel = function (level) {
+    var levels = document.querySelectorAll('.orl-level');
+    for (var i = 0; i < levels.length; i++) {
+      var l = parseInt(levels[i].getAttribute('data-level'), 10);
+      if (l === level) {
+        levels[i].classList.toggle('expanded');
+      } else {
+        levels[i].classList.remove('expanded');
+      }
+    }
   };
 
   // Close ORL panel when clicking outside

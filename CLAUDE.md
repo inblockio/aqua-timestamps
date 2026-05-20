@@ -9,6 +9,14 @@ full architecture.
 This file is the project-scoped bootstrapper. It refines the global
 `~/.claude/CLAUDE.md`; defaults from there still apply.
 
+## Brand: OpenWitness.org
+
+The public-facing identity of this service is **OpenWitness.org**, with its
+own visual language distinct from inblock.io. Use the `brand-design-open-witness`
+skill (not the generic `brand-guide`) for all design, color, and copy decisions
+on the landing page and any future OpenWitness-branded surfaces. The skill is
+authoritative for OpenWitness brand choices.
+
 ## Read these first (in order)
 
 1. [`docs/success-criteria.md`](docs/success-criteria.md) — the contract.
@@ -483,6 +491,37 @@ overall architecture (single key, SDK-over-spec, Caddy not nginx-proxy).
 Those are now codified in `docs/success-criteria.md` and recapped above.
 If a future session disagrees with any of them, change them deliberately,
 not by drift.
+
+## Contributors / Leaderboard (added 2026-05-20)
+
+Public scoreboard on the landing page between "Operational Overview" and
+"Help us build trust". Two orthogonal leaderboards (ETH | BTC), each
+showing wallet DID, fuel contributed, hashes submitted, last active.
+
+**Skill:** `contributors-leaderboard` (invoke before modifying leaderboard
+UI, API, storage, or watcher). The skill tracks implementation status.
+
+**Self-learning loop:** When any session changes a leaderboard component
+(frontend JS in `landing.rs`, API handlers in `routes.rs`, storage
+partitions, watcher, or config), update the Implementation Status table
+in `~/.claude/skills/contributors-leaderboard/SKILL.md` to reflect the
+new state. This keeps the skill current across sessions.
+
+**v0.1 target:** Sepolia ETH sent to the server wallet
+(`0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f`) appears on the ETH
+leaderboard. No SIWE auth required for passive fuel contributors.
+
+**Implementation gaps (v0.1):**
+1. Config `[leaderboard]` section (trivial)
+2. fjall partitions: `contributor_stats`, `watcher_watermark` (small)
+3. Transaction watcher: poll Sepolia blocks for incoming txs (medium)
+4. Background poll task alongside sealer (small)
+5. `GET /v1/leaderboard?chain=eth` + `GET /v1/pool/status` handlers (small)
+6. Frontend JS is already wired and renders from these endpoints.
+
+**Spec:** `docs/handover/session-2026-05-20-capacity-wallet-pool.md`
+(Priority 3). Wallet pool design (MAX_POOL=500, 3-tier eviction) is
+deferred beyond v0.1.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
