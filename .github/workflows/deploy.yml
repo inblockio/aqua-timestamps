@@ -32,6 +32,7 @@ jobs:
             cd "$BUILD_DIR/aqua-timestamps" && git pull --ff-only origin main
             cd "$BUILD_DIR/aqua-rs-sdk"     && git pull --ff-only origin main
             cd "$BUILD_DIR/aqua-auth"       && git pull --ff-only origin main
+            cd "$BUILD_DIR/siwx-oidc"       && git pull --ff-only origin main
 
             # Copy Dockerfile + .dockerignore to build context root
             cd "$BUILD_DIR"
