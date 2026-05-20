@@ -203,9 +203,8 @@ section p.dim {
   border: 1px solid var(--border);
   padding: 1rem 1.25rem;
   display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
 }
 
 .stack-layer:first-child .stack-content {
