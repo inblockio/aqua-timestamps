@@ -42,6 +42,9 @@ pub struct Config {
     /// `r = 1 - exp(-B / (g * n_half))`.
     #[serde(default)]
     pub bonding_curve: BondingCurveConfig,
+    /// Leaderboard / balance-tracking configuration.
+    #[serde(default)]
+    pub leaderboard: LeaderboardConfig,
 }
 
 impl Config {
@@ -63,6 +66,21 @@ impl Config {
             evm.network_label = self.anchor_legacy.evm_network.clone();
         }
         evm
+    }
+
+    /// Derive a numeric chain id from the `[anchors.evm].chain` string.
+    /// Used by the leaderboard module to query on-chain balances on the
+    /// same chain the service is anchoring to.
+    pub fn leaderboard_chain_id(&self) -> u64 {
+        match self.anchors.evm.chain.as_str() {
+            "mainnet" => 1,
+            "sepolia" => 11155111,
+            "holesky" => 17000,
+            other if other.starts_with("custom:") => {
+                other["custom:".len()..].parse().unwrap_or(11155111)
+            }
+            _ => 11155111,
+        }
     }
 }
 
@@ -323,6 +341,61 @@ impl Default for BondingCurveConfig {
     }
 }
 
+/// `[leaderboard]`. Controls the balance-tracking leaderboard that
+/// monitors the service wallet's on-chain balance and manages the
+/// contributor pool.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LeaderboardConfig {
+    /// Enable or disable the leaderboard subsystem.
+    #[serde(default = "default_leaderboard_enabled")]
+    pub enabled: bool,
+
+    /// How often (in seconds) to poll the RPC for a fresh balance.
+    #[serde(default = "default_leaderboard_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+
+    /// JSON-RPC URL used for balance queries. Defaults to the same
+    /// public Sepolia endpoint the EVM anchor uses.
+    #[serde(default = "default_leaderboard_rpc_url")]
+    pub rpc_url: String,
+
+    /// Maximum number of wallets tracked in the contributor pool.
+    #[serde(default = "default_leaderboard_max_pool_size")]
+    pub max_pool_size: usize,
+
+    /// The wallet address whose balance is monitored.
+    #[serde(default = "default_leaderboard_wallet_address")]
+    pub wallet_address: String,
+}
+
+fn default_leaderboard_enabled() -> bool {
+    true
+}
+fn default_leaderboard_poll_interval_secs() -> u64 {
+    15
+}
+fn default_leaderboard_rpc_url() -> String {
+    default_evm_rpc_url()
+}
+fn default_leaderboard_max_pool_size() -> usize {
+    500
+}
+fn default_leaderboard_wallet_address() -> String {
+    "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f".to_string()
+}
+
+impl Default for LeaderboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_leaderboard_enabled(),
+            poll_interval_secs: default_leaderboard_poll_interval_secs(),
+            rpc_url: default_leaderboard_rpc_url(),
+            max_pool_size: default_leaderboard_max_pool_size(),
+            wallet_address: default_leaderboard_wallet_address(),
+        }
+    }
+}
+
 impl EvmAnchorConfig {
     /// Parse the `chain` string into the SDK's `EvmChain`.
     ///
@@ -439,4 +512,40 @@ pub fn load(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)?;
     let cfg: Config = toml::from_str(&text)?;
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaderboard_defaults_without_section() {
+        let cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        assert!(cfg.leaderboard.enabled);
+        assert_eq!(cfg.leaderboard.poll_interval_secs, 15);
+        assert_eq!(cfg.leaderboard.max_pool_size, 500);
+    }
+
+    #[test]
+    fn leaderboard_config_with_section() {
+        let toml_str = r#"
+            [server]
+            listen = "0.0.0.0:3000"
+            [leaderboard]
+            enabled = false
+            poll_interval_secs = 30
+            max_pool_size = 100
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.leaderboard.enabled);
+        assert_eq!(cfg.leaderboard.poll_interval_secs, 30);
+        assert_eq!(cfg.leaderboard.max_pool_size, 100);
+    }
+
+    #[test]
+    fn leaderboard_chain_id_derived() {
+        let cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        // default chain is "sepolia"
+        assert_eq!(cfg.leaderboard_chain_id(), 11155111);
+    }
 }

@@ -15,7 +15,8 @@ use aqua_timestamp::{
     build_app,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
-        EvmAnchorConfig, IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
+        EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
+        StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -64,6 +65,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
         },
         anchor_legacy: AnchorConfig::default(),
         bonding_curve: BondingCurveConfig::default(),
+        leaderboard: LeaderboardConfig::default(),
         // M3 tests assert stub witness payloads byte for byte; keep the
         // EVM live provider off here so the assertions remain stable
         // (no Sepolia RPC dependency during unit/integration tests).

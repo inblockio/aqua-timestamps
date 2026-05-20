@@ -82,3 +82,15 @@ n_half = 7200
 poll_interval_secs = 12
 # Safety margin: skip publishing when balance < multiplier * gas_cost.
 min_balance_multiplier = 2
+
+# [leaderboard]
+# # Enable or disable the balance-tracking leaderboard.
+# enabled             = true
+# # How often (in seconds) to poll the RPC for a fresh balance.
+# poll_interval_secs  = 15
+# # JSON-RPC URL used for balance queries. Defaults to the EVM anchor URL.
+# rpc_url             = "https://ethereum-sepolia-rpc.publicnode.com"
+# # Maximum number of wallets tracked in the contributor pool.
+# max_pool_size       = 500
+# # The wallet address whose balance is monitored.
+# wallet_address      = "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f"

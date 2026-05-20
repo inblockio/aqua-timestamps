@@ -42,9 +42,9 @@ use crate::{
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
         apple_touch_icon, aqua_identity, aqua_orl, blueprint_page, docs_page, favicon_ico,
-        get_tree_by_leaf, get_tree_by_tip, health, landing_page, list_epochs,
-        list_or_query_trees, not_found, schedule, sse_events, submit_leaves,
-        well_known_skill_auth_md, well_known_skill_md,
+        get_tree_by_leaf, get_tree_by_tip, health, landing_page, list_epochs, list_or_query_trees,
+        not_found, schedule, sse_events, submit_leaves, well_known_skill_auth_md,
+        well_known_skill_md,
     },
     state::AppState,
 };
