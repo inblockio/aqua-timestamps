@@ -133,6 +133,7 @@ mod tests {
             timestamp: 123,
             batch_tree_size: 1,
             batch_leaf_index: 0,
+            shielding_nonce: String::new(),
         }
     }
 

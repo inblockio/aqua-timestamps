@@ -17,7 +17,8 @@ use aqua_timestamp::{
     build_app,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
-        EvmAnchorConfig, IdentityConfig, QtsaAnchorConfig, ServerConfig, StorageConfig,
+        EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
+        StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
@@ -205,6 +206,7 @@ async fn build_in_process(
             },
         },
         bonding_curve: BondingCurveConfig::default(),
+        leaderboard: LeaderboardConfig::default(),
     };
 
     let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)

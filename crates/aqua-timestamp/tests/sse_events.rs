@@ -162,7 +162,7 @@ async fn landing_page_contains_status_page_content() {
     let html = std::str::from_utf8(&bytes).expect("valid UTF-8");
 
     let checks: &[(&str, &str)] = &[
-        ("anchor of trust", "mission headline"),
+        ("Highest-trust timestamping", "mission headline"),
         ("Ethereum", "channel card"),
         ("qTSA", "channel card"),
         ("Bitcoin", "channel card"),

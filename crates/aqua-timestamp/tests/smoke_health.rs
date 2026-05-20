@@ -93,7 +93,7 @@ async fn smoke_health_and_landing() {
         .to_string();
     assert!(ct.starts_with("text/html"), "content-type was {ct}");
     let html = landing.text().await.unwrap();
-    assert!(html.contains("Aqua Aggregator"));
+    assert!(html.contains("OpenWitness.org"));
 
     let _ = child.kill();
     let _ = child.wait();

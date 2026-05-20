@@ -44,6 +44,9 @@ use thiserror::Error;
 
 use crate::accumulator::LeafEntry;
 use crate::epoch::EpochRecord;
+use crate::leaderboard::{
+    ContributorEntry, CONTRIBUTOR_STATS_PARTITION, WATCHER_WATERMARK_PARTITION,
+};
 use crate::witness::{AnchorMethod, MintedWitness};
 
 pub const EPOCHS_PARTITION: &str = "epochs";
@@ -106,6 +109,8 @@ pub struct Store {
     leaf_to_tips: PartitionHandle,
     leaf_owner: PartitionHandle,
     tip_to_pair: PartitionHandle,
+    contributor_stats: PartitionHandle,
+    watcher_watermark: PartitionHandle,
 }
 
 impl Store {
@@ -128,6 +133,14 @@ impl Store {
             keyspace.open_partition(LEAF_OWNER_PARTITION, PartitionCreateOptions::default())?;
         let tip_to_pair =
             keyspace.open_partition(TIP_TO_PAIR_PARTITION, PartitionCreateOptions::default())?;
+        let contributor_stats = keyspace.open_partition(
+            CONTRIBUTOR_STATS_PARTITION,
+            PartitionCreateOptions::default(),
+        )?;
+        let watcher_watermark = keyspace.open_partition(
+            WATCHER_WATERMARK_PARTITION,
+            PartitionCreateOptions::default(),
+        )?;
         Ok(Self {
             keyspace,
             epochs,
@@ -136,6 +149,8 @@ impl Store {
             leaf_to_tips,
             leaf_owner,
             tip_to_pair,
+            contributor_stats,
+            watcher_watermark,
         })
     }
 
@@ -393,6 +408,94 @@ impl Store {
         out.sort_by(|a, b| a.signature_file_name.cmp(&b.signature_file_name));
         Ok(out)
     }
+
+    // ── Contributor / leaderboard helpers ───────────────────────────────
+
+    /// Atomically upsert contributor entries and advance the watcher watermark.
+    pub fn upsert_contributors_and_watermark(
+        &self,
+        updates: &[([u8; 20], ContributorEntry)],
+        chain: &str,
+        block_number: u64,
+    ) -> Result<(), StoreError> {
+        let mut batch = self.keyspace.batch();
+        for (addr, entry) in updates {
+            let encoded = postcard::to_stdvec(entry).map_err(StoreError::Encode)?;
+            batch.insert(&self.contributor_stats, addr.to_vec(), encoded);
+        }
+        batch.insert(
+            &self.watcher_watermark,
+            chain.as_bytes().to_vec(),
+            block_number.to_be_bytes().to_vec(),
+        );
+        batch.commit()?;
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    /// Get a single contributor by their 20-byte address.
+    pub fn get_contributor(
+        &self,
+        address: &[u8; 20],
+    ) -> Result<Option<ContributorEntry>, StoreError> {
+        match self.contributor_stats.get(address)? {
+            Some(bytes) => {
+                let entry: ContributorEntry =
+                    postcard::from_bytes(&bytes).map_err(StoreError::Decode)?;
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Return contributors sorted by fuel_contributed_wei descending, up to `limit`.
+    pub fn list_contributors_sorted(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ContributorEntry>, StoreError> {
+        let mut entries = Vec::new();
+        for kv in self.contributor_stats.iter() {
+            let (_, v) = kv?;
+            let entry: ContributorEntry = postcard::from_bytes(&v).map_err(StoreError::Decode)?;
+            entries.push(entry);
+        }
+        entries.sort_by(|a, b| b.fuel_contributed_wei.cmp(&a.fuel_contributed_wei));
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
+    /// Get the last processed block number for a chain.
+    pub fn get_watermark(&self, chain: &str) -> Result<Option<u64>, StoreError> {
+        match self.watcher_watermark.get(chain.as_bytes())? {
+            Some(bytes) => {
+                if bytes.len() != 8 {
+                    return Err(StoreError::BadLeavesKey(bytes.len()));
+                }
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(u64::from_be_bytes(arr)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Set the last processed block number for a chain.
+    pub fn set_watermark(&self, chain: &str, block: u64) -> Result<(), StoreError> {
+        self.watcher_watermark
+            .insert(chain.as_bytes(), block.to_be_bytes())?;
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    /// Count of unique contributor addresses.
+    pub fn contributor_count(&self) -> Result<usize, StoreError> {
+        let mut count = 0;
+        for kv in self.contributor_stats.iter() {
+            let _ = kv?;
+            count += 1;
+        }
+        Ok(count)
+    }
 }
 
 /// Build a `leaf_to_tips` composite key.
@@ -503,5 +606,145 @@ mod tests {
         let loaded = store.get_epoch(42).unwrap().expect("persisted record");
         assert_eq!(loaded.id, 42);
         assert_eq!(store.list_epoch_leaves(42).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn contributor_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let addr = [0xAA; 20];
+        let entry = crate::leaderboard::ContributorEntry {
+            did: "did:pkh:eip155:11155111:0xaaaa".into(),
+            fuel_contributed_wei: 1_000_000_000_000_000_000,
+            fuel_contributed_sat: 0,
+            hashes_submitted: 0,
+            last_active: 1716000000,
+        };
+
+        store
+            .upsert_contributors_and_watermark(&[(addr, entry.clone())], "eth", 100)
+            .unwrap();
+
+        let loaded = store
+            .get_contributor(&addr)
+            .unwrap()
+            .expect("entry present");
+        assert_eq!(loaded.did, entry.did);
+        assert_eq!(loaded.fuel_contributed_wei, entry.fuel_contributed_wei);
+
+        let wm = store
+            .get_watermark("eth")
+            .unwrap()
+            .expect("watermark present");
+        assert_eq!(wm, 100);
+    }
+
+    #[test]
+    fn contributor_list_sorted_by_fuel() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let entries = vec![
+            (
+                [1u8; 20],
+                crate::leaderboard::ContributorEntry {
+                    did: "did:1".into(),
+                    fuel_contributed_wei: 100,
+                    fuel_contributed_sat: 0,
+                    hashes_submitted: 0,
+                    last_active: 1,
+                },
+            ),
+            (
+                [2u8; 20],
+                crate::leaderboard::ContributorEntry {
+                    did: "did:2".into(),
+                    fuel_contributed_wei: 300,
+                    fuel_contributed_sat: 0,
+                    hashes_submitted: 0,
+                    last_active: 2,
+                },
+            ),
+            (
+                [3u8; 20],
+                crate::leaderboard::ContributorEntry {
+                    did: "did:3".into(),
+                    fuel_contributed_wei: 200,
+                    fuel_contributed_sat: 0,
+                    hashes_submitted: 0,
+                    last_active: 3,
+                },
+            ),
+        ];
+
+        store
+            .upsert_contributors_and_watermark(&entries, "eth", 50)
+            .unwrap();
+
+        let sorted = store.list_contributors_sorted(10).unwrap();
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].fuel_contributed_wei, 300);
+        assert_eq!(sorted[1].fuel_contributed_wei, 200);
+        assert_eq!(sorted[2].fuel_contributed_wei, 100);
+
+        let limited = store.list_contributors_sorted(2).unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn contributor_count_works() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        assert_eq!(store.contributor_count().unwrap(), 0);
+
+        let entry = crate::leaderboard::ContributorEntry {
+            did: "did:test".into(),
+            fuel_contributed_wei: 1,
+            fuel_contributed_sat: 0,
+            hashes_submitted: 0,
+            last_active: 1,
+        };
+        store
+            .upsert_contributors_and_watermark(
+                &[([1u8; 20], entry.clone()), ([2u8; 20], entry)],
+                "eth",
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(store.contributor_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn watermark_persists_across_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.set_watermark("eth", 42).unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.get_watermark("eth").unwrap(), Some(42));
+    }
+
+    #[test]
+    fn batch_atomicity_watermark_and_contributors() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let entry = crate::leaderboard::ContributorEntry {
+            did: "did:atom".into(),
+            fuel_contributed_wei: 999,
+            fuel_contributed_sat: 0,
+            hashes_submitted: 0,
+            last_active: 1,
+        };
+        store
+            .upsert_contributors_and_watermark(&[([0xBB; 20], entry)], "eth", 77)
+            .unwrap();
+
+        assert!(store.get_contributor(&[0xBB; 20]).unwrap().is_some());
+        assert_eq!(store.get_watermark("eth").unwrap(), Some(77));
     }
 }

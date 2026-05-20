@@ -11,6 +11,7 @@ pub mod landing;
 pub mod oracle;
 pub mod routes;
 pub mod state;
+pub mod watcher;
 
 use std::sync::Arc;
 
@@ -34,7 +35,7 @@ use axum::{
 };
 use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     auth::{build_stores, challenge, session},
@@ -42,9 +43,9 @@ use crate::{
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
         apple_touch_icon, aqua_identity, aqua_orl, blueprint_page, docs_page, favicon_ico,
-        get_tree_by_leaf, get_tree_by_tip, health, landing_page, list_epochs, list_or_query_trees,
-        not_found, schedule, sse_events, submit_leaves, well_known_skill_auth_md,
-        well_known_skill_md,
+        get_tree_by_leaf, get_tree_by_tip, health, landing_page, leaderboard, list_epochs,
+        list_or_query_trees, not_found, pool_status, schedule, sse_events, submit_leaves,
+        well_known_skill_auth_md, well_known_skill_md,
     },
     state::AppState,
 };
@@ -241,6 +242,34 @@ pub async fn build_app(
         SealDriver::Off => {}
     }
 
+    // Leaderboard: spawn the block watcher if enabled.
+    if cfg.leaderboard.enabled {
+        let wallet_str = &cfg.leaderboard.wallet_address;
+        match wallet_str.parse::<alloy::primitives::Address>() {
+            Ok(addr) => {
+                let chain_id = cfg.leaderboard_chain_id();
+                let bw =
+                    watcher::BlockWatcher::new(cfg.leaderboard.rpc_url.clone(), addr, chain_id);
+                let interval = std::time::Duration::from_secs(cfg.leaderboard.poll_interval_secs);
+                watcher::spawn_watcher(store.clone(), bw, interval);
+                info!(
+                    rpc_url = %cfg.leaderboard.rpc_url,
+                    wallet = %wallet_str,
+                    chain_id,
+                    poll_secs = cfg.leaderboard.poll_interval_secs,
+                    "leaderboard watcher spawned"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    wallet = %wallet_str,
+                    error = %e,
+                    "leaderboard watcher disabled: invalid wallet address"
+                );
+            }
+        }
+    }
+
     let rendered_docs_html = docs::render_html(&identity);
     let rendered_skill_md = docs::render_skill_md(&identity);
     let rendered_skill_auth_md = docs::render_skill_auth_md(&identity);
@@ -282,6 +311,8 @@ pub async fn build_app(
         .route("/v1/leaves", post(submit_leaves))
         .route("/v1/schedule", get(schedule))
         .route("/v1/epochs", get(list_epochs))
+        .route("/v1/leaderboard", get(leaderboard))
+        .route("/v1/pool/status", get(pool_status))
         .route("/trees", get(list_or_query_trees))
         .route("/trees/{tip_hex}", get(get_tree_by_tip))
         .route("/trees/by-leaf/{leaf_hex}", get(get_tree_by_leaf))

@@ -347,6 +347,78 @@ pub async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })))
 }
 
+// ── /v1/leaderboard, /v1/pool/status ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct LeaderboardQuery {
+    pub chain: Option<String>,
+}
+
+/// `GET /v1/leaderboard?chain=eth|btc` -- public, no auth.
+pub async fn leaderboard(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LeaderboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let chain = q.chain.as_deref().unwrap_or("eth");
+    match chain {
+        "eth" => {}
+        "btc" => {
+            return Ok(Json(json!({
+                "wallets": [],
+                "pool_count": state.store.contributor_count().unwrap_or(0),
+                "max_pool": state.config.leaderboard.max_pool_size,
+            })));
+        }
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({ "error": format!("unknown chain '{other}', expected 'eth' or 'btc'") }),
+                ),
+            ));
+        }
+    }
+
+    let max = state.config.leaderboard.max_pool_size;
+    let entries = state.store.list_contributors_sorted(max).map_err(|e| {
+        warn!(error = %e, "leaderboard: store error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "storage error" })),
+        )
+    })?;
+
+    let wallets: Vec<Value> = entries
+        .into_iter()
+        .map(|e| {
+            json!({
+                "did": e.did,
+                "fuel_contributed_wei": e.fuel_contributed_wei.to_string(),
+                "hashes_submitted": e.hashes_submitted,
+                "last_active": e.last_active,
+            })
+        })
+        .collect();
+
+    let pool_count = state.store.contributor_count().unwrap_or(wallets.len());
+
+    Ok(Json(json!({
+        "wallets": wallets,
+        "pool_count": pool_count,
+        "max_pool": max,
+    })))
+}
+
+/// `GET /v1/pool/status` -- public, no auth.
+pub async fn pool_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let current = state.store.contributor_count().unwrap_or(0);
+    let max = state.config.leaderboard.max_pool_size;
+    Json(json!({
+        "current": current,
+        "max": max,
+    }))
+}
+
 // ── /trees/{tip}, /trees/by-leaf/{leaf}, /trees, /trees?epoch=&method= ───
 //
 // The aqua-node REST contract defines `GET /trees` (list tips),

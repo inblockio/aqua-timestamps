@@ -532,6 +532,7 @@ mod tests {
             timestamp: 60,
             batch_tree_size: 1,
             batch_leaf_index: 0,
+            shielding_nonce: String::new(),
         }
     }
 
@@ -674,6 +675,7 @@ mod tests {
             timestamp: 1779010800,
             batch_tree_size: 1,
             batch_leaf_index: 0,
+            shielding_nonce: String::new(),
         }
     }
 

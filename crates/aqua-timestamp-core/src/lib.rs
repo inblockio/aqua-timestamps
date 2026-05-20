@@ -11,6 +11,7 @@ pub mod anchors;
 pub mod bonding_curve;
 pub mod epoch;
 pub mod events;
+pub mod leaderboard;
 pub mod merkle;
 pub mod sealer;
 pub mod storage;
