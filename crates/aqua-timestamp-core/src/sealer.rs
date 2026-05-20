@@ -322,7 +322,15 @@ pub fn run_sealer_with_interval<C: Clock + 'static>(
         loop {
             interval.tick().await;
             let now = clock.now_secs();
-            match seal_once(&accumulator, &store, now, duration_secs, witness_ctx.as_ref()).await {
+            match seal_once(
+                &accumulator,
+                &store,
+                now,
+                duration_secs,
+                witness_ctx.as_ref(),
+            )
+            .await
+            {
                 Ok((record, _witnesses)) => {
                     if let Some(ref bus) = event_bus {
                         bus.send(crate::events::SseEvent::EpochSealed {
@@ -880,7 +888,10 @@ mod tests {
         handle.abort();
         let _ = handle.await;
 
-        let rec = store.get_epoch(1).unwrap().expect("epoch 1 should be sealed");
+        let rec = store
+            .get_epoch(1)
+            .unwrap()
+            .expect("epoch 1 should be sealed");
         assert_eq!(rec.leaf_count, 1);
     }
 
@@ -896,7 +907,7 @@ mod tests {
         let clock = FixedClock::new(60);
         // Balance < 2 * gas_cost: should not seal
         let oracle = Arc::new(MockOracle {
-            balance_wei: 1_000_000_000_000_000, // 0.001 ETH
+            balance_wei: 1_000_000_000_000_000,  // 0.001 ETH
             gas_cost_wei: 1_350_000_000_000_000, // 0.00135 ETH
         }) as Arc<dyn crate::bonding_curve::BalanceOracle>;
 

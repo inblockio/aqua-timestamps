@@ -5,10 +5,7 @@ use std::{sync::Arc, time::Instant};
 use aqua_auth::{ChallengeStore, SessionStore};
 use aqua_rs_sdk::Secp256k1Signer;
 use aqua_timestamp_core::{
-    accumulator::Accumulator,
-    events::EventBus,
-    sealer::WitnessContext,
-    storage::Store,
+    accumulator::Accumulator, events::EventBus, sealer::WitnessContext, storage::Store,
 };
 
 use crate::{config::Config, identity::ServiceIdentity};

@@ -596,19 +596,18 @@ pub async fn sse_events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.event_bus.subscribe();
-    let stream =
-        tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
-            futures_util::future::ready(match result {
-                Ok(event) => {
-                    let name = event.event_name().to_owned();
-                    match serde_json::to_string(&event) {
-                        Ok(json) => Some(Ok(Event::default().event(name).data(json))),
-                        Err(_) => None,
-                    }
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
+        futures_util::future::ready(match result {
+            Ok(event) => {
+                let name = event.event_name().to_owned();
+                match serde_json::to_string(&event) {
+                    Ok(json) => Some(Ok(Event::default().event(name).data(json))),
+                    Err(_) => None,
                 }
-                Err(_) => None,
-            })
-        });
+            }
+            Err(_) => None,
+        })
+    });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

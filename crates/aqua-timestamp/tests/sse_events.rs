@@ -24,8 +24,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-const TEST_MNEMONIC: &str =
-    "test test test test test test test test test test test junk";
+const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
 fn cfg(storage: PathBuf) -> Config {
     Config {
