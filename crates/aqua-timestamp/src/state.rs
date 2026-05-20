@@ -4,7 +4,12 @@ use std::{sync::Arc, time::Instant};
 
 use aqua_auth::{ChallengeStore, SessionStore};
 use aqua_rs_sdk::Secp256k1Signer;
-use aqua_timestamp_core::{accumulator::Accumulator, sealer::WitnessContext, storage::Store};
+use aqua_timestamp_core::{
+    accumulator::Accumulator,
+    events::EventBus,
+    sealer::WitnessContext,
+    storage::Store,
+};
 
 use crate::{config::Config, identity::ServiceIdentity};
 
@@ -40,6 +45,11 @@ pub struct AppState {
     /// `GET /.well-known/aqua-skill-auth.md`. Linked from the main
     /// skill so the high-level overview stays compact.
     pub well_known_skill_auth_md: String,
+    /// Broadcast bus for SSE events. Cloned into each SSE handler task so
+    /// every active `GET /events` connection receives the same stream of
+    /// epoch and anchor events without coupling the sealer to individual
+    /// HTTP connections.
+    pub event_bus: EventBus,
 }
 
 impl AppState {

@@ -1,6 +1,6 @@
 //! HTTP route handlers that aren't strictly part of auth.
 
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 use aqua_timestamp_core::{
     merkle::{hex_lower, parse_leaf_hex, LeafParseError},
@@ -10,9 +10,13 @@ use aqua_timestamp_core::{
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     Json,
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tracing::{info, warn};
@@ -578,4 +582,55 @@ fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
 
 fn not_found_response(msg: &str) -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into_response()
+}
+
+// ── GET /events (SSE) ─────────────────────────────────────────────────────
+
+/// `GET /events` — Server-Sent Events stream.
+///
+/// Every active subscriber receives epoch-seal and anchor events as they
+/// occur. No authentication is required (events carry no client-specific
+/// data). Clients that fall too far behind are dropped per the Tokio
+/// broadcast lagging contract; reconnect to resume.
+pub async fn sse_events(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.event_bus.subscribe();
+    let stream =
+        tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| {
+            futures_util::future::ready(match result {
+                Ok(event) => {
+                    let name = event.event_name().to_owned();
+                    match serde_json::to_string(&event) {
+                        Ok(json) => Some(Ok(Event::default().event(name).data(json))),
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            })
+        });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ── GET /.well-known/aqua-orl ─────────────────────────────────────────────
+
+/// `GET /.well-known/aqua-orl` — Operational Readiness Level declaration.
+///
+/// Returns the current ORL level and associated metadata so tooling and
+/// agents can discover the service maturity without reading the source.
+pub async fn aqua_orl() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "orl": 2,
+        "label": "Development",
+        "color": "#F97316",
+        "since": "2026-05-17",
+        "assessed_by": "tim.bansemer@inblock.io",
+        "next_level_blockers": [
+            "Security review not started",
+            "Backup restore not verified",
+            "Monitoring and alerting not active",
+            "Dependency audit not completed"
+        ],
+        "checklist_url": "https://github.com/inblockio/aqua-timestamps/blob/main/ORL.md"
+    }))
 }

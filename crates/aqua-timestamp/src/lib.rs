@@ -40,9 +40,9 @@ use crate::{
     config::Config,
     identity::{build_identity_tree, build_response, IdentityClaimOverrides, ServiceIdentity},
     routes::{
-        aqua_identity, docs_page, get_tree_by_leaf, get_tree_by_tip, health, landing_page,
-        list_epochs, list_or_query_trees, not_found, schedule, submit_leaves,
-        well_known_skill_auth_md, well_known_skill_md,
+        aqua_identity, aqua_orl, docs_page, get_tree_by_leaf, get_tree_by_tip, health,
+        landing_page, list_epochs, list_or_query_trees, not_found, schedule, sse_events,
+        submit_leaves, well_known_skill_auth_md, well_known_skill_md,
     },
     state::AppState,
 };
@@ -177,6 +177,10 @@ pub async fn build_app(
         witness_ctx = witness_ctx.with_qtsa_anchor(anchor);
     }
 
+    // EventBus: fan-out broadcast channel for SSE subscribers. Created once
+    // here so both the sealer task and the AppState share the same sender.
+    let event_bus = aqua_timestamp_core::events::EventBus::new(256);
+
     // Spawn the seal task.
     match seal_driver {
         SealDriver::Interval if cfg.bonding_curve.enabled => {
@@ -209,7 +213,7 @@ pub async fn build_app(
                 oracle,
                 params,
                 Some(witness_ctx.clone()),
-                None,
+                Some(event_bus.clone()),
             );
         }
         SealDriver::Interval => {
@@ -219,7 +223,7 @@ pub async fn build_app(
                 clock,
                 cfg.epoch.duration_secs,
                 Some(witness_ctx.clone()),
-                None,
+                Some(event_bus.clone()),
             );
         }
         SealDriver::Channel(rx) => {
@@ -229,7 +233,7 @@ pub async fn build_app(
                 rx,
                 cfg.epoch.duration_secs,
                 Some(witness_ctx.clone()),
-                None,
+                Some(event_bus.clone()),
             );
         }
         SealDriver::Off => {}
@@ -253,6 +257,7 @@ pub async fn build_app(
         docs_html: rendered_docs_html,
         well_known_skill_md: rendered_skill_md,
         well_known_skill_auth_md: rendered_skill_auth_md,
+        event_bus,
     });
 
     let router = Router::new()
@@ -265,6 +270,8 @@ pub async fn build_app(
             get(well_known_skill_auth_md),
         )
         .route("/.well-known/aqua-identity", get(aqua_identity))
+        .route("/.well-known/aqua-orl", get(aqua_orl))
+        .route("/events", get(sse_events))
         .route("/auth/challenge", get(challenge))
         .route("/auth/session", post(session))
         .route("/v1/leaves", post(submit_leaves))

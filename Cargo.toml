@@ -18,15 +18,17 @@ rust-version = "1.85"
 # Sister-repo path deps. These prove workspace resolution at M0 and
 # carry their real load from M1 onward.
 aqua-rs-sdk = { path = "../aqua-rs-sdk", default-features = false, features = ["native", "blockchain", "web"] }
-aqua-auth   = { path = "../aqua-auth", default-features = false }
+aqua-auth   = { path = "../aqua-auth", default-features = false, features = ["http"] }
 
 # Async + HTTP
-tokio    = { version = "1", features = ["full"] }
-axum     = { version = "0.8", features = ["macros"] }
-tower    = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
-hyper    = { version = "1", features = ["full"] }
-reqwest  = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio        = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+axum         = { version = "0.8", features = ["macros"] }
+tower        = "0.5"
+tower-http   = { version = "0.6", features = ["trace", "cors"] }
+hyper        = { version = "1", features = ["full"] }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Serde
 serde      = { version = "1", features = ["derive"] }
@@ -41,6 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hex   = "0.4"
 sha3  = "0.10"
 rand  = "0.8"
+
+# Ethereum RPC (bonding curve oracle)
+alloy = { version = "2", default-features = false, features = ["provider-http", "reqwest-rustls-tls", "rpc-types", "network"] }
 
 # Storage
 fjall    = "2"
