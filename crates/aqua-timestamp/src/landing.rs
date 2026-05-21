@@ -115,12 +115,17 @@ section + section {
 /* ── Section 1: Hero ─────────────────────────────────────────────── */
 
 @keyframes hero-fade-up {
-  from { opacity: 0; transform: translateY(18px); }
+  from { opacity: 0; transform: translateY(24px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes ring-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .hero {
-  padding: 6rem 0 5rem;
+  padding: 7rem 0 5rem;
   text-align: center;
   position: relative;
   overflow: hidden;
@@ -132,22 +137,64 @@ section + section {
   inset: 0;
   background-image: radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
   background-size: 40px 40px;
-  mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
-  -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 30%, black 0%, transparent 70%);
-  opacity: 0.35;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 0%, transparent 70%);
+  opacity: 0.4;
   pointer-events: none;
 }
 
 .hero::after {
   content: '';
   position: absolute;
-  top: 15%;
+  top: 5%;
   left: 50%;
+  width: 900px;
+  height: 900px;
+  transform: translateX(-50%);
+  background: radial-gradient(circle, rgba(91, 155, 213, 0.14) 0%, rgba(91, 155, 213, 0.04) 35%, transparent 60%);
+  pointer-events: none;
+}
+
+.hero-rings {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   width: 700px;
   height: 700px;
-  transform: translateX(-50%);
-  background: radial-gradient(circle, rgba(91, 155, 213, 0.06) 0%, transparent 55%);
   pointer-events: none;
+  z-index: 0;
+}
+
+.hero-rings .ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
+
+.hero-rings .ring:nth-child(1) {
+  width: 180px; height: 180px;
+  border: 1px solid rgba(91, 155, 213, 0.20);
+  animation: ring-breathe 6s ease-in-out infinite;
+}
+
+.hero-rings .ring:nth-child(2) {
+  width: 340px; height: 340px;
+  border: 1px solid rgba(91, 155, 213, 0.12);
+  animation: ring-breathe 6s ease-in-out 1.5s infinite;
+}
+
+.hero-rings .ring:nth-child(3) {
+  width: 520px; height: 520px;
+  border: 1px solid rgba(91, 155, 213, 0.07);
+  animation: ring-breathe 6s ease-in-out 3s infinite;
+}
+
+.hero-rings .ring:nth-child(4) {
+  width: 700px; height: 700px;
+  border: 1px solid rgba(91, 155, 213, 0.03);
 }
 
 .hero > .container {
@@ -157,38 +204,31 @@ section + section {
 
 .hero-eyebrow {
   font-family: var(--mono);
-  font-size: 0.78rem;
-  font-weight: 500;
-  letter-spacing: 0.2em;
+  font-size: 0.75rem;
   text-transform: uppercase;
+  letter-spacing: 0.16em;
   color: var(--accent);
-  margin-bottom: 1.5rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  animation: hero-fade-up 0.7s ease both;
+  margin-bottom: 1.25rem;
+  animation: hero-fade-up 0.8s ease both;
 }
 
 .hero-eyebrow::before {
-  content: '';
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  background: var(--accent);
-  border-radius: 1px;
-  transform: rotate(45deg);
+  content: '\25C6';
+  margin-right: 0.5rem;
+  font-size: 0.55rem;
+  vertical-align: 0.12em;
 }
 
 .hero h1 {
-  font-size: clamp(2rem, 5vw, 3.25rem);
+  font-size: clamp(2.8rem, 7vw, 4.5rem);
   font-weight: 700;
-  line-height: 1.12;
-  letter-spacing: -0.02em;
-  margin-bottom: 1.5rem;
-  max-width: 720px;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  margin-bottom: 1.25rem;
+  max-width: 740px;
   margin-left: auto;
   margin-right: auto;
-  animation: hero-fade-up 0.7s ease 0.08s both;
+  animation: hero-fade-up 0.8s ease 0.12s both;
 }
 
 .hero-descriptor {
@@ -197,34 +237,14 @@ section + section {
   color: var(--proof-green);
   font-weight: 400;
   max-width: 640px;
-  margin: 0 auto 1.75rem;
+  margin: 0 auto 2.5rem;
   line-height: 1.6;
   padding: 0.5rem 1.25rem;
   border: 1px solid rgba(42, 138, 90, 0.25);
   border-radius: 10px;
   display: inline-block;
   background: rgba(42, 138, 90, 0.06);
-  animation: hero-fade-up 0.7s ease 0.16s both;
-}
-
-.hero-mission {
-  font-size: 1.1rem;
-  font-weight: 500;
-  color: var(--text);
-  max-width: 640px;
-  margin: 0 auto 1.5rem;
-  line-height: 1.6;
-  animation: hero-fade-up 0.7s ease 0.22s both;
-}
-
-.mission-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--dim);
-  display: inline-block;
-  margin-bottom: 0.25rem;
+  animation: hero-fade-up 0.8s ease 0.24s both;
 }
 
 .epoch-metric {
@@ -301,34 +321,14 @@ section + section {
   margin-top: 0.5rem;
 }
 
-.hero-blockquote {
-  max-width: 580px;
-  margin: 0 auto 2.5rem;
-  padding: 1.25rem 1.5rem;
-  border-left: 3px solid var(--accent);
-  background: var(--surface);
-  border-radius: 0 10px 10px 0;
-  text-align: left;
-  animation: hero-fade-up 0.7s ease 0.28s both;
-}
-
-.hero-blockquote p {
-  font-size: 0.95rem;
-  color: var(--dim);
-  line-height: 1.7;
-  margin: 0;
-}
-
-.hero-blockquote p + p {
-  margin-top: 0.75rem;
-}
+/* hero-blockquote removed; content moved to .trust-quote */
 
 .value-pills {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.75rem;
-  animation: hero-fade-up 0.7s ease 0.38s both;
+  animation: hero-fade-up 0.8s ease 0.48s both;
 }
 
 .value-pill {
@@ -358,6 +358,90 @@ section + section {
 }
 
 .value-pill .dot { background: var(--accent); box-shadow: 0 0 6px rgba(91, 155, 213, 0.4); }
+
+/* ── CTA buttons ────────────────────────────────────────────────── */
+
+.hero-actions {
+  display: flex;
+  gap: 0.875rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 2.75rem;
+  animation: hero-fade-up 0.8s ease 0.36s both;
+}
+
+.hero-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.75rem 1.75rem;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-family: var(--sans);
+  text-decoration: none;
+  transition: transform 0.2s, box-shadow 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.hero-btn:hover { text-decoration: none; transform: translateY(-2px); }
+
+.hero-btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+}
+
+.hero-btn.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: 0 4px 20px rgba(91, 155, 213, 0.35);
+  color: #fff;
+}
+
+.hero-btn.secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+.hero-btn.secondary:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  color: var(--accent-hover);
+}
+
+/* ── Trust promise ──────────────────────────────────────────────── */
+
+.trust-section {
+  padding: 3rem 0;
+}
+
+.trust-layout {
+  display: flex;
+  align-items: center;
+  gap: 2.5rem;
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.trust-quote {
+  flex: 1;
+  padding: 1.25rem 1.5rem;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 10px 10px 0;
+  margin: 0;
+}
+
+.trust-quote p {
+  font-size: 0.95rem;
+  color: var(--dim);
+  line-height: 1.7;
+  margin: 0;
+}
+
+.trust-quote p + p {
+  margin-top: 0.75rem;
+}
 
 /* ── Section 2: Operational Overview ────────────────────────────── */
 
@@ -1062,7 +1146,13 @@ section + section {
 
 @media (max-width: 640px) {
   section { padding: 2.5rem 0; }
-  .hero { padding: 3.5rem 0 2.5rem; }
+  .hero { padding: 4rem 0 2.5rem; }
+  .hero-rings { width: 400px; height: 400px; }
+  .hero-rings .ring:nth-child(1) { width: 120px; height: 120px; }
+  .hero-rings .ring:nth-child(2) { width: 220px; height: 220px; }
+  .hero-rings .ring:nth-child(3) { width: 320px; height: 320px; }
+  .hero-rings .ring:nth-child(4) { width: 400px; height: 400px; }
+  .trust-layout { flex-direction: column; gap: 1.5rem; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
 }
 </style>
@@ -1161,36 +1251,47 @@ section + section {
 
 <!-- Section 1: Hero -->
 <section class="hero">
+  <div class="hero-rings" aria-hidden="true">
+    <div class="ring"></div><div class="ring"></div><div class="ring"></div><div class="ring"></div>
+  </div>
   <div class="container">
     <div class="hero-eyebrow">OpenWitness.org</div>
-    <h1>Free and Open<br>Time Stamping Service</h1>
+    <h1>Free and Open<br>Time Stamping</h1>
     <p class="hero-descriptor">
       Dual-anchored to Ethereum and qualified Timestamping Authorities
     </p>
-    <p class="hero-mission">
-      <span class="mission-label">Our Mission</span><br>
-      Highest-trust timestamping with cross-jurisdictional acceptance.
-    </p>
-    <div class="epoch-metric" id="epoch-metric" onclick="toggleEpochVision()">
-      <div class="epoch-metric-inner">
-        <span class="epoch-pulse"></span>
-        <span class="epoch-value mono" id="epoch-metric-value">...</span>
-        <span class="epoch-unit">min epoch</span>
-      </div>
-      <div class="epoch-vision" id="epoch-vision">
-        Our target: settle with every block on Ethereum mainnet and the Bitcoin network.
-      </div>
+    <div class="hero-actions">
+      <a href="/docs" class="hero-btn primary">Get Started</a>
+      <a href="/blueprint" class="hero-btn secondary">Read the Blueprint</a>
     </div>
-    <blockquote class="hero-blockquote">
-      <p>The more we are trusted, the faster our time-service becomes.
-      We are built for resilience and lasting proof.</p>
-      <p>A new standard of accountability and trust: OpenWitness.org as a
-      blueprint for trusted institutions. <a href="/blueprint">Learn more</a></p>
-    </blockquote>
     <div class="value-pills">
-      <span class="value-pill blue"><span class="dot"></span>Dual-anchored: EVM + eIDAS qTSA</span>
-      <span class="value-pill green"><span class="dot"></span>Self-auditing by protocol</span>
-      <span class="value-pill amber"><span class="dot"></span>Open Institutional Design</span>
+      <span class="value-pill"><span class="dot"></span>EVM + eIDAS qTSA</span>
+      <span class="value-pill"><span class="dot"></span>Self-auditing by protocol</span>
+      <span class="value-pill"><span class="dot"></span>Open Institutional Design</span>
+    </div>
+  </div>
+</section>
+
+<!-- Trust Promise -->
+<section class="trust-section">
+  <div class="container">
+    <div class="trust-layout">
+      <blockquote class="trust-quote">
+        <p>The more we are trusted, the faster our time-service becomes.
+        We are built for resilience and lasting proof.</p>
+        <p>A new standard of accountability and trust: OpenWitness.org as a
+        blueprint for trusted institutions. <a href="/blueprint">Learn more</a></p>
+      </blockquote>
+      <div class="epoch-metric" id="epoch-metric" onclick="toggleEpochVision()">
+        <div class="epoch-metric-inner">
+          <span class="epoch-pulse"></span>
+          <span class="epoch-value mono" id="epoch-metric-value">...</span>
+          <span class="epoch-unit">min epoch</span>
+        </div>
+        <div class="epoch-vision" id="epoch-vision">
+          Our target: settle with every block on Ethereum mainnet and the Bitcoin network.
+        </div>
+      </div>
     </div>
   </div>
 </section>
