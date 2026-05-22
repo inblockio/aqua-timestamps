@@ -115,6 +115,7 @@ pub async fn build_witness_tree(key: &[u8; 32], leaf: &[u8; 32]) -> Value {
         merkle_proof: vec![],
         batch_tree_size: 1,
         batch_leaf_index: 0,
+        shielding_nonce: String::new(),
     };
 
     let leaf_link = RevisionLink::from_bytes(*leaf);
