@@ -28,10 +28,11 @@ jobs:
             BUILD_DIR=/home/deploy/timestamps/build
             DEPLOY_DIR=/home/deploy/timestamps/deploy
 
-            cd "$BUILD_DIR/aqua-timestamps" && git pull --ff-only origin main
-            cd "$BUILD_DIR/aqua-rs-sdk"     && git pull --ff-only origin main
-            cd "$BUILD_DIR/aqua-auth"       && git pull --ff-only origin main
-            cd "$BUILD_DIR/siwx-oidc"       && git pull --ff-only origin main
+            cd "$BUILD_DIR/aqua-timestamps"            && git pull --ff-only origin main
+            cd "$BUILD_DIR/aqua-rs-sdk"                && git pull --ff-only origin main
+            cd "$BUILD_DIR/aqua-auth"                  && git pull --ff-only origin main
+            cd "$BUILD_DIR/aqua-evm-provider"          && git pull --ff-only origin main
+            cd "$BUILD_DIR/aqua-qualified-verification" && git pull --ff-only origin main
 
             cd "$BUILD_DIR"
             cp aqua-timestamps/deploy/Dockerfile .

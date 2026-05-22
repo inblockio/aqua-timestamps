@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build. The repo is expected to be available alongside the
-# sister-repo path-deps under ../aqua-rs-sdk, ../aqua-auth, and
-# ../siwx-oidc (for siwx-core). Build context root is one level above.
+# sister-repo path-deps. Build context root is one level above.
 
 # -------------------- BUILDER --------------------
 FROM rust:1.95-bookworm AS builder
@@ -19,10 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY aqua-rs-sdk    ./aqua-rs-sdk
-COPY aqua-auth      ./aqua-auth
-COPY siwx-oidc      ./siwx-oidc
-COPY aqua-timestamps ./aqua-timestamps
+COPY aqua-rs-sdk                ./aqua-rs-sdk
+COPY aqua-auth                  ./aqua-auth
+COPY aqua-evm-provider          ./aqua-evm-provider
+COPY aqua-qualified-verification ./aqua-qualified-verification
+COPY aqua-timestamps            ./aqua-timestamps
 
 WORKDIR /src/aqua-timestamps
 RUN cargo build --release --bin aqua-timestamp \
