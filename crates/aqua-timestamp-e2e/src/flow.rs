@@ -4,7 +4,7 @@
 //! signature + Merkle verification path described in
 //! `docs/success-criteria.md` Section M-E2E. It is parametrised by a base
 //! URL so the same logic drives both the `live` subcommand (against
-//! `https://timestamp.inblock.io`) and the `selfcheck` subcommand
+//! `https://openwitness.org`) and the `selfcheck` subcommand
 //! (against an in-process server bound to `http://127.0.0.1:<port>`).
 //!
 //! Two seams keep the flow testable without burning Sepolia time or epoch

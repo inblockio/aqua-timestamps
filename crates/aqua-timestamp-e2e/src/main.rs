@@ -3,7 +3,7 @@
 //! Two subcommands:
 //!
 //! * `live`: runs the full M-E2E flow against `BASE_URL`
-//!   (default `https://timestamp.inblock.io`). Reads the test client
+//!   (default `https://openwitness.org`). Reads the test client
 //!   BIP39 mnemonic from `AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC`. Exits 0
 //!   on full success; nonzero on any failure (with a clear per-step
 //!   error).
@@ -41,10 +41,10 @@ struct Cli {
 enum Cmd {
     /// Run the live M-E2E flow against `BASE_URL`. Reads the test client
     /// mnemonic from `AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC`. Default
-    /// `BASE_URL` is `https://timestamp.inblock.io`.
+    /// `BASE_URL` is `https://openwitness.org`.
     Live {
         /// Override base URL.
-        #[arg(long, env = "BASE_URL", default_value = "https://timestamp.inblock.io")]
+        #[arg(long, env = "BASE_URL", default_value = "https://openwitness.org")]
         base_url: String,
         /// Maximum wall-clock seconds to wait for the epoch to seal,
         /// independent of the server's reported `epoch_closes_at`.
@@ -58,7 +58,7 @@ enum Cmd {
     /// own epoch, so this command takes up to `3 * 600s` against a 600s
     /// production epoch. Exits 0 only if all three runs succeed.
     LiveAll {
-        #[arg(long, env = "BASE_URL", default_value = "https://timestamp.inblock.io")]
+        #[arg(long, env = "BASE_URL", default_value = "https://openwitness.org")]
         base_url: String,
         #[arg(long, default_value_t = 1500)]
         max_wait_secs: u64,

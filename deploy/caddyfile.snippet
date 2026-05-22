@@ -1,4 +1,8 @@
-timestamp.inblock.io {
+openwitness.org {
 	encode zstd gzip
 	reverse_proxy timestamp:8080
+}
+
+timestamps.inblock.io {
+	redir https://openwitness.org{uri} permanent
 }

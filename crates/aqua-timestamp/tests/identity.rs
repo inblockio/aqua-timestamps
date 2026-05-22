@@ -26,8 +26,8 @@ fn test_config() -> IdentityConfig {
     IdentityConfig {
         chain_id: 1,
         trust_domain: "timestamp".into(),
-        dns: "timestamp.inblock.io".into(),
-        ip: "139.59.144.60".into(),
+        dns: "openwitness.org".into(),
+        ip: "142.93.168.4".into(),
     }
 }
 

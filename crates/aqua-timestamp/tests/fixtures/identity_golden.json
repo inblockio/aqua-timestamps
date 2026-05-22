@@ -43,8 +43,8 @@
           "signer_did": "<SIGNER_DID>",
           "service_kind": "server",
           "valid_from": 0,
-          "dns": "timestamp.inblock.io",
-          "ip": "139.59.144.60",
+          "dns": "openwitness.org",
+          "ip": "142.93.168.4",
           "deploy_version": "<VERSION>"
         }
       },

@@ -85,20 +85,21 @@ push image to server directly), but needed later for GHCR / PRs.
 
 | Field | Value |
 |---|---|
-| Server | `139.59.144.60` (DigitalOcean) |
-| DNS names pointing here | `timestamp.inblock.io`, `agentic.inblock.io` |
-| Internal hostname | `agentic-hub` (don't be confused; same box) |
+| Server | `142.93.168.4` (DigitalOcean) |
+| Primary domain | `openwitness.org` |
+| DNS names pointing here | `openwitness.org`, `timestamps.inblock.io` (301 redirect to openwitness.org), `agentic.inblock.io` |
 | OS / Docker | Ubuntu 24.04, Docker 29.3, Compose v5.1 |
-| Reverse proxy | **Caddy 2** (`portal-caddy-1`) — auto-TLS, owns `:80` and `:443` |
+| Reverse proxy | **Caddy 2** (`portal-caddy-1`), auto-TLS, owns `:80` and `:443` |
 | Caddyfile location | `/home/portal/portal/Caddyfile` (bind-mounted) |
-| Backend network | `portal-net` (Docker bridge, declared in `/home/portal/portal/docker-compose.yml`) |
+| Backend network | `portal-net` (Docker bridge) |
 | Reload command | `docker exec portal-caddy-1 caddy reload --config /etc/caddy/Caddyfile` |
-| Disk headroom | 110 GB free |
-| Root SSH | `ssh -i ~/.ssh/timestamp_deploy_ed25519 root@timestamp.inblock.io` |
+| Deploy SSH | `ssh deploy@timestamps.inblock.io` |
+| Deploy compose | `/home/deploy/timestamps/deploy/docker-compose.yml` |
+| Deploy config | `/home/deploy/timestamps/deploy/config.toml` |
 
 Pattern for our service: container attaches to the external `portal-net`
-network, a site block for `timestamp.inblock.io` gets appended to the
-existing Caddyfile, Caddy reload.
+network, a site block for `openwitness.org` is in the Caddyfile,
+`timestamps.inblock.io` redirects permanently to `openwitness.org`.
 
 See memory [[reference-server-agentic-hub]] for full server details and
 [[reference-server-inblockio-dev]] for the *other* inblockio server

@@ -449,10 +449,10 @@ fn default_trust_domain() -> String {
     "timestamp".to_string()
 }
 fn default_dns() -> String {
-    "timestamp.inblock.io".to_string()
+    "openwitness.org".to_string()
 }
 fn default_ip() -> String {
-    "139.59.144.60".to_string()
+    "142.93.168.4".to_string()
 }
 fn default_challenge_ttl() -> u64 {
     300

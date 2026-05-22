@@ -18,45 +18,40 @@ jobs:
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
-          username: root
+          username: deploy
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script_stop: true
           command_timeout: 25m
           script: |
             set -euo pipefail
 
-            BUILD_DIR=/root/timestamp/build
-            DEPLOY_DIR=/root/timestamp
+            BUILD_DIR=/home/deploy/timestamps/build
+            DEPLOY_DIR=/home/deploy/timestamps/deploy
 
-            # Pull latest sources (repos already cloned on server)
             cd "$BUILD_DIR/aqua-timestamps" && git pull --ff-only origin main
             cd "$BUILD_DIR/aqua-rs-sdk"     && git pull --ff-only origin main
             cd "$BUILD_DIR/aqua-auth"       && git pull --ff-only origin main
             cd "$BUILD_DIR/siwx-oidc"       && git pull --ff-only origin main
 
-            # Copy Dockerfile + .dockerignore to build context root
             cd "$BUILD_DIR"
             cp aqua-timestamps/deploy/Dockerfile .
             cp aqua-timestamps/deploy/.dockerignore .
 
-            # Build image
             docker buildx build \
               --tag aqua-timestamp:latest \
               --file Dockerfile \
               .
 
-            # Deploy updated config and restart
             cp aqua-timestamps/deploy/docker-compose.yml "$DEPLOY_DIR/"
             cp aqua-timestamps/deploy/config.toml        "$DEPLOY_DIR/"
             cd "$DEPLOY_DIR"
             docker compose down
             docker compose up -d
 
-            # Wait for health check
             echo "Waiting for health check..."
             for i in $(seq 1 20); do
               if docker inspect --format='{{.State.Health.Status}}' timestamp 2>/dev/null | grep -q healthy; then
-                echo "Container healthy after ${i}s"
+                echo "Container healthy after $((i * 3))s"
                 exit 0
               fi
               sleep 3

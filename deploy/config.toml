@@ -4,8 +4,8 @@ listen = "0.0.0.0:8080"
 [identity]
 chain_id     = 1
 trust_domain = "timestamp"
-dns          = "timestamp.inblock.io"
-ip           = "139.59.144.60"
+dns          = "openwitness.org"
+ip           = "142.93.168.4"
 
 [auth]
 challenge_ttl_secs = 300
