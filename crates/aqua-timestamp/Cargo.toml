@@ -15,9 +15,11 @@ name = "aqua-timestamp"
 path = "src/main.rs"
 
 [dependencies]
-aqua-timestamp-core = { path = "../aqua-timestamp-core" }
-aqua-rs-sdk         = { workspace = true }
-aqua-auth           = { workspace = true }
+aqua-timestamp-core  = { path = "../aqua-timestamp-core" }
+aqua-rs-sdk          = { workspace = true }
+aqua-auth            = { workspace = true }
+aqua-tsa             = { workspace = true }
+aqua-evm-provider    = { workspace = true }
 
 tokio              = { workspace = true }
 tokio-stream       = { workspace = true }

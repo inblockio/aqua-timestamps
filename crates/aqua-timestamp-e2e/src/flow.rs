@@ -150,7 +150,7 @@ impl ClientKey {
     /// Derive a secp256k1 client from a BIP39 mnemonic. This is the path
     /// the production live test takes (mnemonic from the gnome-keyring).
     pub async fn from_mnemonic(mnemonic: &str) -> Result<Self> {
-        let (_addr, eip55, priv_hex) = aqua_rs_sdk::primitives::get_wallet(mnemonic)
+        let (_addr, eip55, priv_hex) = aqua_evm_provider::get_wallet(mnemonic)
             .await
             .map_err(|e| anyhow!("get_wallet: {e}"))?;
         let did = format!("did:pkh:eip155:1:{eip55}");

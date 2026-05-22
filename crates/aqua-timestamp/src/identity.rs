@@ -9,9 +9,10 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use aqua_evm_provider::get_wallet;
 use aqua_rs_sdk::{
     core::{object::create_object_util, signature::sign_aqua_tree_with_signer},
-    primitives::{get_wallet, Method},
+    primitives::Method,
     schema::template::BuiltInTemplate,
     schema::{templates::ServiceClaimServer, tree::Tree, AquaTreeWrapper},
     Secp256k1Signer,

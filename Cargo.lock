@@ -683,6 +683,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqua-evm-provider"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "aqua-rs-sdk",
+ "async-trait",
+ "futures",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tokio",
+ "warp",
+ "webbrowser",
+]
+
+[[package]]
+name = "aqua-qualified-pki"
+version = "0.1.0"
+dependencies = [
+ "aqua-rs-sdk",
+ "const-oid",
+ "der",
+ "p256",
+ "rsa",
+ "sha2",
+ "signature",
+ "spki",
+ "tracing",
+ "x509-cert",
+]
+
+[[package]]
 name = "aqua-rs-sdk"
 version = "4.0.0"
 dependencies = [
@@ -691,8 +724,6 @@ dependencies = [
  "base64 0.21.7",
  "blake3",
  "chrono",
- "cms",
- "const-oid",
  "der",
  "ed25519-dalek",
  "futures",
@@ -708,8 +739,6 @@ dependencies = [
  "pkcs8",
  "rand 0.8.6",
  "rand_core 0.6.4",
- "reqwest 0.12.28",
- "rsa",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -717,18 +746,12 @@ dependencies = [
  "sha2",
  "sha3 0.10.9",
  "signature",
- "spki",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "unicode-normalization",
  "unicode-script",
- "warp",
  "wasmi",
- "webbrowser",
- "x509-cert",
- "x509-tsp",
 ]
 
 [[package]]
@@ -738,8 +761,10 @@ dependencies = [
  "alloy",
  "anyhow",
  "aqua-auth",
+ "aqua-evm-provider",
  "aqua-rs-sdk",
  "aqua-timestamp-core",
+ "aqua-tsa",
  "async-trait",
  "axum",
  "chrono",
@@ -793,6 +818,7 @@ name = "aqua-timestamp-core"
 version = "0.1.0"
 dependencies = [
  "aqua-auth",
+ "aqua-evm-provider",
  "aqua-rs-sdk",
  "async-trait",
  "chrono",
@@ -814,6 +840,7 @@ name = "aqua-timestamp-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aqua-evm-provider",
  "aqua-rs-sdk",
  "aqua-timestamp",
  "aqua-timestamp-core",
@@ -831,6 +858,34 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "aqua-tsa"
+version = "0.1.0"
+dependencies = [
+ "aqua-qualified-pki",
+ "aqua-rs-sdk",
+ "async-trait",
+ "base64 0.21.7",
+ "chrono",
+ "cms",
+ "const-oid",
+ "der",
+ "hex",
+ "p256",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "rsa",
+ "sha2",
+ "signature",
+ "spki",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "x509-cert",
+ "x509-tsp",
 ]
 
 [[package]]

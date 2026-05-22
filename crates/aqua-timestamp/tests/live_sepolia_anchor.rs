@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 
-use aqua_rs_sdk::primitives::get_wallet;
+use aqua_evm_provider::get_wallet;
 use aqua_timestamp::{
     build_app,
     config::{

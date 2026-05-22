@@ -503,7 +503,7 @@ mod tests {
     const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
     async fn build_signer() -> Arc<Secp256k1Signer> {
-        let (_addr, _eip55, pk_hex) = aqua_rs_sdk::primitives::get_wallet(TEST_MNEMONIC)
+        let (_addr, _eip55, pk_hex) = aqua_evm_provider::get_wallet(TEST_MNEMONIC)
             .await
             .unwrap();
         let pk = hex::decode(pk_hex.trim_start_matches("0x")).unwrap();

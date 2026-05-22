@@ -16,7 +16,9 @@ pub mod watcher;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use aqua_rs_sdk::{web::tsa::TsaTimestamper, CliEthTimestamper, Secp256k1Signer};
+use aqua_evm_provider::CliEthTimestamper;
+use aqua_rs_sdk::Secp256k1Signer;
+use aqua_tsa::TsaTimestamper;
 use aqua_timestamp_core::{
     accumulator::Accumulator,
     anchors::AnchorProvider,

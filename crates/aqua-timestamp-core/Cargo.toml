@@ -24,6 +24,7 @@ postcard = { workspace = true }
 tokio    = { workspace = true }
 
 [dev-dependencies]
+aqua-evm-provider = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
