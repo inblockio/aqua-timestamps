@@ -12,24 +12,39 @@ use thiserror::Error;
 /// 32-byte SHA3-256 leaf or root.
 pub type Hash32 = [u8; 32];
 
+/// Hex of the multihash prefix of a SHA3-256 link (`0x16` code, `0x20` length).
+const SHA3_256_MULTIHASH_PREFIX: &str = "1620";
+
 /// Errors that can occur while parsing a submitted hex leaf.
 #[derive(Debug, Error)]
 pub enum LeafParseError {
-    #[error("leaf must be 64 hex chars (optionally prefixed with 0x), got {0}")]
+    #[error("leaf must be 64 hex chars or a sha3-256 multihash (1620 + 64 hex), optionally prefixed with 0x, got {0}")]
     BadLength(usize),
     #[error("leaf contains non-hex characters: {0}")]
     BadHex(#[from] hex::FromHexError),
 }
 
-/// Parse a user-submitted leaf string (`0x` + 64 hex, or 64 hex bare) into
-/// 32 raw bytes. The accumulator stores leaves in this binary form so the
-/// Merkle build skips hex decoding inside the seal hot path.
+/// Parse a user-submitted leaf or revision hash (`0x` optional) into 32 raw
+/// bytes. Two spellings are accepted: the bare 64-hex SHA3-256 digest, and the
+/// SDK's `RevisionLink` multihash form (`1620` + digest, PCA-0015 §3.5), which
+/// is what an `aqua-rs-sdk` v5 client holds for its own revision. The
+/// accumulator stores leaves in the binary digest form so the Merkle build
+/// skips hex decoding inside the seal hot path.
 pub fn parse_leaf_hex(input: &str) -> Result<Hash32, LeafParseError> {
     let trimmed = input.strip_prefix("0x").unwrap_or(input);
-    if trimmed.len() != 64 {
+    let digest_hex = match trimmed.get(..SHA3_256_MULTIHASH_PREFIX.len()) {
+        Some(prefix)
+            if trimmed.len() == SHA3_256_MULTIHASH_PREFIX.len() + 64
+                && prefix.eq_ignore_ascii_case(SHA3_256_MULTIHASH_PREFIX) =>
+        {
+            &trimmed[SHA3_256_MULTIHASH_PREFIX.len()..]
+        }
+        _ => trimmed,
+    };
+    if digest_hex.len() != 64 {
         return Err(LeafParseError::BadLength(trimmed.len()));
     }
-    let bytes = hex::decode(trimmed)?;
+    let bytes = hex::decode(digest_hex)?;
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)

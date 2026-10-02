@@ -10,7 +10,7 @@
 //! - `STRESS_TEST_CLIENT_KEY` (optional hex private key; when set, the same
 //!   DID is reused across runs so witnesses from prior epochs remain
 //!   fetchable. Generate one and store it in `.env` for persistent testing.)
-//! - `TIMESTAMP_BASE_URL` (default `https://timestamp.inblock.io`)
+//! - `TIMESTAMP_BASE_URL` (default `https://openwitness.org`)
 //! - `STRESS_COUNT` (default `1000`)
 //! - `STRESS_METHOD` (default `evm`; also accepts `qtsa`)
 //! - `STRESS_PARALLEL` (default `32`; how many witness fetches run in parallel)
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(env("RUST_LOG", "info,aqua_timestamp_client=info"))
         .try_init();
 
-    let base_url = env("TIMESTAMP_BASE_URL", "https://timestamp.inblock.io");
+    let base_url = env("TIMESTAMP_BASE_URL", "https://openwitness.org");
     let count: usize = env_parsed("STRESS_COUNT", 1000usize);
     let method = match env("STRESS_METHOD", "evm").to_lowercase().as_str() {
         "evm" => AnchorMethod::Evm,

@@ -1,4 +1,4 @@
-//! Async client for the Aqua Timestamp Aggregator (`timestamp.inblock.io`).
+//! Async client for the Aqua Timestamp Aggregator (`openwitness.org`).
 //!
 //! # When to reach for this crate
 //!
@@ -35,7 +35,7 @@
 //! # use aqua_timestamp_client::{AnchorMethod, TimestampClient};
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = TimestampClient::builder()
-//!     .base_url("https://timestamp.inblock.io")
+//!     .base_url("https://openwitness.org")
 //!     .my_did("did:pkh:eip155:1:0x...")
 //!     .signer(|message: &str| {
 //!         // Sign `message` with your CAIP-122 key, return hex.

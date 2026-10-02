@@ -26,7 +26,6 @@
         "local_timestamp": 0,
         "version": "https://aqua-protocol.org/docs/v4/schema",
         "method": "scalar",
-        "hash_type": "FIPS_202-SHA3-256",
         "structural_links": [
           "<STRUCTURAL_LINKS>"
         ]
@@ -38,7 +37,6 @@
         "local_timestamp": 0,
         "version": "https://aqua-protocol.org/docs/v4/schema",
         "method": "scalar",
-        "hash_type": "FIPS_202-SHA3-256",
         "payloads": {
           "signer_did": "<SIGNER_DID>",
           "service_kind": "server",
@@ -55,7 +53,6 @@
         "local_timestamp": 0,
         "version": "https://aqua-protocol.org/docs/v4/schema",
         "method": "scalar",
-        "hash_type": "FIPS_202-SHA3-256",
         "signer": "<SIGNER>",
         "signature": {
           "signature_type": "ethereum:eip-191",

@@ -30,7 +30,7 @@ use aqua_timestamp_core::{
     time::{Clock, SystemClock},
     witness::AnchorMethod,
 };
-use aqua_tsa::TsaTimestamper;
+use aqua_tsa_provider::TsaTimestamper;
 use axum::{
     routing::{get, post},
     Router,
@@ -150,9 +150,9 @@ pub async fn build_app(
         None
     };
     // M5: parallel wiring for qTSA. Same shape as EVM, just a different
-    // SDK provider. `TsaTimestamper::new(url, Some(duration))` honours
+    // SDK provider. `TsaTimestamper::new(url).with_min_request_interval(duration)` honours
     // the rate-limit guidance the SDK's own docstring gives for
-    // eIDAS-qualified endpoints; `None` disables the throttle.
+    // eIDAS-qualified endpoints; no interval disables the throttle.
     let qtsa_anchor_cfg = cfg.anchors.qtsa.clone();
     let qtsa_anchor: Option<Arc<dyn AnchorProvider>> = if qtsa_anchor_cfg.enabled {
         info!(
@@ -161,8 +161,12 @@ pub async fn build_app(
             network_label = %qtsa_anchor_cfg.network_label,
             "qtsa anchor enabled (TsaTimestamper)"
         );
-        let timestamper =
-            TsaTimestamper::new(qtsa_anchor_cfg.url.clone(), qtsa_anchor_cfg.throttle());
+        let timestamper = match qtsa_anchor_cfg.throttle() {
+            Some(interval) => {
+                TsaTimestamper::new(qtsa_anchor_cfg.url.clone()).with_min_request_interval(interval)
+            }
+            None => TsaTimestamper::new(qtsa_anchor_cfg.url.clone()),
+        };
         Some(Arc::new(timestamper) as Arc<dyn AnchorProvider>)
     } else {
         info!("qtsa anchor disabled: minting stub witnesses for qtsa method");

@@ -1,4 +1,4 @@
-//! Live integration test against the deployed `timestamp.inblock.io`.
+//! Live integration test against the deployed `openwitness.org`.
 //!
 //! Disabled by default. Run with:
 //!
@@ -7,7 +7,7 @@
 //! ```
 //!
 //! Environment variables:
-//! - `TIMESTAMP_BASE_URL` (default `https://timestamp.inblock.io`)
+//! - `TIMESTAMP_BASE_URL` (default `https://openwitness.org`)
 //! - `LIVE_TIMEOUT_SECS` (default `900` — 15 min, enough for one ~10 min epoch
 //!   to roll over with margin)
 //!
@@ -45,8 +45,7 @@ fn ephemeral_signer() -> (
 }
 
 fn base_url() -> String {
-    std::env::var("TIMESTAMP_BASE_URL")
-        .unwrap_or_else(|_| "https://timestamp.inblock.io".to_string())
+    std::env::var("TIMESTAMP_BASE_URL").unwrap_or_else(|_| "https://openwitness.org".to_string())
 }
 
 fn live_timeout() -> Duration {

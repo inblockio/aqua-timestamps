@@ -57,9 +57,10 @@ async fn identity_tree_verifies_via_sdk() {
         .verify_tree_sync(wrapper, vec![])
         .expect("sync verify");
     assert!(
-        result.is_valid,
-        "identity tree must verify cleanly through the SDK; status={} logs={:#?}",
-        result.status, result.logs
+        result.is_verified(),
+        "identity tree must verify cleanly through the SDK; outcome={:?} logs={:#?}",
+        result.outcome,
+        result.logs
     );
 }
 

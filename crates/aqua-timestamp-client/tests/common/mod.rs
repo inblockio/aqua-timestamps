@@ -59,10 +59,10 @@ pub async fn build_identity_response(key: &[u8; 32], dns: &str) -> (String, Valu
         deploy_version: Some("test".to_string()),
     };
 
-    let obj = Object::genesis_with_template(Method::Scalar, HashType::Sha3_256, payload)
+    let obj = Object::genesis_with_template(Method::Scalar, payload)
         .genericize()
         .expect("genericize");
-    let obj_link = obj.calculate_link().expect("object link");
+    let obj_link = obj.calculate_link(HashType::Sha3_256).expect("object link");
     let mut tree = Tree {
         revisions: BTreeMap::new(),
         file_index: BTreeMap::new(),
@@ -120,10 +120,12 @@ pub async fn build_witness_tree(key: &[u8; 32], leaf: &[u8; 32]) -> Value {
     };
 
     let leaf_link = RevisionLink::from_bytes(*leaf);
-    let obj = Object::new_with_template(leaf_link, Method::Scalar, HashType::Sha3_256, payload)
+    let obj = Object::new_with_template(leaf_link, Method::Scalar, payload)
         .genericize()
         .expect("genericize witness object");
-    let obj_link = obj.calculate_link().expect("witness object link");
+    let obj_link = obj
+        .calculate_link(HashType::Sha3_256)
+        .expect("witness object link");
 
     let mut tree = Tree {
         revisions: BTreeMap::new(),
@@ -132,7 +134,9 @@ pub async fn build_witness_tree(key: &[u8; 32], leaf: &[u8; 32]) -> Value {
     tree.revisions
         .insert(obj_link.clone(), AnyRevision::Typed(obj));
 
-    let wrapper = AquaTreeWrapper::new(tree, None, None);
+    // The object chains onto the client's leaf, which is not part of this tree,
+    // so name the signing target instead of letting the SDK infer a latest revision.
+    let wrapper = AquaTreeWrapper::new(tree, None, Some(obj_link.clone()));
     let op = sign_aqua_tree_with_signer(&wrapper, &signer, Method::Scalar, None)
         .await
         .expect("sign witness tree");
@@ -160,13 +164,17 @@ pub async fn mount_auth(server: &MockServer) {
     let did = client_did();
     let identifier =
         aqua_auth::did::identifier_from_did(&did).expect("derive identifier from client did");
+    // aqua-auth 0.7 also binds the URI line to the origin it dialed (relay
+    // defence), so the mock must state its own address. The domain line is a
+    // free-form label and is not checked.
+    let uri = server.uri();
     let message = format!(
         "test.example wants you to sign in with your Ethereum account:\n\
          {identifier}\n\
          \n\
          Sign in to Aqua Node\n\
          \n\
-         URI: http://test.example\n\
+         URI: {uri}\n\
          Version: 1\n\
          Nonce: 0x00\n\
          Issued At: 2026-01-01T00:00:00.000Z\n\

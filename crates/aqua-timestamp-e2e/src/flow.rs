@@ -184,7 +184,7 @@ impl ClientKey {
                     .map_err(|e| anyhow!("derive_did_pkh: {e}"))?;
                 Ok(Self {
                     did,
-                    display_identifier: addr.to_checksum(None),
+                    display_identifier: eip55(&addr),
                     method,
                     secret: KeyMaterial::Secp256k1 {
                         private_key: sk_bytes,
@@ -353,17 +353,79 @@ fn address_from_did(did: &str) -> Result<String> {
     Ok(last.to_string())
 }
 
+/// EIP-55 mixed-case checksum encoding of a 20-byte address.
+fn eip55(addr: &[u8; 20]) -> String {
+    let hex_addr = hex::encode(addr);
+    let hash = Keccak256::digest(hex_addr.as_bytes());
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    for (i, c) in hex_addr.chars().enumerate() {
+        let nibble = (hash[i / 2] >> (if i % 2 == 0 { 4 } else { 0 })) & 0x0f;
+        out.push(if c.is_ascii_alphabetic() && nibble >= 8 {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        });
+    }
+    out
+}
+
+/// Digest (`0x` + 64 hex) inside a SHA3-256 `RevisionLink` string. A witness
+/// object's `previous_revision` is the client's leaf as a link (`0x1620` +
+/// digest), while the client submitted the bare digest.
+fn link_digest_hex(link: &str) -> Result<String> {
+    let bytes = hex::decode(link.trim_start_matches("0x"))
+        .with_context(|| format!("link {link} is not hex"))?;
+    let (hash_type, digest) = aqua_rs_sdk::primitives::multihash_decode(&bytes)
+        .map_err(|e| anyhow!("link {link} is not a multihash: {e:?}"))?;
+    if hash_type != HashType::Sha3_256 {
+        bail!("link {link} is {hash_type:?}, expected sha3-256");
+    }
+    Ok(format!("0x{}", hex::encode(digest)))
+}
+
+/// Hash algorithm a revision's addressing link commits to (PCA-0015 §3.5).
+/// The SDK no longer stores it on the revision: it is the multicodec byte of
+/// the declared multihash (`0x16` sha3-256, `0x1e` blake3).
+fn declared_hash_type(declared_hash: &str) -> Result<HashType> {
+    let bytes = hex::decode(declared_hash.trim_start_matches("0x"))
+        .with_context(|| format!("declared hash {declared_hash} is not hex"))?;
+    let code = *bytes
+        .first()
+        .ok_or_else(|| anyhow!("declared hash {declared_hash} is empty"))?;
+    HashType::from_multicodec(u64::from(code))
+        .map_err(|e| anyhow!("declared hash {declared_hash}: {e:?}"))
+}
+
+/// `Linkable::calculate_link` is implemented per variant and not on
+/// `AnyRevision`, so dispatch on the enum. The algorithm comes from the
+/// declared link, never from the revision.
+fn recompute_link(
+    rev: &AnyRevision,
+    declared_hash: &str,
+) -> Result<aqua_rs_sdk::primitives::RevisionLink> {
+    use aqua_rs_sdk::verification::Linkable;
+    let ht = declared_hash_type(declared_hash)?;
+    match rev {
+        AnyRevision::Typed(obj) => obj.calculate_link(ht),
+        AnyRevision::Signature(sig) => sig.calculate_link(ht),
+        AnyRevision::Template(t) => t.calculate_link(ht),
+        AnyRevision::Anchor(a) => a.calculate_link(ht),
+    }
+    .map_err(|e| anyhow!("calculate_link({declared_hash}): {e:?}"))
+}
+
 /// Verify a Signature revision the same way `aqua-rs-sdk` does internally:
 /// reconstruct the pre-signature canonical JSON, ecrecover, compare to
 /// `signature_public_identifier`. Returns the recovered EIP-55 address.
-fn verify_signature_revision(sig_value: &Value) -> Result<String> {
+fn verify_signature_revision(sig_value: &Value, declared_hash: &str) -> Result<String> {
     let rev: AnyRevision =
         serde_json::from_value(sig_value.clone()).context("AnyRevision deserialise")?;
     let signature = match &rev {
         AnyRevision::Signature(s) => s,
         _ => bail!("not a Signature revision"),
     };
-    let canonical = signature.pre_signature_canonical_json();
+    let canonical = signature.pre_signature_canonical_json(declared_hash_type(declared_hash)?);
     let canonical_str = std::str::from_utf8(&canonical).context("canonical utf8")?;
 
     // Pull the raw 65-byte signature out of the JSON ourselves so we don't
@@ -386,7 +448,7 @@ fn verify_signature_revision(sig_value: &Value) -> Result<String> {
 
     let recovered = aqua_rs_sdk::core::signature::recover_wallet_address(canonical_str, &sig65)
         .map_err(|e| anyhow!("recover_wallet_address: {e}"))?;
-    let recovered_eip55 = recovered.to_checksum(None);
+    let recovered_eip55 = eip55(&recovered);
     // The on-wire `signature_public_identifier` is also EIP-55.
     if !recovered_eip55.eq_ignore_ascii_case(claimed_addr) {
         bail!(
@@ -591,13 +653,7 @@ pub async fn run_full_flow(
     for (declared_hash, rev_value) in revisions {
         let rev: AnyRevision = serde_json::from_value(rev_value.clone())
             .with_context(|| format!("deserialise revision {declared_hash}"))?;
-        let computed = match &rev {
-            AnyRevision::Typed(obj) => aqua_rs_sdk::verification::Linkable::calculate_link(obj),
-            AnyRevision::Signature(sig) => aqua_rs_sdk::verification::Linkable::calculate_link(sig),
-            AnyRevision::Template(t) => aqua_rs_sdk::verification::Linkable::calculate_link(t),
-            AnyRevision::Anchor(a) => aqua_rs_sdk::verification::Linkable::calculate_link(a),
-        }
-        .map_err(|e| anyhow!("calculate_link({declared_hash}): {e:?}"))?;
+        let computed = recompute_link(&rev, declared_hash)?;
         let computed_hex = format!("0x{}", hex::encode(computed.as_ref()));
         if !computed_hex.eq_ignore_ascii_case(declared_hash) {
             bail!("L1: revision {declared_hash} re-hashes to {computed_hex}; map key mismatch");
@@ -684,7 +740,7 @@ pub async fn run_full_flow(
         .get("previous_revision")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("TimestampObject.previous_revision missing"))?;
-    if !prev.eq_ignore_ascii_case(&leaf_hex) {
+    if !link_digest_hex(prev)?.eq_ignore_ascii_case(&leaf_hex) {
         bail!("L2: TimestampObject.previous_revision {prev} != submitted leaf {leaf_hex}");
     }
     log(
@@ -695,7 +751,7 @@ pub async fn run_full_flow(
     );
 
     // ── 9c. L3: Signature recovers to the service address. ───────────────
-    let recovered = verify_signature_revision(signature_value)?;
+    let recovered = verify_signature_revision(signature_value, &signature_hash)?;
     if !recovered.eq_ignore_ascii_case(&server_addr) {
         bail!("L3: signature recovered {recovered} != server address {server_addr} from identity");
     }
@@ -759,15 +815,7 @@ pub async fn run_full_flow(
         // L1
         for (declared_hash, rev_value) in qtsa_revisions {
             let rev: AnyRevision = serde_json::from_value(rev_value.clone())?;
-            let computed = match &rev {
-                AnyRevision::Typed(obj) => aqua_rs_sdk::verification::Linkable::calculate_link(obj),
-                AnyRevision::Signature(sig) => {
-                    aqua_rs_sdk::verification::Linkable::calculate_link(sig)
-                }
-                AnyRevision::Template(t) => aqua_rs_sdk::verification::Linkable::calculate_link(t),
-                AnyRevision::Anchor(a) => aqua_rs_sdk::verification::Linkable::calculate_link(a),
-            }
-            .map_err(|e| anyhow!("calculate_link({declared_hash}): {e:?}"))?;
+            let computed = recompute_link(&rev, declared_hash)?;
             let computed_hex = format!("0x{}", hex::encode(computed.as_ref()));
             if !computed_hex.eq_ignore_ascii_case(declared_hash) {
                 bail!("qtsa L1: rev {declared_hash} re-hashes to {computed_hex}");
@@ -781,6 +829,7 @@ pub async fn run_full_flow(
         // L2 + L3
         let mut q_obj: Option<&Value> = None;
         let mut q_sig: Option<&Value> = None;
+        let mut q_sig_hash: Option<String> = None;
         let mut q_obj_hash: Option<String> = None;
         for (h, v) in qtsa_revisions {
             let rev: AnyRevision = serde_json::from_value(v.clone())?;
@@ -791,12 +840,14 @@ pub async fn run_full_flow(
                 }
                 AnyRevision::Signature(_) => {
                     q_sig = Some(v);
+                    q_sig_hash = Some(h.clone());
                 }
                 _ => {}
             }
         }
         let q_obj = q_obj.ok_or_else(|| anyhow!("qtsa witness missing TimestampObject"))?;
         let q_sig = q_sig.ok_or_else(|| anyhow!("qtsa witness missing Signature"))?;
+        let q_sig_hash_str = q_sig_hash.as_deref().expect("set with q_sig");
 
         let q_payloads = q_obj
             .get("payloads")
@@ -845,7 +896,7 @@ pub async fn run_full_flow(
             .get("previous_revision")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("qtsa previous_revision missing"))?;
-        if !q_prev.eq_ignore_ascii_case(&leaf_hex) {
+        if !link_digest_hex(q_prev)?.eq_ignore_ascii_case(&leaf_hex) {
             bail!("qtsa L2: previous_revision {q_prev} != leaf {leaf_hex}");
         }
         log(
@@ -855,7 +906,7 @@ pub async fn run_full_flow(
             ),
         );
 
-        let q_recovered = verify_signature_revision(q_sig)?;
+        let q_recovered = verify_signature_revision(q_sig, q_sig_hash_str)?;
         if !q_recovered.eq_ignore_ascii_case(&server_addr) {
             bail!("qtsa L3: recovered {q_recovered} != server addr {server_addr}");
         }

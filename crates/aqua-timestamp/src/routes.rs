@@ -5,7 +5,7 @@ use std::{convert::Infallible, sync::Arc};
 use aqua_timestamp_core::{
     merkle::{hex_lower, parse_leaf_hex, LeafParseError},
     storage::TipPairIndex,
-    witness::AnchorMethod,
+    witness::{revision_wire_hex, AnchorMethod},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -488,7 +488,7 @@ fn list_tips_for_did(state: &Arc<AppState>, did: &str) -> Result<Response, AuthA
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     let body: Vec<String> = tips
         .into_iter()
-        .map(|(_, tip)| format!("0x{}", hex::encode(tip)))
+        .map(|(_, tip)| revision_wire_hex(&tip))
         .collect();
     info!(did, count = body.len(), "trees.list");
     Ok((StatusCode::OK, Json(body)).into_response())
@@ -652,7 +652,8 @@ fn build_pair_body(
 
 /// Add the two revisions (object + signature) of the witness pair
 /// described by `idx` into the supplied response maps. Mirrors aqua-node's
-/// JSON shape: keys are `"0x<hex>"` revision hashes, values are the raw
+/// JSON shape: keys are the SDK's `RevisionLink` strings (`0x1620` + digest),
+/// values are the raw
 /// `AnyRevision` JSON the SDK emitted at sign time.
 fn load_pair_into_maps(
     store: &aqua_timestamp_core::storage::Store,
@@ -672,8 +673,8 @@ fn load_pair_into_maps(
     let obj_json: Value = serde_json::from_slice(&obj_bytes).map_err(|e| format!("json: {e}"))?;
     let sig_json: Value = serde_json::from_slice(&sig_bytes).map_err(|e| format!("json: {e}"))?;
 
-    let obj_hex = format!("0x{}", hex::encode(idx.object_hash));
-    let sig_hex = format!("0x{}", hex::encode(idx.signature_hash));
+    let obj_hex = revision_wire_hex(&idx.object_hash);
+    let sig_hex = revision_wire_hex(&idx.signature_hash);
 
     revisions.insert(obj_hex.clone(), obj_json);
     revisions.insert(sig_hex.clone(), sig_json);
@@ -683,17 +684,7 @@ fn load_pair_into_maps(
 }
 
 fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
-    let trimmed = input.strip_prefix("0x").unwrap_or(input);
-    if trimmed.len() != 64 {
-        return Err(format!(
-            "expected 64 hex chars (optionally 0x-prefixed), got {}",
-            trimmed.len()
-        ));
-    }
-    let bytes = hex::decode(trimmed).map_err(|e| format!("non-hex: {e}"))?;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    parse_leaf_hex(input).map_err(|e| e.to_string())
 }
 
 fn not_found_response(msg: &str) -> Response {
