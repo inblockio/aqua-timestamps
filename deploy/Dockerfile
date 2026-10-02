@@ -1,9 +1,15 @@
 # syntax=docker/dockerfile:1.7
-# Multi-stage build. The repo is expected to be available alongside the
-# sister-repo path-deps. Build context root is one level above.
+# Multi-stage build, run on the dev host by deploy/deploy.sh (the production box
+# has 4 GB shared with the Matrix stack, too little for a release build). The
+# build context is the repository root: the train dependencies are git pins in Cargo.toml, so there
+# are no sibling checkouts. aqua-auth and the crates.io dependencies are fetched
+# during the build; the private aqua-rs-sdk source arrives vendored in the
+# context (`vendor/` + `.cargo/config.toml`, written by deploy.sh), so the build
+# needs no GitHub credentials. Build it with `--format docker` under podman, or
+# the HEALTHCHECK below is dropped.
 
 # -------------------- BUILDER --------------------
-FROM rust:1.95-bookworm AS builder
+FROM docker.io/library/rust:1.95-bookworm AS builder
 
 ENV CARGO_TERM_COLOR=always \
     RUSTFLAGS="-C target-cpu=x86-64-v2" \
@@ -17,19 +23,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         clang \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-COPY aqua-rs-sdk                ./aqua-rs-sdk
-COPY aqua-auth                  ./aqua-auth
-COPY aqua-evm-provider          ./aqua-evm-provider
-COPY aqua-qualified-verification ./aqua-qualified-verification
-COPY aqua-timestamps            ./aqua-timestamps
+# Stamped into the binary by crates/aqua-timestamp/build.rs (there is no .git in
+# the context) and served at GET /version.
+ARG GIT_SHA=unknown
+ARG GIT_DIRTY=0
 
-WORKDIR /src/aqua-timestamps
-RUN cargo build --release --bin aqua-timestamp \
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked --bin aqua-timestamp \
     && strip target/release/aqua-timestamp
 
 # -------------------- RUNTIME --------------------
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -40,7 +45,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /var/lib/aqua-timestamp /etc/aqua-timestamp \
     && chown -R aqua:aqua /var/lib/aqua-timestamp
 
-COPY --from=builder /src/aqua-timestamps/target/release/aqua-timestamp /usr/local/bin/aqua-timestamp
+COPY --from=builder /src/target/release/aqua-timestamp /usr/local/bin/aqua-timestamp
+
+# Source revision of the image (also GET /version), so a deployed artifact can be
+# traced to its commit without running it.
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=$GIT_SHA \
+      org.opencontainers.image.source="https://github.com/inblockio/aqua-timestamps"
 
 USER aqua
 EXPOSE 8080

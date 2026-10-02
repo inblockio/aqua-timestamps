@@ -81,6 +81,39 @@ should be cloned before M3 (REST API contract reference).
 `gh auth login` is still pending; not blocking for M0 (build locally,
 push image to server directly), but needed later for GHCR / PRs.
 
+## Dependency pins and `/version` (2026-10-02)
+
+The three trains (`aqua-rs-sdk`, `aqua-auth`, `aqua-node`) are owned in the private
+`inblockio/aqua-ops` repo (`train/train.toml`); the rule is
+`development-conventions/CONVENTIONS-dependency-pins.md`: pin by annotated tag, never
+more than 14 days behind. This repo pins, in the workspace `Cargo.toml`:
+
+| Dependency | Pin | Notes |
+|---|---|---|
+| `aqua-rs-sdk`, `aqua-evm-provider`, `aqua-tsa-provider` | `v5.0.0` | one git source, `https://github.com/inblockio/aqua-rs-sdk` |
+| `aqua-auth` | `v0.7.0` | `https://github.com/inblockio/aqua-auth` |
+| `aqua-node` | n/a | not a dependency; only its `/trees` REST contract is mirrored (v0.1.7) |
+
+Move a pin only when the train moves (read aqua-ops `origin/main`, not a stale local
+checkout), in one PR, and check `cargo tree -d` shows no `aqua-*` crate.
+
+`GET /version` (public) returns the running source `revision` (full commit, stamped by
+`crates/aqua-timestamp/build.rs`, from git or the `GIT_SHA` build arg), `dirty`, the crate
+`version` and the `protocol_version`; the image carries the same commit as the OCI label
+`org.opencontainers.image.revision`. aqua-ops derives the deployed pins from that
+commit's `Cargo.lock`. A dependency bump is not done until it is deployed and `/version`
+names the merged commit (`deploy.sh` checks this).
+
+SDK 5.0.0 changed the wire: a `RevisionLink` is the full multihash (`0x1620` + digest) and
+revisions no longer carry `hash_type`. Storage keeps the 32-byte digest; `/trees` keys and
+tip lists emit the SDK form (what aqua-node parses with `RevisionLink::from_str`), and
+leaf and tip inputs accept both the bare digest and the multihash. The production data
+(about 13.5k test witnesses from 2026-05-22 under the old shape) was deliberately wiped on
+the 5.0.0 deploy, 2026-10-02: Tim decided complete data loss was acceptable, so there is
+no legacy-witness handling and epochs restarted at 1. aqua-auth 0.7 clients refuse a
+challenge whose `URI:` origin differs from the origin they dialed, so clients must use
+`https://openwitness.org` (the old `timestamp.inblock.io` name no longer resolves).
+
 ## Deployment target
 
 | Field | Value |
@@ -93,7 +126,7 @@ push image to server directly), but needed later for GHCR / PRs.
 | Caddyfile location | `/home/portal/portal/Caddyfile` (bind-mounted) |
 | Backend network | `portal-net` (Docker bridge) |
 | Reload command | `docker exec portal-caddy-1 caddy reload --config /etc/caddy/Caddyfile` |
-| Deploy SSH | `ssh deploy@timestamps.inblock.io` |
+| Deploy SSH | `ssh agentic.inblock.io` (alias in `~/.ssh/config`: user `deploy`, port 8022; `timestamps.inblock.io` did not resolve from the dev host on 2026-10-02) |
 | Deploy compose | `/home/deploy/timestamps/deploy/docker-compose.yml` |
 | Deploy config | `/home/deploy/timestamps/deploy/config.toml` |
 
@@ -107,20 +140,23 @@ See memory [[reference-server-agentic-hub]] for full server details and
 
 ## Workflow conventions for this project
 
-- **Build on the deploy server.** This host has no local Docker
-  (installing it needs sudo and the global rules gate that). The
-  pattern is: `rsync` the workspace plus the two sister crates
-  (`aqua-rs-sdk`, `aqua-rs-auth`) to `/root/timestamp/build/` on
-  `timestamp.inblock.io`, then `docker buildx build` there. The full
-  command sequence is in the M0 deploy transcript and in
-  [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
-  When `gh auth login` is done later, the alternate path is GHCR
-  push from this host, which removes the rsync.
-- **No GH Actions CI yet.** Add later; doesn't block M0..M5.
+- **Deploy with `deploy/deploy.sh`.** The train dependencies are git tag pins,
+  so there are no sibling checkouts to rsync any more. The script builds the image
+  on the dev host (the production box has 2 vCPU / 4 GB shared with the Matrix
+  stack), from `git archive HEAD` plus the private `aqua-rs-sdk` source vendored
+  from the local cargo checkout (so the server needs no GitHub credentials), with
+  `GIT_SHA` stamped in. It ships the image with `docker save | docker load`,
+  recreates the container, and checks that the public `/version` names the commit
+  it just built. It only deploys `origin/main`; `--build-only --allow-unmerged`
+  rehearses a branch without touching the service; `--wipe-data` deletes the data
+  volume and exists for the one-time SDK 5.0.0 migration. SSH is the
+  `agentic.inblock.io` alias (port 8022), user `deploy`. There is no CI/CD: the old
+  `deploy.yml` never succeeded (port 22 closed, no secrets, server dirs were not git
+  repos) and was removed; automating this needs an SSH key secret plus a token for
+  the SDK vendoring.
 - **`cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --check`** before declaring any code work done. The
-  workspace ships clean under both (the only warnings come from the
-  read-only `aqua-rs-sdk` sister crate's unused imports).
+  workspace ships clean under both on toolchain 1.95.0.
 - **Secrets handling:** the service mnemonic NEVER goes into the
   repo, the image, or any committed compose file. It's read at
   runtime from `AQUA_TIMESTAMP_ANCHOR_MNEMONIC`, sourced from
