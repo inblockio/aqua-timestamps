@@ -51,6 +51,36 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     })
 }
 
+/// `GET /version` response. Public and unauthenticated: it names the running
+/// source revision so the deployed dependency pins can be derived from that
+/// commit's `Cargo.lock` (aqua-ops, CONVENTIONS-dependency-pins.md rule 7).
+#[derive(Serialize)]
+pub struct VersionResponse {
+    pub service: &'static str,
+    /// Crate version (semver), not the protocol version.
+    pub version: &'static str,
+    /// Aqua Protocol version this build implements.
+    pub protocol_version: &'static str,
+    /// Full 40-hex commit the binary was built from, or `"unknown"`.
+    pub revision: &'static str,
+    /// True when the build had uncommitted changes to tracked files.
+    pub dirty: bool,
+}
+
+pub async fn version() -> impl IntoResponse {
+    (
+        // The answer must never be served stale: it is evidence of what runs.
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(VersionResponse {
+            service: "aqua-timestamp",
+            version: env!("CARGO_PKG_VERSION"),
+            protocol_version: aqua_rs_sdk::PROTOCOL_VERSION,
+            revision: env!("GIT_SHA"),
+            dirty: env!("GIT_DIRTY") == "1",
+        }),
+    )
+}
+
 pub async fn landing_page() -> Response {
     (
         StatusCode::OK,

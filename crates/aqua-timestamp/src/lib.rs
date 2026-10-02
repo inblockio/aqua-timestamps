@@ -46,7 +46,7 @@ use crate::{
     routes::{
         apple_touch_icon, aqua_identity, aqua_orl, blueprint_page, docs_page, favicon_ico,
         get_tree_by_leaf, get_tree_by_tip, health, landing_page, leaderboard, list_epochs,
-        list_or_query_trees, not_found, pool_status, schedule, sse_events, submit_leaves,
+        list_or_query_trees, not_found, pool_status, schedule, sse_events, submit_leaves, version,
         well_known_skill_auth_md, well_known_skill_md,
     },
     state::AppState,
@@ -323,6 +323,7 @@ pub async fn build_app(
 
     let router = Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .route("/favicon.ico", get(favicon_ico))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
         .route("/", get(landing_page))
