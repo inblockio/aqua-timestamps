@@ -4,8 +4,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aqua_timestamp_client::{
@@ -123,7 +123,10 @@ async fn rotation_refuse_blocks_unknown_did() {
         .base_url(server.uri())
         .my_did(client_did())
         .signer(make_test_signer())
-        .expect_server_did("did:pkh:eip155:1:0xfeedfacefeedfacefeedfacefeedfacefeedface", OnRotation::Refuse)
+        .expect_server_did(
+            "did:pkh:eip155:1:0xfeedfacefeedfacefeedfacefeedfacefeedface",
+            OnRotation::Refuse,
+        )
         .build()
         .await
         .expect_err("build should fail under refuse policy");

@@ -99,11 +99,9 @@ impl AuthState {
     async fn run_refresh(&self, http: &reqwest::Client) -> Result<String, ClientError> {
         debug!(did = %self.my_did, "refreshing aqua-timestamp session token");
         let signer = self.signer.clone();
-        let session = authenticate(http, &self.base_url, &self.my_did, move |msg| {
-            (signer)(msg)
-        })
-        .await
-        .map_err(|e| ClientError::Auth(e.to_string()))?;
+        let session = authenticate(http, &self.base_url, &self.my_did, move |msg| (signer)(msg))
+            .await
+            .map_err(|e| ClientError::Auth(e.to_string()))?;
 
         let mut guard = self.cached.lock().await;
         *guard = Some(Cached {

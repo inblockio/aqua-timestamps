@@ -23,7 +23,14 @@ use alloy::signers::SignerSync;
 use aqua_timestamp_client::{AnchorMethod, TimestampClient};
 use rand::RngCore;
 
-fn ephemeral_signer() -> (String, impl Fn(&str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone + 'static) {
+fn ephemeral_signer() -> (
+    String,
+    impl Fn(&str) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+) {
     let mut key_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key_bytes);
     let wallet = PrivateKeySigner::from_bytes(&key_bytes.into()).expect("valid secp256k1 key");
@@ -38,7 +45,8 @@ fn ephemeral_signer() -> (String, impl Fn(&str) -> Result<String, Box<dyn std::e
 }
 
 fn base_url() -> String {
-    std::env::var("TIMESTAMP_BASE_URL").unwrap_or_else(|_| "https://timestamp.inblock.io".to_string())
+    std::env::var("TIMESTAMP_BASE_URL")
+        .unwrap_or_else(|_| "https://timestamp.inblock.io".to_string())
 }
 
 fn live_timeout() -> Duration {
@@ -87,10 +95,7 @@ async fn live_roundtrip_evm_and_qtsa() {
 
     // Await the EVM witness first (epoch must seal). Then qTSA.
     let evm_deadline = live_timeout();
-    println!(
-        "[live] awaiting EVM witness (max {:?})...",
-        evm_deadline
-    );
+    println!("[live] awaiting EVM witness (max {:?})...", evm_deadline);
     let evm = client
         .await_witness(&receipt, AnchorMethod::Evm, evm_deadline)
         .await
@@ -112,7 +117,10 @@ async fn live_roundtrip_evm_and_qtsa() {
 
     assert_eq!(evm.anchor_method, AnchorMethod::Evm);
     assert_eq!(qtsa.anchor_method, AnchorMethod::Qtsa);
-    assert_ne!(evm.object_hash, qtsa.object_hash, "anchor methods must produce distinct objects");
+    assert_ne!(
+        evm.object_hash, qtsa.object_hash,
+        "anchor methods must produce distinct objects"
+    );
 
     println!(
         "[live] roundtrip OK in {:.1}s",

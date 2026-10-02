@@ -459,7 +459,7 @@ impl Store {
             let entry: ContributorEntry = postcard::from_bytes(&v).map_err(StoreError::Decode)?;
             entries.push(entry);
         }
-        entries.sort_by(|a, b| b.fuel_contributed_wei.cmp(&a.fuel_contributed_wei));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.fuel_contributed_wei));
         entries.truncate(limit);
         Ok(entries)
     }

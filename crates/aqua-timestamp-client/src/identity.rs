@@ -67,12 +67,11 @@ pub(crate) async fn discover(
             source: Box::new(e),
         })?;
 
-    let parsed: IdentityWire = serde_json::from_value(value.clone()).map_err(|e| {
-        ClientError::IdentityDiscovery {
+    let parsed: IdentityWire =
+        serde_json::from_value(value.clone()).map_err(|e| ClientError::IdentityDiscovery {
             base_url: base_url.as_str().to_string(),
             source: Box::new(e),
-        }
-    })?;
+        })?;
 
     verify_identity_claim(&parsed)?;
 
@@ -94,12 +93,13 @@ pub(crate) async fn discover(
 /// Validate the identity_claim tree internally. We walk its revisions,
 /// find the signature, and verify it recovers to the advertised DID.
 fn verify_identity_claim(parsed: &IdentityWire) -> Result<(), ClientError> {
-    let tree = parsed.identity_claim.as_object().ok_or_else(|| {
-        ClientError::IdentityDiscovery {
+    let tree = parsed
+        .identity_claim
+        .as_object()
+        .ok_or_else(|| ClientError::IdentityDiscovery {
             base_url: String::new(),
             source: "identity_claim is not a JSON object".into(),
-        }
-    })?;
+        })?;
 
     let revisions = tree
         .get("revisions")

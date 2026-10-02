@@ -266,11 +266,7 @@ impl TimestampClientBuilder {
     /// (no prior, accept whatever DID the server advertises). The pinned DID
     /// used for in-session signature verification is always the one
     /// discovered at `build()`.
-    pub fn expect_server_did(
-        mut self,
-        prior: impl Into<String>,
-        on_rotation: OnRotation,
-    ) -> Self {
+    pub fn expect_server_did(mut self, prior: impl Into<String>, on_rotation: OnRotation) -> Self {
         self.expect_server_did = Some((prior.into(), on_rotation));
         self
     }
@@ -311,7 +307,11 @@ impl TimestampClientBuilder {
         let (server, rotation) =
             identity::discover(&http, &base_url, self.expect_server_did.as_ref()).await?;
 
-        let auth = AuthState::new(base_url.as_str().trim_end_matches('/').to_string(), my_did, signer);
+        let auth = AuthState::new(
+            base_url.as_str().trim_end_matches('/').to_string(),
+            my_did,
+            signer,
+        );
 
         // Seed the token cache. If this fails, we surface the error rather
         // than handing back a client that will fail on first use.
@@ -399,9 +399,8 @@ fn extract_witness_pair(
         }
     }
 
-    let (sig_hash, sig_rev) = signature.ok_or_else(|| {
-        ClientError::Invalid("witness tree has no Signature revision".into())
-    })?;
+    let (sig_hash, sig_rev) = signature
+        .ok_or_else(|| ClientError::Invalid("witness tree has no Signature revision".into()))?;
     let (obj_hash, obj_rev) = object.ok_or_else(|| {
         ClientError::Invalid("witness tree has no timestamp Object revision".into())
     })?;

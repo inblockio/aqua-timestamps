@@ -93,6 +93,4 @@ pub mod known_servers;
 pub use client::{TimestampClient, TimestampClientBuilder};
 pub use error::ClientError;
 pub use trust::{OnRotation, RotationDecision, ServerRotation};
-pub use types::{
-    AnchorMethod, EpochSchedule, ServerIdentity, SubmissionReceipt, WitnessPair,
-};
+pub use types::{AnchorMethod, EpochSchedule, ServerIdentity, SubmissionReceipt, WitnessPair};

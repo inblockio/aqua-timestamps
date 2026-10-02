@@ -107,13 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── align to the start of the next epoch ─────────────────────────────
     let sched = client.schedule().await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let wait_secs = sched
-        .current_epoch_closes_at
-        .saturating_sub(now)
-        + align_buffer;
+    let wait_secs = sched.current_epoch_closes_at.saturating_sub(now) + align_buffer;
     println!(
         "current epoch = {} (closes at {}, in {}s); waiting + {}s buffer = {}s",
-        sched.current_epoch_id, sched.current_epoch_closes_at, sched.current_epoch_closes_at - now, align_buffer, wait_secs
+        sched.current_epoch_id,
+        sched.current_epoch_closes_at,
+        sched.current_epoch_closes_at - now,
+        align_buffer,
+        wait_secs
     );
     if wait_secs > 0 {
         sleep(Duration::from_secs(wait_secs)).await;
@@ -170,7 +171,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seal_started = Instant::now();
     loop {
         let s = client.schedule().await?;
-        if s.last_sealed_epoch_id.map(|id| id >= target_epoch).unwrap_or(false) {
+        if s.last_sealed_epoch_id
+            .map(|id| id >= target_epoch)
+            .unwrap_or(false)
+        {
             break;
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -188,7 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spread fetches over STRESS_FETCH_SPREAD_SECS (default 60) so we
     // simulate realistic client arrival rather than a thundering herd.
     let fetch_spread: u64 = env_parsed("STRESS_FETCH_SPREAD_SECS", 60u64);
-    println!("fetching {} witnesses (parallel={}, spread={}s)...", count, parallel, fetch_spread);
+    println!(
+        "fetching {} witnesses (parallel={}, spread={}s)...",
+        count, parallel, fetch_spread
+    );
 
     let fetch_started = Instant::now();
     let sem = Arc::new(Semaphore::new(parallel));
@@ -198,9 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Per-fetch jitter: uniformly spread across [0, fetch_spread].
         if fetch_spread > 0 && count > 1 {
             let delay_ms = (idx as u64 * fetch_spread * 1000) / (count as u64 - 1);
-            sleep(Duration::from_millis(delay_ms.saturating_sub(
-                fetch_started.elapsed().as_millis() as u64,
-            ))).await;
+            sleep(Duration::from_millis(
+                delay_ms.saturating_sub(fetch_started.elapsed().as_millis() as u64),
+            ))
+            .await;
         }
         let permit = sem.clone().acquire_owned().await?;
         let client = client.clone();
@@ -243,10 +251,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("submitted     : {}", count);
     println!("witness ok    : {}", ok);
     println!("witness fail  : {}", errors.len());
-    println!("submit time   : {:.2}s ({:.0} hashes/s)", submit_elapsed.as_secs_f64(), count as f64 / submit_elapsed.as_secs_f64().max(0.001));
+    println!(
+        "submit time   : {:.2}s ({:.0} hashes/s)",
+        submit_elapsed.as_secs_f64(),
+        count as f64 / submit_elapsed.as_secs_f64().max(0.001)
+    );
     println!("fetch spread  : {}s", fetch_spread);
     println!("seal wait     : {:.1}s", seal_elapsed.as_secs_f64());
-    println!("fetch time    : {:.2}s ({:.0} witnesses/s, parallel={})", fetch_elapsed.as_secs_f64(), ok as f64 / fetch_elapsed.as_secs_f64().max(0.001), parallel);
+    println!(
+        "fetch time    : {:.2}s ({:.0} witnesses/s, parallel={})",
+        fetch_elapsed.as_secs_f64(),
+        ok as f64 / fetch_elapsed.as_secs_f64().max(0.001),
+        parallel
+    );
     if !errors.is_empty() {
         println!();
         println!("first up to 5 failures:");

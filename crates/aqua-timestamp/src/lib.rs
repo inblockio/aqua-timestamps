@@ -18,7 +18,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use aqua_evm_provider::CliEthTimestamper;
 use aqua_rs_sdk::Secp256k1Signer;
-use aqua_tsa::TsaTimestamper;
 use aqua_timestamp_core::{
     accumulator::Accumulator,
     anchors::AnchorProvider,
@@ -31,6 +30,7 @@ use aqua_timestamp_core::{
     time::{Clock, SystemClock},
     witness::AnchorMethod,
 };
+use aqua_tsa::TsaTimestamper;
 use axum::{
     routing::{get, post},
     Router,

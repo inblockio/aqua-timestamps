@@ -32,7 +32,10 @@ pub const CLIENT_PRIVATE_KEY: [u8; 32] = [0x42; 32];
 #[allow(dead_code)]
 pub fn server_did(key: &[u8; 32]) -> String {
     let signer = Secp256k1Signer::new(key.to_vec());
-    signer.derive_did_pkh().expect("derive server did from key").0
+    signer
+        .derive_did_pkh()
+        .expect("derive server did from key")
+        .0
 }
 
 pub fn client_did() -> String {
@@ -44,9 +47,7 @@ pub fn client_did() -> String {
 /// `/.well-known/aqua-identity` JSON response.
 pub async fn build_identity_response(key: &[u8; 32], dns: &str) -> (String, Value) {
     let signer = Secp256k1Signer::new(key.to_vec());
-    let (did, _addr) = signer
-        .derive_did_pkh()
-        .expect("derive did from server key");
+    let (did, _addr) = signer.derive_did_pkh().expect("derive did from server key");
 
     let payload = ServiceClaimServer {
         signer_did: did.clone(),
@@ -119,10 +120,9 @@ pub async fn build_witness_tree(key: &[u8; 32], leaf: &[u8; 32]) -> Value {
     };
 
     let leaf_link = RevisionLink::from_bytes(*leaf);
-    let obj =
-        Object::new_with_template(leaf_link, Method::Scalar, HashType::Sha3_256, payload)
-            .genericize()
-            .expect("genericize witness object");
+    let obj = Object::new_with_template(leaf_link, Method::Scalar, HashType::Sha3_256, payload)
+        .genericize()
+        .expect("genericize witness object");
     let obj_link = obj.calculate_link().expect("witness object link");
 
     let mut tree = Tree {
@@ -158,8 +158,8 @@ pub async fn mount_auth(server: &MockServer) {
     // client now checks this before signing (defence in depth against a
     // hostile server trying to make us sign as a different account).
     let did = client_did();
-    let identifier = aqua_auth::did::identifier_from_did(&did)
-        .expect("derive identifier from client did");
+    let identifier =
+        aqua_auth::did::identifier_from_did(&did).expect("derive identifier from client did");
     let message = format!(
         "test.example wants you to sign in with your Ethereum account:\n\
          {identifier}\n\
@@ -238,9 +238,7 @@ pub async fn mount_by_leaf_404(server: &MockServer) {
     Mock::given(wmethod("GET"))
         .and(path_regex(r"^/trees/by-leaf/[0-9a-fA-F]{64}$"))
         .and(query_param("method", "evm"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({"error": "no witness yet"})),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "no witness yet"})))
         .mount(server)
         .await;
 }
@@ -256,9 +254,8 @@ pub async fn mount_by_leaf_ok(server: &MockServer, tree_json: Value) {
 
 /// Signing closure used by the test builder. Returns a fixed hex string;
 /// the test server's `/auth/session` stub ignores the value anyway.
-pub fn make_test_signer() -> impl Fn(&str) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
-       + Send
-       + Sync
-       + 'static {
+pub fn make_test_signer(
+) -> impl Fn(&str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static
+{
     |_msg: &str| Ok("0xdeadbeef".to_string())
 }
