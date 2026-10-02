@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aqua_auth::client::authenticate;
+use aqua_auth::{FnSigner, SignError};
 use tokio::sync::{Mutex, Notify};
 use tracing::debug;
 
@@ -98,12 +99,18 @@ impl AuthState {
 
     async fn run_refresh(&self, http: &reqwest::Client) -> Result<String, ClientError> {
         debug!(did = %self.my_did, "refreshing aqua-timestamp session token");
-        let signer = self.signer.clone();
-        let session = authenticate(http, &self.base_url, &self.my_did, move |msg| {
-            (signer)(msg)
-        })
-        .await
-        .map_err(|e| ClientError::Auth(e.to_string()))?;
+        // The public `signer` closure returns a hex signature string; aqua-auth
+        // 0.7 wants raw bytes (it hex-encodes them for the wire itself) and
+        // reads the DID from the signer.
+        let sign = self.signer.clone();
+        let signer = FnSigner::new(self.my_did.clone(), move |msg: &str| {
+            let hex_sig = (sign)(msg).map_err(|e| SignError(e.to_string()))?;
+            hex::decode(hex_sig.trim_start_matches("0x"))
+                .map_err(|e| SignError(format!("signer returned non-hex signature: {e}")))
+        });
+        let session = authenticate(http, &self.base_url, &signer)
+            .await
+            .map_err(|e| ClientError::Auth(e.to_string()))?;
 
         let mut guard = self.cached.lock().await;
         *guard = Some(Cached {

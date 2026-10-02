@@ -1,6 +1,6 @@
 # aqua-timestamp-client
 
-Async Rust client for the [Aqua Timestamp Aggregator](https://timestamp.inblock.io).
+Async Rust client for the [Aqua Timestamp Aggregator](https://openwitness.org).
 
 Submit 32-byte hashes for batched timestamping; receive server-signed witness pairs (timestamp object + EIP-191 signature) once the epoch is sealed. The witness pair splices directly into your existing aqua-tree using `aqua-rs-sdk` primitives.
 
@@ -26,7 +26,7 @@ use aqua_timestamp_client::{AnchorMethod, OnRotation, TimestampClient};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = TimestampClient::builder()
-        .base_url("https://timestamp.inblock.io")
+        .base_url("https://openwitness.org")
         .my_did("did:pkh:eip155:1:0x...")
         .signer(|message: &str| {
             // Sign `message` with your CAIP-122 key, return hex.

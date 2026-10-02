@@ -31,29 +31,23 @@ mod tests {
 
     #[test]
     fn parses_plain_hex() {
-        let h = parse_hash32(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
+        let h = parse_hash32("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
         assert_eq!(h[0], 0x01);
         assert_eq!(h[31], 0xef);
     }
 
     #[test]
     fn parses_prefixed_hex() {
-        let h = parse_hash32(
-            "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
+        let h = parse_hash32("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
         assert_eq!(h[0], 0x01);
     }
 
     #[test]
     fn parses_uppercase() {
-        let h = parse_hash32(
-            "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
-        )
-        .unwrap();
+        let h = parse_hash32("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")
+            .unwrap();
         assert_eq!(h[0], 0xab);
     }
 

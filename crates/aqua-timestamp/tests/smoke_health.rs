@@ -83,6 +83,33 @@ async fn smoke_health_and_landing() {
     assert_eq!(body["status"], "ok");
     assert!(body["uptime_secs"].is_number());
 
+    // /version names the running source revision (aqua-ops derives the deployed
+    // pins from it). A git checkout or a GIT_SHA build arg yields a full commit.
+    let version = reqwest::get(format!("http://127.0.0.1:{port}/version"))
+        .await
+        .unwrap();
+    assert_eq!(version.status(), 200);
+    assert_eq!(
+        version
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    let v: serde_json::Value = version.json().await.unwrap();
+    assert_eq!(v["service"], "aqua-timestamp");
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert!(v["protocol_version"]
+        .as_str()
+        .is_some_and(|p| p.starts_with("4.")));
+    assert!(v["dirty"].is_boolean());
+    let revision = v["revision"].as_str().expect("revision is a string");
+    assert!(
+        revision == "unknown"
+            || (revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit())),
+        "revision must be a full commit or unknown, got {revision}"
+    );
+
     let landing = reqwest::get(&landing_url).await.unwrap();
     assert_eq!(landing.status(), 200);
     let ct = landing

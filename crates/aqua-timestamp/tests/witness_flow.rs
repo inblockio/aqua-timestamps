@@ -243,9 +243,12 @@ async fn round_trip_submit_seal_fetch_witness_verify_proof() {
     let file_index = body["file_index"].as_object().unwrap();
     assert_eq!(revisions.len(), 2);
     assert_eq!(file_index.len(), 2);
-    // All keys should be 66-char hex strings (`0x` + 64).
+    // All keys are SDK `RevisionLink` strings: `0x` + multihash (`1620` + 64 hex).
     for k in revisions.keys() {
-        assert!(k.starts_with("0x") && k.len() == 66, "bad hash key: {k}");
+        assert!(
+            k.starts_with("0x1620") && k.len() == 70,
+            "bad revision link key: {k}"
+        );
         assert!(file_index.contains_key(k), "file_index missing {k}");
     }
 
@@ -285,9 +288,10 @@ async fn round_trip_submit_seal_fetch_witness_verify_proof() {
                 );
 
                 let prev = rev_value["previous_revision"].as_str().unwrap();
+                // `previous_revision` is the leaf as an SDK RevisionLink: `0x1620` + digest.
                 assert_eq!(
-                    parse_hex32(prev),
-                    target_leaf_bytes,
+                    prev,
+                    format!("0x1620{}", hex::encode(target_leaf_bytes)),
                     "TimestampObject.previous_revision must be the client leaf"
                 );
             }

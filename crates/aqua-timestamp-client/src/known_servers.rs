@@ -125,7 +125,10 @@ fn default_path() -> io::Result<PathBuf> {
         return Ok(PathBuf::from(xdg).join("aqua").join("known_servers"));
     }
     if let Ok(home) = std::env::var("HOME") {
-        return Ok(PathBuf::from(home).join(".config").join("aqua").join("known_servers"));
+        return Ok(PathBuf::from(home)
+            .join(".config")
+            .join("aqua")
+            .join("known_servers"));
     }
     Err(io::Error::new(
         io::ErrorKind::NotFound,

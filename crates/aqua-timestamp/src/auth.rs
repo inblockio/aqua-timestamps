@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use aqua_auth::{verify_caip122, ChallengeStore, SessionStore};
+use aqua_auth::{verify_caip122, AuthError, ChallengeStore, SessionStore};
 use axum::{
     extract::{FromRef, Query, State},
     http::{header, request::Parts, StatusCode},
@@ -73,6 +73,18 @@ impl AuthApiError {
             msg: msg.into(),
         }
     }
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            msg: msg.into(),
+        }
+    }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            msg: msg.into(),
+        }
+    }
 }
 
 impl IntoResponse for AuthApiError {
@@ -132,7 +144,18 @@ pub async fn session(
         return Err(AuthApiError::unauthorized("signature verification failed"));
     }
 
-    let session = state.sessions.create(&req.did);
+    // aqua-auth 0.7 bounds the session store: at capacity it rejects instead
+    // of evicting an active session, so creating one can fail.
+    let session = state.sessions.create(&req.did).map_err(|e| match e {
+        AuthError::SessionStoreFull { .. } => {
+            warn!(did = %req.did, error = %e, "auth.session store full");
+            AuthApiError::unavailable("session store at capacity, retry later")
+        }
+        other => {
+            warn!(did = %req.did, error = %other, "auth.session create failed");
+            AuthApiError::internal("could not create session")
+        }
+    })?;
     info!(
         did = %req.did,
         token_prefix = %&session.token[..8],

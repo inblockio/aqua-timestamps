@@ -29,7 +29,9 @@ pub enum ClientError {
     #[error("witness for leaf {leaf} via {method:?} not yet available")]
     NotYetSealed { leaf: String, method: AnchorMethod },
 
-    #[error("witness for leaf {leaf} via {method:?} not found (epoch sealed but no witness present)")]
+    #[error(
+        "witness for leaf {leaf} via {method:?} not found (epoch sealed but no witness present)"
+    )]
     WitnessMissing { leaf: String, method: AnchorMethod },
 
     #[error("timeout waiting for witness after {elapsed:?}")]

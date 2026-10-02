@@ -1,0 +1,13 @@
+target
+**/target
+.git
+.github
+**/node_modules
+**/*.log
+**/.env
+**/.env.*
+**/.DS_Store
+
+# The vendored SDK source is checksummed by cargo, so every file in it must reach
+# the build (it contains src/tests/.env.sample, which the .env patterns above hit).
+!vendor/**

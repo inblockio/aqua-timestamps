@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use aqua_rs_sdk::{
-    primitives::{merkle::inclusion_proof, HashType, Method, RevisionLink},
+    primitives::{merkle::inclusion_proof, multihash_decode, HashType, Method, RevisionLink},
     schema::{
         template::BuiltInTemplate,
         templates::{EvmTimestampPayload, TsaTimestampPayload},
@@ -383,17 +383,16 @@ async fn mint_single_witness(
         leaf_link.clone(),
         template_link,
         Method::Scalar,
-        HashType::Sha3_256,
         payload_value,
     );
     let object_link = object
-        .calculate_link()
+        .calculate_link(HashType::Sha3_256)
         .map_err(|e| WitnessError::Object(format!("calculate_link: {e:?}")))?;
     // Method::Scalar means `populate_leaves` is a no-op, but call it
     // anyway so the object's serialised shape is identical to whatever
     // `create_object_util` would have emitted.
     object
-        .populate_leaves()
+        .populate_leaves(HashType::Sha3_256)
         .map_err(|e| WitnessError::Object(format!("populate_leaves: {e:?}")))?;
     let object_hash = revision_link_to_hash(&object_link)?;
 
@@ -402,7 +401,7 @@ async fn mint_single_witness(
         .await
         .map_err(|e| WitnessError::Sign(format!("{e:?}")))?;
     let signature_link = signature_revision
-        .calculate_link()
+        .calculate_link(HashType::Sha3_256)
         .map_err(|e| WitnessError::Sign(format!("calculate_link: {e:?}")))?;
     let signature_hash = revision_link_to_hash(&signature_link)?;
 
@@ -435,14 +434,26 @@ fn ensure_0x(addr: &str) -> String {
     }
 }
 
+/// Digest of a SHA3-256 `RevisionLink`. Since `aqua-rs-sdk` 5.0.0 a link is
+/// the full multihash (`0x16 0x20` + digest, PCA-0015 §3.5); storage keeps the
+/// bare digest, which loses nothing while every link here is SHA3-256.
 fn revision_link_to_hash(link: &RevisionLink) -> Result<Hash32, WitnessError> {
     let bytes = link.as_ref();
-    if bytes.len() != 32 {
+    let (hash_type, digest) =
+        multihash_decode(bytes).map_err(|_| WitnessError::BadHash(bytes.len()))?;
+    if hash_type != HashType::Sha3_256 {
         return Err(WitnessError::BadHash(bytes.len()));
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(bytes);
-    Ok(out)
+    digest
+        .try_into()
+        .map_err(|_| WitnessError::BadHash(bytes.len()))
+}
+
+/// Wire form of a stored revision digest: the SDK's `RevisionLink` string
+/// (`0x1620` + digest). This is what the revisions inside a tree reference in
+/// `previous_revision`, so tree keys and tip lists must use it too.
+pub fn revision_wire_hex(digest: &Hash32) -> String {
+    RevisionLink::from_bytes(*digest).to_string()
 }
 
 #[cfg(test)]
@@ -455,9 +466,7 @@ mod tests {
     const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
     async fn build_signer() -> Arc<Secp256k1Signer> {
-        let (_addr, _eip55, pk_hex) = aqua_evm_provider::get_wallet(TEST_MNEMONIC)
-            .await
-            .unwrap();
+        let (_addr, _eip55, pk_hex) = aqua_evm_provider::get_wallet(TEST_MNEMONIC).await.unwrap();
         let pk = hex::decode(pk_hex.trim_start_matches("0x")).unwrap();
         Arc::new(Secp256k1Signer::new(pk))
     }
@@ -557,15 +566,14 @@ mod tests {
             let prev = obj
                 .previous_revision()
                 .expect("witness object must have a previous_revision");
-            let prev_bytes = prev.as_ref();
-            assert_eq!(prev_bytes, leaf);
+            assert_eq!(revision_link_to_hash(prev).unwrap(), leaf);
         } else {
             panic!("expected Typed object revision");
         }
         // The signature's previous_revision must be the object hash.
         if let AnyRevision::Signature(sig) = &w.signature_revision {
             let prev = sig.previous_revision();
-            assert_eq!(prev.as_ref(), w.object_hash);
+            assert_eq!(revision_link_to_hash(prev).unwrap(), w.object_hash);
         } else {
             panic!("expected Signature revision");
         }

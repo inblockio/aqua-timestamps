@@ -19,7 +19,7 @@
 set -euo pipefail
 umask 077
 
-base_url="${BASE_URL:-https://timestamp.inblock.io}"
+base_url="${BASE_URL:-https://openwitness.org}"
 
 # Resolve the repo root so the script works no matter where it is invoked
 # from (CI, a different worktree, etc).

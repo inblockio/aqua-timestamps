@@ -4,7 +4,7 @@ version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
 repository  = { workspace = true }
-description = "Async client for the Aqua Timestamp Aggregator (timestamp.inblock.io). Submit hashes, await epoch sealing, retrieve verified witness pairs."
+description = "Async client for the Aqua Timestamp Aggregator (openwitness.org). Submit hashes, await epoch sealing, retrieve verified witness pairs."
 
 [lib]
 name = "aqua_timestamp_client"
@@ -32,7 +32,7 @@ alloy = { version = "2", default-features = false, features = ["signers", "signe
 [features]
 default = []
 known-servers-file = []
-# Opt-in: tests and examples that hit the real `timestamp.inblock.io`
+# Opt-in: tests and examples that hit the real `openwitness.org`
 # deployment. Requires network egress; pulls `alloy` for ephemeral EIP-191
 # key generation. Off by default so CI stays offline.
 live-tests = ["dep:alloy"]

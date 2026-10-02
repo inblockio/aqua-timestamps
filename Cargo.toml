@@ -15,12 +15,16 @@ repository = "https://github.com/inblockio/aqua-timestamps"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Sister-repo path deps. These prove workspace resolution at M0 and
-# carry their real load from M1 onward.
-aqua-rs-sdk      = { path = "../aqua-rs-sdk", default-features = false, features = ["native", "blockchain"] }
-aqua-auth        = { path = "../aqua-auth", default-features = false, features = ["http"] }
-aqua-tsa         = { path = "../aqua-qualified-verification/aqua-tsa" }
-aqua-evm-provider = { path = "../aqua-evm-provider" }
+# Train dependencies (aqua-ops train/train.toml, rules in
+# development-conventions/CONVENTIONS-dependency-pins.md): pinned by annotated
+# release tag, canonical https URL, one git source per repo. The tag is an alias;
+# compliance is judged on the commit Cargo.lock resolves. Move these only with
+# the train. aqua-evm-provider and aqua-tsa-provider are crates of the
+# aqua-rs-sdk repo and share its pin.
+aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0", default-features = false, features = ["native"] }
+aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0" }
+aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0" }
+aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.7.0", default-features = false, features = ["http"] }
 
 # Async + HTTP
 tokio        = { version = "1", features = ["full"] }
