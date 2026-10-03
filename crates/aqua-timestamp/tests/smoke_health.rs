@@ -1,5 +1,7 @@
-//! In-process smoke test: spin up the binary against a free port, hit
-//! /health and /, assert 200 + expected payload shape.
+//! Smoke test: spin up the real binary against a free port, hit /health,
+//! /version, /v1/schedule and /, assert 200 + the expected payload shape.
+//! `/health` follows the inblockio service endpoint contract (aqua-ops
+//! `docs/service-endpoints/health-and-version.md`).
 
 use std::{
     process::{Command, Stdio},
@@ -79,9 +81,55 @@ async fn smoke_health_and_landing() {
         .await
         .expect("server never became reachable");
     assert_eq!(health.status(), 200);
-    let body: serde_json::Value = health.json().await.unwrap();
-    assert_eq!(body["status"], "ok");
-    assert!(body["uptime_secs"].is_number());
+    assert_eq!(
+        health
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/health+json")
+    );
+    assert_eq!(
+        health
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(health.text().await.unwrap(), r#"{"status":"pass"}"#);
+
+    // HEAD answers like GET without a body; any other method is a 405 that
+    // names GET and HEAD.
+    let client = reqwest::Client::new();
+    let head = client.head(&health_url).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(
+        head.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/health+json")
+    );
+    assert!(head.bytes().await.unwrap().is_empty());
+    let post = client.post(&health_url).send().await.unwrap();
+    assert_eq!(post.status(), 405);
+    let allow = post
+        .headers()
+        .get("allow")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    assert!(
+        allow.contains("GET") && allow.contains("HEAD"),
+        "Allow was {allow}"
+    );
+
+    // Uptime is not part of /health; the landing page reads it from /v1/schedule.
+    let schedule: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/v1/schedule"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(schedule["uptime_secs"].is_u64());
 
     // /version names the running source revision (aqua-ops derives the deployed
     // pins from it). A git checkout or a GIT_SHA build arg yields a full commit.

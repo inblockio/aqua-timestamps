@@ -74,13 +74,14 @@ The aggregator publishes a signed service_claim tree at `/.well-known/aqua-ident
 | Endpoint | Auth | Purpose |
 |----------|------|---------|
 | `POST /v1/leaves` | Bearer | Submit revision hashes for timestamping |
-| `GET /v1/schedule` | Public | Query current epoch timing and anchor methods |
+| `GET /v1/schedule` | Public | Query current epoch timing, anchor methods, totals and process uptime |
 | `GET /trees/{tip}` | Bearer | Fetch witness revisions by tip hash |
 | `GET /trees/by-leaf/{hash}?method=evm\|qtsa` | Bearer | Fetch witness revisions by submitted leaf |
 | `GET /trees?epoch={id}&method=evm\|qtsa` | Bearer | List all witnesses for an epoch |
 | `GET /v1/epochs?from={id}&limit=N` | Bearer | Epoch history |
 | `GET /.well-known/aqua-identity` | Public | Aggregator service claim |
-| `GET /health` | Public | Health check |
+| `GET /health` | Public | Liveness: `{"status":"pass"}` (`application/health+json`), no uptime |
+| `GET /version` | Public | Build identity: full-commit `revision`, `dirty`, `service`, `version` |
 | `GET /auth/challenge?did=...` | Public | CAIP-122 challenge |
 | `POST /auth/session` | Public | CAIP-122 session creation |
 

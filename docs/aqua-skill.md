@@ -276,8 +276,9 @@ gnome-keyring, runs the SIWE -> submit -> wait-for-seal -> witness
 | `GET /.well-known/aqua-skill.md` | public | this skill (markdown, machine-readable) |
 | `GET /.well-known/aqua-skill-auth.md` | public | SIWE / CAIP-122 auth deep-dive |
 | `GET /docs` | public | the same content as a human-friendly HTML page |
-| `GET /health` | public | liveness + uptime |
-| `GET /v1/schedule` | public | current / last-sealed epoch state |
+| `GET /health` | public | liveness only: `{"status":"pass"}` as `application/health+json`, no uptime |
+| `GET /version` | public | build identity: `revision` (full commit), `dirty`, `service`, `version`, `protocol_version` |
+| `GET /v1/schedule` | public | current / last-sealed epoch state, totals and process `uptime_secs` |
 | `GET /auth/challenge?did=...` | public | CAIP-122 challenge |
 | `POST /auth/session` | public | exchange signed challenge for bearer |
 | `POST /v1/leaves` | bearer | submit hashes for the current epoch |

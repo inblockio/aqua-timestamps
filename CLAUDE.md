@@ -104,6 +104,16 @@ checkout), in one PR, and check `cargo tree -d` shows no `aqua-*` crate.
 commit's `Cargo.lock`. A dependency bump is not done until it is deployed and `/version`
 names the merged commit (`deploy.sh` checks this).
 
+`GET /health` (public) follows the inblockio service endpoint contract (aqua-ops
+`docs/service-endpoints/health-and-version.md`, probed hourly by aqua-ops
+`probes/service-endpoints`): `200`, `Content-Type: application/health+json`,
+`Cache-Control: no-store`, body exactly `{"status":"pass"}` and nothing else (no uptime,
+no version); GET and HEAD, any other method is `405` with `Allow: GET,HEAD`; no I/O. The
+service has no in-process state a restart fixes, so it never answers `503`. Uptime is
+`uptime_secs` in the public `GET /v1/schedule`: the landing page reads its uptime stat from
+there on load and from the SSE `health:tick` event afterwards. The Docker `HEALTHCHECK`
+only needs the `200`.
+
 SDK 5.0.0 changed the wire: a `RevisionLink` is the full multihash (`0x1620` + digest) and
 revisions no longer carry `hash_type`. Storage keeps the 32-byte digest; `/trees` keys and
 tip lists emit the SDK form (what aqua-node parses with `RevisionLink::from_str`), and
@@ -112,7 +122,8 @@ leaf and tip inputs accept both the bare digest and the multihash. The productio
 the 5.0.0 deploy, 2026-10-02: Tim decided complete data loss was acceptable, so there is
 no legacy-witness handling and epochs restarted at 1. aqua-auth 0.7 clients refuse a
 challenge whose `URI:` origin differs from the origin they dialed, so clients must use
-`https://openwitness.org` (the old `timestamp.inblock.io` name no longer resolves).
+`https://openwitness.org`. The old name without the s, `timestamp.inblock.io`, is NXDOMAIN
+and nothing needs it; `timestamps.inblock.io` (with the s) resolves again and only redirects.
 
 ## Deployment target
 
@@ -120,13 +131,13 @@ challenge whose `URI:` origin differs from the origin they dialed, so clients mu
 |---|---|
 | Server | `142.93.168.4` (DigitalOcean) |
 | Primary domain | `openwitness.org` |
-| DNS names pointing here | `openwitness.org`, `timestamps.inblock.io` (301 redirect to openwitness.org), `agentic.inblock.io` |
+| DNS names pointing here | `openwitness.org`, `timestamps.inblock.io` (`A 142.93.168.4`, TTL 300, set at checkdomain 2026-10-03; answers `301` to `https://openwitness.org/<path>?<query>` with a valid cert), `agentic.inblock.io`. `timestamp.inblock.io` (no s) is NXDOMAIN. |
 | OS / Docker | Ubuntu 24.04, Docker 29.3, Compose v5.1 |
 | Reverse proxy | **Caddy 2** (`portal-caddy-1`), auto-TLS, owns `:80` and `:443` |
 | Caddyfile location | `/home/portal/portal/Caddyfile` (bind-mounted) |
 | Backend network | `portal-net` (Docker bridge) |
 | Reload command | `docker exec portal-caddy-1 caddy reload --config /etc/caddy/Caddyfile` |
-| Deploy SSH | `ssh agentic.inblock.io` (alias in `~/.ssh/config`: user `deploy`, port 8022; `timestamps.inblock.io` did not resolve from the dev host on 2026-10-02) |
+| Deploy SSH | `ssh agentic.inblock.io` (alias in `~/.ssh/config`: user `deploy`, port 8022; `deploy.sh` uses this alias, not `timestamps.inblock.io`, which resolves since 2026-10-03 but is only the redirect name; some resolver caches lagged up to an hour after the change) |
 | Deploy compose | `/home/deploy/timestamps/deploy/docker-compose.yml` |
 | Deploy config | `/home/deploy/timestamps/deploy/config.toml` |
 

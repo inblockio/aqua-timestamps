@@ -36,19 +36,28 @@ const ANCHOR_METHODS: &[&str] = &["evm", "qtsa"];
 const EPOCHS_MAX_LIMIT: usize = 200;
 const EPOCHS_DEFAULT_LIMIT: usize = 50;
 
-#[derive(Serialize)]
-pub struct HealthResponse {
-    pub status: &'static str,
-    pub uptime_secs: u64,
-    pub version: &'static str,
-}
+/// The only body `GET /health` ever serves (inblockio service endpoint
+/// contract, aqua-ops `docs/service-endpoints/health-and-version.md`).
+const HEALTH_PASS_BODY: &str = r#"{"status":"pass"}"#;
 
-pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        uptime_secs: state.started_at.elapsed().as_secs(),
-        version: env!("CARGO_PKG_VERSION"),
-    })
+/// `GET` and `HEAD /health`: liveness, nothing more. This process runs and
+/// its HTTP server answers.
+///
+/// Contract: `200` with `application/health+json`, `Cache-Control: no-store`
+/// and the constant body `{"status":"pass"}`. No state, no I/O, no uptime or
+/// version (those have homes: `/v1/schedule` for uptime, `/version` for the
+/// build). The contract allows `503 {"status":"fail"}` only for an in-process
+/// state that a restart fixes; this service has none, so it always answers
+/// pass. axum's `get()` also serves HEAD (same headers, body stripped) and
+/// answers every other method with `405` and `Allow: GET,HEAD`.
+pub async fn health() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/health+json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        HEALTH_PASS_BODY,
+    )
 }
 
 /// `GET /version` response. Public and unauthenticated: it names the running
@@ -232,6 +241,11 @@ pub struct ScheduleResponse {
     pub anchor_methods: Vec<&'static str>,
     pub epochs_total: u64,
     pub leaves_total: u64,
+    /// Seconds since this process started. Public and unauthenticated like
+    /// the rest of the response; the landing page reads its "online since"
+    /// stat from here, because `/health` may not carry uptime (service
+    /// endpoint contract).
+    pub uptime_secs: u64,
 }
 
 pub async fn schedule(
@@ -268,6 +282,7 @@ pub async fn schedule(
         anchor_methods: ANCHOR_METHODS.to_vec(),
         epochs_total,
         leaves_total,
+        uptime_secs: state.started_at.elapsed().as_secs(),
     }))
 }
 
