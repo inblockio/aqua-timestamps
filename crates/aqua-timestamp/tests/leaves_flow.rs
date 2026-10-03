@@ -317,6 +317,8 @@ async fn schedule_reports_open_epoch_and_anchor_methods() {
     assert_eq!(body["epoch_duration_secs"].as_u64().unwrap(), 60);
     assert!(body["last_sealed_epoch_id"].is_null());
     assert!(body["last_sealed_at"].is_null());
+    // Process uptime lives here, not in /health (service endpoint contract).
+    assert!(body["uptime_secs"].is_u64());
     let methods: Vec<&str> = body["anchor_methods"]
         .as_array()
         .unwrap()

@@ -387,6 +387,13 @@ Response 200:
 
 ### 5.7 Health (Public)
 
+> Superseded 2026-10-03: the shipped `GET /health` follows the inblockio
+> service endpoint contract (`docs/service-endpoints/health-and-version.md`
+> in aqua-ops). It answers `200` as `application/health+json` with the body
+> exactly `{"status":"pass"}`, and nothing else. The extra fields below are
+> not served there; uptime and totals are in `GET /v1/schedule`
+> (`uptime_secs`, `epochs_total`, `leaves_total`).
+
 ```
 GET /health
 

@@ -143,8 +143,11 @@ network.
 - [ ] `cargo fmt --check` is clean.
 - [ ] `cargo test` passes (at minimum: one smoke test that starts the
       server in-process and hits `/health`).
-- [ ] Binary serves `GET /health` → `200 OK` with JSON body
-      `{"status":"ok","current_epoch":<int>,"uptime_secs":<int>,...}`.
+- [ ] Binary serves `GET /health` → `200 OK` as `application/health+json`
+      with the body exactly `{"status":"pass"}`. (Superseded 2026-10-03: this
+      line first asked for `{"status":"ok","uptime_secs":<int>,...}`. The
+      inblockio service endpoint contract fixes the body; uptime is served
+      by `GET /v1/schedule` as `uptime_secs`.)
 - [ ] Binary serves `GET /` → `200 OK` with a minimal HTML landing page
       that states what the service is, names the operator (`inblock.io`),
       and links to `/.well-known/aqua-identity` and `/health`. No JS, no

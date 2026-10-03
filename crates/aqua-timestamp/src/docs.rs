@@ -211,8 +211,9 @@ curl -sS -H 'authorization: Bearer &lt;token&gt;' \
     <tr><td><a href="/docs"><code>GET /docs</code></a></td><td>public</td><td>this guide (HTML)</td></tr>
     <tr><td><a href="/.well-known/aqua-skill.md"><code>GET /.well-known/aqua-skill.md</code></a></td><td>public</td><td>main agent skill (markdown, machine-readable)</td></tr>
     <tr><td><a href="/.well-known/aqua-skill-auth.md"><code>GET /.well-known/aqua-skill-auth.md</code></a></td><td>public</td><td>SIWE / CAIP-122 authentication deep-dive</td></tr>
-    <tr><td><a href="/health"><code>GET /health</code></a></td><td>public</td><td>liveness + uptime</td></tr>
-    <tr><td><a href="/v1/schedule"><code>GET /v1/schedule</code></a></td><td>public</td><td>current / last-sealed epoch state</td></tr>
+    <tr><td><a href="/health"><code>GET /health</code></a></td><td>public</td><td>liveness only: <code>{"status":"pass"}</code> as <code>application/health+json</code>, no uptime</td></tr>
+    <tr><td><a href="/version"><code>GET /version</code></a></td><td>public</td><td>build identity: <code>revision</code> (full commit), <code>dirty</code>, <code>service</code>, <code>version</code>, <code>protocol_version</code></td></tr>
+    <tr><td><a href="/v1/schedule"><code>GET /v1/schedule</code></a></td><td>public</td><td>current / last-sealed epoch state, totals and process <code>uptime_secs</code></td></tr>
     <tr><td><code>GET /auth/challenge?did=...</code></td><td>public</td><td>CAIP-122 challenge</td></tr>
     <tr><td><code>POST /auth/session</code></td><td>public</td><td>exchange signed challenge for bearer</td></tr>
     <tr><td><code>POST /v1/leaves</code></td><td>bearer</td><td>submit hashes for the current epoch</td></tr>

@@ -1628,9 +1628,10 @@ section + section {
 
   /* ── DOM updates ──────────────────────────────────────────────── */
 
-  function updateHealth(data) {
-    if (!data) return;
-    var upSecs = data.uptime_secs || 0;
+  // Uptime comes from /v1/schedule on page load and from the SSE health:tick
+  // event afterwards. /health is liveness only and carries no uptime.
+  function setUptime(upSecs) {
+    if (upSecs == null) return;
     $('stat-uptime').textContent = uptimePercent(upSecs);
 
     bootTime = Math.floor(Date.now() / 1000) - upSecs;
@@ -1639,6 +1640,7 @@ section + section {
 
   function updateSchedule(data) {
     if (!data) return;
+    setUptime(data.uptime_secs);
     var durSecs = data.epoch_duration_secs;
     if (durSecs) {
       $('evm-epoch-cycle').textContent = durSecs + 's';
@@ -1762,13 +1764,10 @@ section + section {
   /* ── Fetch initial data ───────────────────────────────────────── */
 
   document.addEventListener('DOMContentLoaded', function () {
-    Promise.all([
-      fetch('/health').then(function (r) { return r.json(); }).catch(function () { return null; }),
-      fetch('/v1/schedule').then(function (r) { return r.json(); }).catch(function () { return null; })
-    ]).then(function (results) {
-      updateHealth(results[0]);
-      updateSchedule(results[1]);
-    });
+    fetch('/v1/schedule')
+      .then(function (r) { return r.json(); })
+      .catch(function () { return null; })
+      .then(updateSchedule);
 
     fetchLeaderboard('eth');
     fetchPoolStatus();
@@ -1809,11 +1808,7 @@ section + section {
       source.addEventListener('health:tick', function (e) {
         try {
           var d = JSON.parse(e.data);
-          if (d.uptime_secs != null) {
-            $('stat-uptime').textContent = uptimePercent(d.uptime_secs);
-            bootTime = Math.floor(Date.now() / 1000) - d.uptime_secs;
-            $('stat-online-since').textContent = formatDate(bootTime);
-          }
+          setUptime(d.uptime_secs);
           if (d.epochs_total != null) {
             $('stat-epochs').textContent = String(d.epochs_total);
           }
