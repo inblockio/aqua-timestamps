@@ -567,6 +567,6 @@ leaderboard. No SIWE auth required for passive fuel contributors.
 5. `GET /v1/leaderboard?chain=eth` + `GET /v1/pool/status` handlers (small)
 6. Frontend JS is already wired and renders from these endpoints.
 
-**Spec:** `docs/handover/session-2026-05-20-capacity-wallet-pool.md`
+**Spec:** [session-2026-05-20-capacity-wallet-pool.md (archived)](https://github.com/inblockio/aqua-timestamps/blob/cbffca440310effa79bf30cb98bbcbcc7cd1b278/docs/handover/session-2026-05-20-capacity-wallet-pool.md)
 (Priority 3). Wallet pool design (MAX_POOL=500, 3-tier eviction) is
 deferred beyond v0.1.
