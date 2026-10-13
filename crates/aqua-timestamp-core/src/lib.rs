@@ -26,7 +26,7 @@ pub mod version {
 
 /// Smoke check that all path-dep crates are wired correctly. Compile-only;
 /// the body never runs.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 fn _link_check() {
     let _ = aqua_rs_sdk::primitives::merkle::merkle_root;
     let _ = aqua_auth::verify_caip122;
