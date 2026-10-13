@@ -21,10 +21,10 @@ rust-version = "1.85"
 # compliance is judged on the commit Cargo.lock resolves. Move these only with
 # the train. aqua-evm-provider and aqua-tsa-provider are crates of the
 # aqua-rs-sdk repo and share its pin.
-aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0", default-features = false, features = ["native"] }
-aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0" }
-aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v5.0.0" }
-aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.7.0", default-features = false, features = ["http"] }
+aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0", default-features = false, features = ["native"] }
+aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0" }
+aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0" }
+aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.9.0", default-features = false, features = ["http"] }
 
 # Async + HTTP
 tokio        = { version = "1", features = ["full"] }

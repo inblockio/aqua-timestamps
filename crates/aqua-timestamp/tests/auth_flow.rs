@@ -245,6 +245,7 @@ async fn bad_bearer_is_rejected() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // the route still uses the boolean `verify_caip122`
 async fn caip122_round_trip_via_aqua_auth() {
     // Exercises the same path the auth route does, but without HTTP:
     // create challenge → sign → verify via aqua_auth::verify_caip122.

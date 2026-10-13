@@ -6,6 +6,11 @@
 
 use std::sync::Arc;
 
+// `verify_caip122` is deprecated since aqua-auth 0.8 in favour of
+// `authenticate`, which turns a bad signature into an `Err`. This handler maps
+// `Err` to 400 and `Ok(false)` to 401, so it keeps the boolean form to keep
+// those status codes; the deprecation note allows exactly this.
+#[allow(deprecated)]
 use aqua_auth::{verify_caip122, AuthError, ChallengeStore, SessionStore};
 use axum::{
     extract::{FromRef, Query, State},
@@ -137,6 +142,7 @@ pub async fn session(
 
     let sig_bytes = hex::decode(req.signature.trim_start_matches("0x"))
         .map_err(|e| AuthApiError::bad_request(format!("signature hex: {e}")))?;
+    #[allow(deprecated)]
     let ok = verify_caip122(&req.did, &challenge.message, &sig_bytes)
         .map_err(|e| AuthApiError::bad_request(format!("signature: {e}")))?;
     if !ok {
