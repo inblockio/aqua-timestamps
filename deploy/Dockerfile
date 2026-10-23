@@ -9,7 +9,7 @@
 # the HEALTHCHECK below is dropped.
 
 # -------------------- BUILDER --------------------
-FROM docker.io/library/rust:1.95-bookworm AS builder
+FROM docker.io/library/rust:1.98-bookworm AS builder
 
 ENV CARGO_TERM_COLOR=always \
     RUSTFLAGS="-C target-cpu=x86-64-v2" \
