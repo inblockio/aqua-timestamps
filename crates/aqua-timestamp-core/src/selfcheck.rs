@@ -65,15 +65,15 @@ impl Default for SelfCheckHosts {
 pub enum SelfCheckVerdict {
     /// Every covered check passed: the witness may be served.
     Verified,
-    /// No verdict yet (EVM not included, not final, host unavailable, not
-    /// found). Not an error: the method stays pending, the stored anchor is
+    /// No verdict yet (EVM known but not included, not final, host
+    /// unavailable). Not an error: the method stays pending, the stored anchor is
     /// kept and re-checked next tick without re-anchoring.
     NotYet(String),
-    /// Like [`Self::NotYet`], but the EVM anchor's transaction is not on the
-    /// chain (not found, or known but not in a block). Kept like `NotYet`
-    /// until the anchor is older than the not-found timeout; then it is
-    /// treated as dropped or reorged out, discarded and re-anchored (OW1.6
-    /// H2).
+    /// Like [`Self::NotYet`], but the node does not know the EVM anchor's
+    /// transaction (not found). Kept like `NotYet` until the anchor is older
+    /// than the not-found timeout; then it is treated as dropped or reorged
+    /// out, discarded and re-anchored (OW1.6 H2). A transaction known but
+    /// not in a block is `NotYet`, never times out (it holds its nonce).
     Missing(String),
     /// A check failed. `anchor_at_fault` is true only when the anchor itself
     /// does not hold (the token does not verify, the transaction does not

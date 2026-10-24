@@ -56,9 +56,11 @@ pub struct WitnessContext {
     /// verified with the SDK before it is written for serving. Each enabled
     /// method needs its host ([`Self::validate`]).
     pub self_check: SelfCheckHosts,
-    /// Seconds an EVM anchor may stay not found (or not included) before it
-    /// counts as dropped or reorged out: discarded, the next attempt
-    /// re-anchors (OW1.6 H2). Config `anchors.evm.not_found_timeout_secs`.
+    /// Seconds an EVM anchor's transaction may stay unknown to the node
+    /// (not found) before it counts as dropped or reorged out: discarded,
+    /// the next attempt re-anchors (OW1.6 H2). A transaction the node knows
+    /// but has not mined stays pending without a timeout (it holds its
+    /// nonce). Config `anchors.evm.not_found_timeout_secs`.
     pub evm_not_found_timeout_secs: u64,
     /// Anchors found at fault per (epoch, method) before the method is no
     /// longer re-anchored for that epoch (OW1.6 M4: a systematic fault, such
@@ -559,7 +561,7 @@ fn store_anchor(
     false
 }
 
-/// The anchor's transaction is not on the chain ([`SelfCheckVerdict::Missing`]):
+/// The node does not know the anchor's transaction ([`SelfCheckVerdict::Missing`]):
 /// kept while younger than [`WitnessContext::evm_not_found_timeout_secs`];
 /// past it the transaction counts as dropped or reorged out, the anchor is
 /// discarded and the record saved without it, so the next attempt

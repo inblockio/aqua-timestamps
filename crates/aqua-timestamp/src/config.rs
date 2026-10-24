@@ -271,11 +271,13 @@ pub struct EvmAnchorConfig {
     #[serde(default)]
     pub self_check_finality: aqua_rs_sdk::core::evm_anchor::EvmFinalityRequirement,
 
-    /// Seconds an anchor transaction may stay not found (or known but not
-    /// in a block) before it counts as dropped or reorged out (OW1.6 H2):
-    /// the stored anchor is discarded with a WARN naming the abandoned tx
-    /// hash, and the next attempt sends a new transaction. Default 3600
-    /// (one hour, well past finality on Sepolia and mainnet).
+    /// Seconds an anchor transaction may stay unknown to the node (not
+    /// found) before it counts as dropped or reorged out (OW1.6 H2): the
+    /// stored anchor is discarded with a WARN naming the abandoned tx hash,
+    /// and the next attempt sends a new transaction. A transaction the node
+    /// knows but has not mined stays pending without a timeout (it holds
+    /// its nonce). Default 3600 (one hour, well past finality on Sepolia
+    /// and mainnet).
     #[serde(default = "default_evm_not_found_timeout_secs")]
     pub not_found_timeout_secs: u64,
 }
