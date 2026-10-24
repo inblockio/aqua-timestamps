@@ -158,7 +158,6 @@ pub async fn build_app(
         info!(
             url = %qtsa_anchor_cfg.url,
             min_request_interval_secs = qtsa_anchor_cfg.min_request_interval_secs,
-            network_label = %qtsa_anchor_cfg.network_label,
             "qtsa anchor enabled (TsaTimestamper)"
         );
         let timestamper = match qtsa_anchor_cfg.throttle() {

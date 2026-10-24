@@ -250,12 +250,9 @@ pub struct QtsaAnchorConfig {
     /// throttle entirely (suitable for free standard TSAs like DigiCert).
     #[serde(default = "default_qtsa_min_request_interval_secs")]
     pub min_request_interval_secs: u64,
-
-    /// Free-form network label the witness payload's `network` field
-    /// carries. Sectigo-qualified deployments use
-    /// `"sectigo-qualified-tsa"`; a free standard TSA might pick `"tsa"`.
-    #[serde(default = "default_qtsa_network_label")]
-    pub network_label: String,
+    // No `network_label`: every qTSA payload carries the SDK TSA template's
+    // fixed label (`aqua_timestamp_core::witness::QTSA_NETWORK_LABEL`,
+    // audit G). A stale `network_label` key in an old config is ignored.
 }
 
 fn default_qtsa_enabled() -> bool {
@@ -267,9 +264,6 @@ fn default_qtsa_url() -> String {
 fn default_qtsa_min_request_interval_secs() -> u64 {
     16
 }
-fn default_qtsa_network_label() -> String {
-    "sectigo-qualified-tsa".to_string()
-}
 
 impl Default for QtsaAnchorConfig {
     fn default() -> Self {
@@ -277,7 +271,6 @@ impl Default for QtsaAnchorConfig {
             enabled: default_qtsa_enabled(),
             url: default_qtsa_url(),
             min_request_interval_secs: default_qtsa_min_request_interval_secs(),
-            network_label: default_qtsa_network_label(),
         }
     }
 }
