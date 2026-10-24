@@ -695,11 +695,19 @@ pub async fn get_tree_by_leaf(
             AuthApiError::bad_request("internal: tip_to_pair index missing for known tip")
         })?;
     if !is_self_checked(&state, &tip)? {
-        return Ok(not_verifiable_response(
-            Some(method),
-            idx.epoch_id,
-            Some(&leaf),
-        ));
+        // A resubmitted leaf (the 410 advice) keeps its legacy tip until a
+        // self-checked witness replaces it; while its newer epoch is pending,
+        // answer that (202), not 410 (OW1.6b F1).
+        let pending = state
+            .store
+            .get_pending_epoch_for_leaf(&leaf, method)
+            .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+        return Ok(match pending {
+            Some(epoch_id) if epoch_id > idx.epoch_id => {
+                pending_anchor_response(method, epoch_id, Some(&leaf))
+            }
+            _ => not_verifiable_response(Some(method), idx.epoch_id, Some(&leaf)),
+        });
     }
     let body = build_pair_body(&state.store, &idx)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;

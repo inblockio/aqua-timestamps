@@ -898,3 +898,60 @@ async fn legacy_witness_answers_not_verifiable() {
     }
     assert!(served, "a self-checked witness is served");
 }
+
+/// OW1.6b F1 (N6): a holder follows the 410 advice and resubmits the leaf of
+/// a legacy witness. While the new epoch's anchor is pending, by-leaf answers
+/// 202 pending for the new epoch, not 410 for the legacy tip (which still
+/// maps the leaf until a self-checked witness replaces it).
+#[tokio::test]
+async fn legacy_tip_with_pending_resubmit_answers_202() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_leaf = [0x5c; 32];
+    preload_legacy_witness(tmp.path(), old_leaf, CLIENT_A_DID).await;
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        AnchorOverrides {
+            evm: Some(Arc::new(FailingProvider {
+                message: "synthetic outage".into(),
+            })),
+            ..canned_anchors()
+        },
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let old_hex = format!("0x{}", hex::encode(old_leaf));
+    let by_leaf = format!("/trees/by-leaf/{old_hex}?method=evm");
+
+    let (status, body) = get_json(&router, &by_leaf, Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "nothing pending yet: {body}");
+
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&old_hex)).await;
+    tx.send(SealTick { now: 2000 }).await.unwrap();
+    let mut last = (StatusCode::GONE, serde_json::Value::Null);
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        last = get_json(&router, &by_leaf, Some(&token)).await;
+        if last.0 != StatusCode::GONE {
+            break;
+        }
+    }
+    let (status, body) = last;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "pending", "{body}");
+    assert_eq!(body["method"], "evm", "{body}");
+    assert!(body["epoch"].as_u64().unwrap() > 1, "the new epoch: {body}");
+    assert_eq!(body["leaf"], old_hex, "{body}");
+}
