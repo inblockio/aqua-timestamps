@@ -566,6 +566,13 @@ fn union_for_epoch(
         .store
         .list_witnesses_for_did_in_epoch(did, epoch_id, method)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    // OW1.6 H3: an epoch's witnesses are minted together, so one witness
+    // without the self-check marker makes the epoch a pre-OW1 one.
+    for idx in &entries {
+        if !is_self_checked(state, &idx.signature_hash)? {
+            return Ok(not_verifiable_response(Some(method), epoch_id, None));
+        }
+    }
 
     let mut revisions: Map<String, Value> = Map::new();
     let mut file_index: Map<String, Value> = Map::new();
@@ -615,6 +622,14 @@ pub async fn get_tree_by_tip(
             "trees.tip access denied"
         );
         return Err(AuthApiError::forbidden("witness owned by a different DID"));
+    }
+    if !is_self_checked(&state, &tip)? {
+        let method = AnchorMethod::from_method_byte(idx.method_byte);
+        return Ok(not_verifiable_response(
+            method,
+            idx.epoch_id,
+            Some(&idx.leaf),
+        ));
     }
     let body = build_pair_body(&state.store, &idx)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
@@ -679,6 +694,13 @@ pub async fn get_tree_by_leaf(
         .ok_or_else(|| {
             AuthApiError::bad_request("internal: tip_to_pair index missing for known tip")
         })?;
+    if !is_self_checked(&state, &tip)? {
+        return Ok(not_verifiable_response(
+            Some(method),
+            idx.epoch_id,
+            Some(&leaf),
+        ));
+    }
     let body = build_pair_body(&state.store, &idx)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     info!(
@@ -771,6 +793,44 @@ fn pending_anchor_response(
         body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
     }
     (StatusCode::ACCEPTED, Json(body)).into_response()
+}
+
+fn is_self_checked(state: &Arc<AppState>, tip: &[u8; 32]) -> Result<bool, AuthApiError> {
+    state
+        .store
+        .is_self_checked(tip)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))
+}
+
+/// OW1.6 H3: the witness was minted by the pre-OW1 code (stub anchor, raw
+/// unshielded tree or operator qTSA label) and never passed the pre-serve
+/// self-check, so it is not served: a default reader would reject it.
+/// `410 Gone` (RFC 9110 section 15.5.11: no longer available here, likely
+/// permanent) with
+/// `{"status":"not_verifiable","reason","method","epoch","leaf"?,"detail"}`,
+/// the pending body's shape. It is not re-minted; the client resubmits the
+/// leaf.
+fn not_verifiable_response(
+    method: Option<AnchorMethod>,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    let mut body = json!({
+        "status": "not_verifiable",
+        "reason": "minted before self-check; resubmit the leaf",
+        "epoch": epoch_id,
+        "detail": format!(
+            "the witness of epoch {epoch_id} was minted before the pre-serve self-check \
+             and is not served; submit the leaf again for a new witness"
+        ),
+    });
+    if let Some(method) = method {
+        body["method"] = Value::String(method.as_str().to_string());
+    }
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::GONE, Json(body)).into_response()
 }
 
 fn not_found_response(msg: &str) -> Response {

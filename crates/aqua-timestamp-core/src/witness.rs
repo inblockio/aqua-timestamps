@@ -79,6 +79,15 @@ impl AnchorMethod {
         }
     }
 
+    /// Inverse of [`Self::method_byte`]; `None` for an unknown byte.
+    pub fn from_method_byte(byte: u8) -> Option<Self> {
+        match byte {
+            METHOD_BYTE_EVM => Some(AnchorMethod::Evm),
+            METHOD_BYTE_QTSA => Some(AnchorMethod::Qtsa),
+            _ => None,
+        }
+    }
+
     pub fn parse(input: &str) -> Option<Self> {
         match input {
             "evm" => Some(AnchorMethod::Evm),

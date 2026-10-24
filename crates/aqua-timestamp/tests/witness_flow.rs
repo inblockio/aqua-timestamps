@@ -764,7 +764,7 @@ async fn evm_label_naming_another_chain_refuses_to_start() {
         .await
         .unwrap();
     let (_tx, rx) = mpsc::channel::<SealTick>(8);
-    build_app_with_anchors(
+    let _app = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
@@ -773,4 +773,128 @@ async fn evm_label_naming_another_chain_refuses_to_start() {
     )
     .await
     .expect("a label naming the same chain starts");
+}
+
+/// Write into the store at `path` a witness as the pre-OW1 code minted it
+/// (stub anchor, written straight to the serving partitions without the
+/// self-check) for `leaf` of `did`, in epoch 1.
+async fn preload_legacy_witness(path: &std::path::Path, leaf: [u8; 32], did: &str) {
+    use aqua_timestamp_core::{
+        accumulator::Accumulator,
+        epoch::EpochRecord,
+        storage::Store,
+        witness::{mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome},
+    };
+    let store = Store::open(path).expect("store");
+    let acc = Accumulator::new(1, 940, 60);
+    acc.append_batch(&[leaf], did);
+    let snapshot = acc.swap_and_open_next(1000, 1000, 60);
+    let leaves: Vec<[u8; 32]> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+    let batch = EpochBatch::prepare(&leaves).unwrap().expect("batch");
+    let mut stub = canned_evm_value();
+    stub.transaction_hash = format!("0x{}", "00".repeat(32));
+    let signer = Arc::new(aqua_rs_sdk::Secp256k1Signer::new(
+        hex::decode(CLIENT_B_PK).unwrap(),
+    ));
+    let minted = mint_witnesses_for_epoch(
+        &snapshot,
+        &batch,
+        &[(
+            AnchorMethod::Evm,
+            MethodAnchorOutcome::from_value(AnchorMethod::Evm, &stub),
+        )],
+        signer,
+    )
+    .await
+    .expect("legacy mint");
+    let record = EpochRecord {
+        id: 1,
+        opened_at: 940,
+        closed_at: 1000,
+        merkle_root: [0x11; 32],
+        leaf_count: 1,
+        hash_type: "FIPS_202-SHA3-256".into(),
+    };
+    store
+        .persist_sealed_epoch(&record, &snapshot.leaves, &minted)
+        .expect("legacy persist");
+}
+
+/// OW1.6 H3: only self-checked witnesses are served. A witness the pre-OW1
+/// code minted (no self-check marker) answers 410 Gone with
+/// `{"status":"not_verifiable", ...}` on the by-leaf, by-epoch and by-tip
+/// routes; a witness minted and self-checked by the new code is served.
+#[tokio::test]
+async fn legacy_witness_answers_not_verifiable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_leaf = [0x5a; 32];
+    preload_legacy_witness(tmp.path(), old_leaf, CLIENT_A_DID).await;
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let old_hex = format!("0x{}", hex::encode(old_leaf));
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{old_hex}?method=evm"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+    assert_eq!(
+        body["reason"], "minted before self-check; resubmit the leaf",
+        "{body}"
+    );
+    assert_eq!(body["method"], "evm", "{body}");
+    assert_eq!(body["epoch"], 1, "{body}");
+    assert_eq!(body["leaf"], old_hex, "{body}");
+    assert!(body.get("revisions").is_none(), "{body}");
+
+    let (status, body) = get_json(&router, "/trees?epoch=1&method=evm", Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+    assert!(body.get("revisions").is_none(), "{body}");
+
+    let (_, tips) = get_json(&router, "/trees", Some(&token)).await;
+    let old_tip = tips.as_array().unwrap()[0].as_str().unwrap().to_string();
+    let (status, body) = get_json(&router, &format!("/trees/{old_tip}"), Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+
+    // A leaf minted and self-checked by the new code is served.
+    let leaf = leaf_hex(0x6b);
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+    tx.send(SealTick { now: 2000 }).await.unwrap();
+    let mut served = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status, _) = get_json(
+            &router,
+            &format!("/trees/by-leaf/{leaf}?method=evm"),
+            Some(&token),
+        )
+        .await;
+        if status == StatusCode::OK {
+            served = true;
+            break;
+        }
+    }
+    assert!(served, "a self-checked witness is served");
 }

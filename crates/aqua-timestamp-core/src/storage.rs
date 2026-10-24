@@ -61,6 +61,10 @@ pub const PENDING_ANCHORS_PARTITION: &str = "pending_anchors";
 /// Pending lookup for the fetch routes: `leaf || method_byte` to the
 /// `epoch_id` (8 bytes BE) whose anchor for that method is outstanding.
 pub const PENDING_LEAVES_PARTITION: &str = "pending_leaves";
+/// OW1.6 H3: signature hashes (tips) of the witnesses that passed the
+/// pre-serve self-check, written with them. A tip without this marker was
+/// minted by the pre-OW1 code and is never served as a witness.
+pub const SELF_CHECKED_TIPS_PARTITION: &str = "self_checked_tips";
 
 /// Length of a composite `leaf_to_tips` key: 32 (leaf hash) + 1 (method byte).
 pub const LEAF_TO_TIPS_KEY_LEN: usize = 32 + 1;
@@ -121,6 +125,7 @@ pub struct Store {
     watcher_watermark: PartitionHandle,
     pending_anchors: PartitionHandle,
     pending_leaves: PartitionHandle,
+    self_checked_tips: PartitionHandle,
 }
 
 impl Store {
@@ -155,10 +160,15 @@ impl Store {
             .open_partition(PENDING_ANCHORS_PARTITION, PartitionCreateOptions::default())?;
         let pending_leaves =
             keyspace.open_partition(PENDING_LEAVES_PARTITION, PartitionCreateOptions::default())?;
+        let self_checked_tips = keyspace.open_partition(
+            SELF_CHECKED_TIPS_PARTITION,
+            PartitionCreateOptions::default(),
+        )?;
         Ok(Self {
             keyspace,
             pending_anchors,
             pending_leaves,
+            self_checked_tips,
             epochs,
             epoch_leaves,
             witness_revisions,
@@ -259,6 +269,10 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut batch = self.keyspace.batch();
         self.write_witnesses(&mut batch, witnesses)?;
+        // The only write path of self-checked witnesses (OW1.6 H3).
+        for w in witnesses {
+            batch.insert(&self.self_checked_tips, w.signature_hash.to_vec(), []);
+        }
         let epoch_key = remaining.epoch_id.to_be_bytes();
         for leaf in remaining
             .leaf_hashes()
@@ -470,6 +484,12 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// Whether the witness with this tip passed the pre-serve self-check
+    /// (OW1.6 H3). `false` for a witness the pre-OW1 code minted.
+    pub fn is_self_checked(&self, signature_hash: &[u8; 32]) -> Result<bool, StoreError> {
+        Ok(self.self_checked_tips.contains_key(signature_hash)?)
     }
 
     /// Look up the signature-revision hash (the witness "tip") for the
