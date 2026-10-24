@@ -1,10 +1,7 @@
-//! `cargo test --workspace -p aqua-timestamp-e2e` entry point.
-//!
-//! Asserts the same M-E2E flow that runs against the live deployment also
-//! runs to completion against an in-process server. This guarantees the
-//! verifier code (Merkle proof, EIP-191 recovery, isolation 403, no-bearer
-//! 401) keeps working independent of the live deployment, so the live
-//! script is solely a "the server is reachable + correct" check.
+//! `cargo test -p aqua-timestamp-e2e` entry point for the in-process dry run: the main path
+//! (standing-identity loader, submit, seal, BOTH witnesses, SDK verifier on the merged client
+//! tree, isolation 403, no-bearer 401) against an in-process aggregator on localhost whose
+//! anchors are the offline doubles.
 
 use std::process::Command;
 

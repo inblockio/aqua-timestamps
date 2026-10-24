@@ -1,40 +1,32 @@
 //! End-to-end client flow for the aqua-timestamp aggregator.
 //!
-//! This module owns the SIWE -> submit -> wait-for-seal -> witness ->
-//! signature + Merkle verification path described in
-//! `docs/success-criteria.md` Section M-E2E. It is parametrised by a base
-//! URL so the same logic drives both the `live` subcommand (against
-//! `https://openwitness.org`) and the `selfcheck` subcommand
-//! (against an in-process server bound to `http://127.0.0.1:<port>`).
+//! SIWE sign-in, submit the tip of a client tree, wait for the seal, fetch BOTH witnesses
+//! (EVM and qTSA) and have the SDK verifier judge the client tree with them merged in
+//! (see [`crate::witness`]). The flow takes the base URL as a parameter; the `live` subcommand
+//! passes a deployed one (required, never defaulted), `selfcheck` an in-process server bound to
+//! `http://127.0.0.1:<port>`.
 //!
-//! Two seams keep the flow testable without burning Sepolia time or epoch
-//! clock seconds:
+//! Two seams keep the flow testable without burning Sepolia time or epoch clock seconds:
 //!
-//! * [`SealTrigger`] lets a `selfcheck` caller drive the in-process sealer
-//!   between submission and polling. The `live` caller passes
-//!   [`SealTrigger::None`] and waits for the production interval timer.
-//! * [`PollBudget`] caps wall-clock waits so a stuck deployment fails fast.
+//! * [`SealTrigger`] lets a `selfcheck` caller drive the in-process sealer between submission
+//!   and polling. The `live` caller passes [`SealTrigger::None`] and waits for the interval timer.
+//! * [`FlowOptions`] carries the waits (seal, witnesses) and where the reader's hosts come from.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use aqua_rs_sdk::{
-    primitives::{
-        merkle::{
-            parse_batch_digest, parse_batch_proof, parse_batch_root, shielded_leaf,
-            verify_batch_inclusion,
-        },
-        HashType, RevisionLink,
-    },
-    schema::{tree::Tree, AnyRevision},
-    Secp256k1Signer,
-};
+use aqua_rs_sdk::Secp256k1Signer;
 use rand::RngCore;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
+
+use crate::witness::{
+    fetch_witness, new_client_tree, verify_with_sdk, MethodVerdict, ReaderHosts, WitnessMethod,
+};
 
 /// Steps print one line on success so a transcript looks like a checklist.
 /// The closure receives `(step_number, label)`.
@@ -88,8 +80,8 @@ impl PollBudget {
     }
 }
 
-/// Outcome a successful end-to-end run produces. The `live` subcommand
-/// prints these; the selfcheck test asserts on them.
+/// Outcome a successful end-to-end run produces. The `live` subcommand prints these; the
+/// selfcheck test asserts on them.
 #[derive(Debug)]
 pub struct E2eOutcome {
     pub base_url: String,
@@ -97,10 +89,8 @@ pub struct E2eOutcome {
     pub client_did: String,
     pub leaf_hex: String,
     pub epoch_id: u64,
-    pub merkle_root_hex: String,
-    pub object_hash_hex: String,
-    pub signature_hash_hex: String,
-    pub recovered_signer_address: String,
+    /// One SDK verdict per anchor method (EVM, then qTSA).
+    pub witnesses: Vec<MethodVerdict>,
 }
 
 /// Which DID method the test client is using. The three values match the
@@ -153,30 +143,25 @@ enum KeyMaterial {
 }
 
 impl ClientKey {
-    /// Derive a secp256k1 client from a BIP39 mnemonic. This is the path
-    /// the production live test takes (mnemonic from the gnome-keyring).
-    pub async fn from_mnemonic(mnemonic: &str) -> Result<Self> {
-        let (_addr, eip55, priv_hex) = aqua_evm_provider::get_wallet(mnemonic)
-            .await
-            .map_err(|e| anyhow!("get_wallet: {e}"))?;
-        let did = format!("did:pkh:eip155:1:{eip55}");
-        let mut pk = [0u8; 32];
-        let decoded = hex::decode(priv_hex.trim_start_matches("0x")).context("priv hex")?;
-        if decoded.len() != 32 {
-            bail!("private key from get_wallet is not 32 bytes");
-        }
-        pk.copy_from_slice(&decoded);
+    /// A secp256k1 client from a raw 32-byte private key (the standing identity's key file).
+    pub fn from_secp256k1_bytes(private_key: [u8; 32]) -> Result<Self> {
+        k256::ecdsa::SigningKey::from_slice(&private_key)
+            .map_err(|e| anyhow!("invalid secp256k1 key: {e}"))?;
+        let signer = Secp256k1Signer::new(private_key.to_vec());
+        let (did, addr) = signer
+            .derive_did_pkh()
+            .map_err(|e| anyhow!("derive_did_pkh: {e}"))?;
         Ok(Self {
             did,
-            display_identifier: eip55,
+            display_identifier: eip55(&addr),
             method: SignatureMethod::Secp256k1Eip191,
-            secret: KeyMaterial::Secp256k1 { private_key: pk },
+            secret: KeyMaterial::Secp256k1 { private_key },
         })
     }
 
-    /// Generate a fresh random client for the requested method. Used both
-    /// for the negative-test foreign DID and for the multi-method live run
-    /// covering `ed25519` and `p256` clients.
+    /// Generate a fresh random client for the requested method. In-process runs only (the
+    /// foreign-DID negative and the `selfcheck-all` ed25519 / p256 clients): a remote run uses
+    /// the standing identity and creates no random DID.
     pub fn random(method: SignatureMethod) -> Result<Self> {
         match method {
             SignatureMethod::Secp256k1Eip191 => {
@@ -330,33 +315,10 @@ async fn mint_bearer(client: &Client, base_url: &str, key: &ClientKey) -> Result
         .ok_or_else(|| anyhow!("session response missing `token`"))
 }
 
-fn parse_hex32(s: &str) -> Result<[u8; 32]> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).context("hex")?;
-    if bytes.len() != 32 {
-        bail!("expected 32-byte hex, got {} bytes", bytes.len());
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
-
 fn random_leaf() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     format!("0x{}", hex::encode(bytes))
-}
-
-/// Server address from `did:pkh:eip155:<chain>:<addr>`.
-fn address_from_did(did: &str) -> Result<String> {
-    let last = did
-        .rsplit(':')
-        .next()
-        .ok_or_else(|| anyhow!("did has no `:`"))?;
-    if !last.starts_with("0x") || last.len() != 42 {
-        bail!("did suffix is not a 0x-prefixed eth address: {last}");
-    }
-    Ok(last.to_string())
 }
 
 /// EIP-55 mixed-case checksum encoding of a 20-byte address.
@@ -376,111 +338,76 @@ fn eip55(addr: &[u8; 20]) -> String {
     out
 }
 
-/// Digest (`0x` + 64 hex) inside a SHA3-256 `RevisionLink` string. A witness
-/// object's `previous_revision` is the client's leaf as a link (`0x1620` +
-/// digest), while the client submitted the bare digest.
-fn link_digest_hex(link: &str) -> Result<String> {
-    let bytes = hex::decode(link.trim_start_matches("0x"))
-        .with_context(|| format!("link {link} is not hex"))?;
-    let (hash_type, digest) = aqua_rs_sdk::primitives::multihash_decode(&bytes)
-        .map_err(|e| anyhow!("link {link} is not a multihash: {e:?}"))?;
-    if hash_type != HashType::Sha3_256 {
-        bail!("link {link} is {hash_type:?}, expected sha3-256");
-    }
-    Ok(format!("0x{}", hex::encode(digest)))
+/// Where the reader's external facts (chain, TSA trust) come from.
+pub enum ReaderConfig {
+    /// Real hosts: the EVM chain over RPC (`evm_rpc_url`, else the SDK host's own default for
+    /// the witness' network) and the EU trust list for TSA tokens.
+    Live { evm_rpc_url: Option<String> },
+    /// Injected hosts: the in-process dry run, where the aggregator's own simulated chain and
+    /// TSA are also the reader's hosts. Never used against a remote.
+    Injected(ReaderHosts),
 }
 
-/// Hash algorithm a revision's addressing link commits to (PCA-0015 §3.5).
-/// The SDK no longer stores it on the revision: it is the multicodec byte of
-/// the declared multihash (`0x16` sha3-256, `0x1e` blake3).
-fn declared_hash_type(declared_hash: &str) -> Result<HashType> {
-    let bytes = hex::decode(declared_hash.trim_start_matches("0x"))
-        .with_context(|| format!("declared hash {declared_hash} is not hex"))?;
-    let code = *bytes
-        .first()
-        .ok_or_else(|| anyhow!("declared hash {declared_hash} is empty"))?;
-    HashType::from_multicodec(u64::from(code))
-        .map_err(|e| anyhow!("declared hash {declared_hash}: {e:?}"))
+impl ReaderConfig {
+    fn hosts(&self, evm_network: &str) -> Result<ReaderHosts> {
+        match self {
+            Self::Injected(h) => Ok(h.clone()),
+            Self::Live { evm_rpc_url } => {
+                let mut chain =
+                    aqua_evm_provider::EthBlockchainHost::new(tokio::runtime::Handle::current());
+                if let Some(url) = evm_rpc_url {
+                    let chain_id =
+                        aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(evm_network)
+                            .with_context(|| {
+                                format!(
+                                    "witness network {evm_network:?} is not one the SDK verifies"
+                                )
+                            })?;
+                    chain = chain.with_endpoint(chain_id, url.clone());
+                }
+                Ok(ReaderHosts {
+                    blockchain: Arc::new(chain),
+                    web: Arc::new(aqua_tsa_provider::TsaWebHost::new()),
+                    tsa_facts_expected: true,
+                })
+            }
+        }
+    }
 }
 
-/// `Linkable::calculate_link` is implemented per variant and not on
-/// `AnyRevision`, so dispatch on the enum. The algorithm comes from the
-/// declared link, never from the revision.
-fn recompute_link(
-    rev: &AnyRevision,
-    declared_hash: &str,
-) -> Result<aqua_rs_sdk::primitives::RevisionLink> {
-    use aqua_rs_sdk::verification::Linkable;
-    let ht = declared_hash_type(declared_hash)?;
-    match rev {
-        AnyRevision::Typed(obj) => obj.calculate_link(ht),
-        AnyRevision::Signature(sig) => sig.calculate_link(ht),
-        AnyRevision::Template(t) => t.calculate_link(ht),
-        AnyRevision::Anchor(a) => a.calculate_link(ht),
-    }
-    .map_err(|e| anyhow!("calculate_link({declared_hash}): {e:?}"))
+/// Knobs of one run.
+pub struct FlowOptions {
+    /// How long to wait for the epoch to seal (`/v1/schedule`).
+    pub seal_wait: PollBudget,
+    /// How long, after the seal, to wait for BOTH witnesses (EVM serves only at finality,
+    /// about 13 minutes on Sepolia).
+    pub witness_timeout: Duration,
+    pub witness_interval: Duration,
+    /// The foreign-DID 403 check needs a second identity: in-process runs only, never on a
+    /// remote (the main path creates no random DIDs).
+    pub foreign_did_negative: bool,
+    pub reader: ReaderConfig,
 }
 
-/// Verify a Signature revision the same way `aqua-rs-sdk` does internally:
-/// reconstruct the pre-signature canonical JSON, ecrecover, compare to
-/// `signature_public_identifier`. Returns the recovered EIP-55 address.
-fn verify_signature_revision(sig_value: &Value, declared_hash: &str) -> Result<String> {
-    let rev: AnyRevision =
-        serde_json::from_value(sig_value.clone()).context("AnyRevision deserialise")?;
-    let signature = match &rev {
-        AnyRevision::Signature(s) => s,
-        _ => bail!("not a Signature revision"),
-    };
-    let canonical = signature.pre_signature_canonical_json(declared_hash_type(declared_hash)?);
-    let canonical_str = std::str::from_utf8(&canonical).context("canonical utf8")?;
-
-    // Pull the raw 65-byte signature out of the JSON ourselves so we don't
-    // depend on which SignatureValue variant the SDK exposes.
-    let sig_hex = sig_value
-        .pointer("/signature/signature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Signature.signature.signature missing"))?;
-    let claimed_addr = sig_value
-        .pointer("/signature/signature_public_identifier")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Signature.signature.signature_public_identifier missing"))?;
-
-    let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x")).context("sig hex")?;
-    if sig_bytes.len() != 65 {
-        bail!("expected 65-byte signature, got {} bytes", sig_bytes.len());
-    }
-    let mut sig65 = [0u8; 65];
-    sig65.copy_from_slice(&sig_bytes);
-
-    let recovered = aqua_rs_sdk::core::signature::recover_wallet_address(canonical_str, &sig65)
-        .map_err(|e| anyhow!("recover_wallet_address: {e}"))?;
-    let recovered_eip55 = eip55(&recovered);
-    // The on-wire `signature_public_identifier` is also EIP-55.
-    if !recovered_eip55.eq_ignore_ascii_case(claimed_addr) {
-        bail!(
-            "recovered signer {recovered_eip55} != claimed signature_public_identifier {claimed_addr}"
-        );
-    }
-    Ok(recovered_eip55)
-}
-
-/// The full M-E2E flow. Takes a pre-constructed primary [`ClientKey`] so
-/// the same flow drives secp256k1, ed25519, and p256 DIDs uniformly.
+/// The full M-E2E flow. Takes a pre-constructed primary [`ClientKey`] so the same flow drives
+/// the standing secp256k1 identity (remote) and the ephemeral ed25519 / p256 ones (in-process).
+///
+/// Main path: sign in, submit the tip of a fresh one-file client tree, wait for the seal, fetch
+/// BOTH witnesses (EVM and qTSA; 202 is polled to `witness_timeout`, 404, a stub or a timeout is
+/// a failure), merge them into the client tree and run the SDK verifier on it.
 pub async fn run_full_flow(
     base_url: &str,
     primary: &ClientKey,
     seal: SealTrigger,
-    budget: PollBudget,
+    opts: &FlowOptions,
     log: StepLogger<'_>,
 ) -> Result<E2eOutcome> {
-    // Step 0: build an HTTP client with sane connect / total timeouts so a
-    // stuck server does not hang the test forever.
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .context("build reqwest client")?;
 
-    // ── 1. Test client identity ──────────────────────────────────────────
+    // 1. Test client identity.
     log(
         1,
         &format!(
@@ -491,7 +418,7 @@ pub async fn run_full_flow(
         ),
     );
 
-    // ── 2. /.well-known/aqua-identity ────────────────────────────────────
+    // 2. /.well-known/aqua-identity
     let identity_url = format!("{base_url}/.well-known/aqua-identity");
     let resp = http_get(&client, &identity_url, None).await?;
     if !resp.status().is_success() {
@@ -524,26 +451,26 @@ pub async fn run_full_flow(
         .as_str()
         .ok_or_else(|| anyhow!("server_did not a string"))?
         .to_string();
-    let server_addr = address_from_did(&server_did)?;
     log(2, &format!("identity shape ok, server_did={server_did}"));
 
-    // ── 3 + 4. SIWE handshake -> Bearer token for primary client ─────────
-    let token_primary = mint_bearer(&client, base_url, primary).await?;
+    // 3. SIWE handshake -> Bearer token.
+    let token = mint_bearer(&client, base_url, primary).await?;
     log(
         3,
         "auth/challenge signed and POST /auth/session returned a token",
     );
 
-    // ── 5. Random leaf ───────────────────────────────────────────────────
-    let leaf_hex = random_leaf();
-    log(5, &format!("generated random leaf {leaf_hex}"));
+    // 5. The client's own tree; its tip is the leaf.
+    let client_tree = new_client_tree("openwitness_seal_e2e")?;
+    let leaf_hex = client_tree.leaf_hex.clone();
+    log(5, &format!("client tree built, tip (leaf) {leaf_hex}"));
 
-    // ── 6. POST /v1/leaves ───────────────────────────────────────────────
+    // 6. POST /v1/leaves
     let leaves_url = format!("{base_url}/v1/leaves");
     let resp = http_post(
         &client,
         &leaves_url,
-        Some(&token_primary),
+        Some(&token),
         &json!({ "leaves": [leaf_hex] }),
     )
     .await?;
@@ -566,39 +493,23 @@ pub async fn run_full_flow(
         &format!("submitted leaf to epoch {epoch_id} (closes_at={epoch_closes_at})"),
     );
 
-    // ── 6.5. If in selfcheck mode, drive the seal now. ───────────────────
+    // 6.5. In-process runs drive the seal now.
     if let SealTrigger::Driver(drv) = &seal {
         drv().await;
     }
 
-    // ── 7. Poll /v1/schedule until last_sealed_epoch_id >= epoch_id ──────
-    //
-    // The polling budget is the minimum of two things:
-    //   (a) the caller's hard ceiling (`budget.deadline`), which guards
-    //       against a stuck deployment.
-    //   (b) the success-criteria §M-E2E rule: `2 * (epoch_closes_at - now)
-    //       + 30s` grace, computed from the server's clock at submission
-    //       time so a long epoch doesn't immediately blow out a tight
-    //       caller-supplied budget.
-    //
-    // For selfcheck the seal already fired in step 6.5, so the loop exits
-    // on the first iteration; for live, the dynamic ceiling kicks in.
+    // 7. Poll /v1/schedule until the epoch is sealed. The wait is the smaller of the caller's
+    // ceiling and 2 * (close - now) + 30s (success-criteria M-E2E).
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let dyn_budget = PollBudget::from_epoch_close(epoch_closes_at, now_secs, 30);
-    let effective_deadline = budget.deadline.min(dyn_budget.deadline);
-
+    let effective_deadline = opts.seal_wait.deadline.min(dyn_budget.deadline);
     let sched_url = format!("{base_url}/v1/schedule");
     loop {
         if Instant::now() >= effective_deadline {
-            bail!(
-                "timed out waiting for epoch {epoch_id} to seal (last poll: {}s past deadline)",
-                Instant::now()
-                    .saturating_duration_since(effective_deadline)
-                    .as_secs()
-            );
+            bail!("timed out waiting for epoch {epoch_id} to seal");
         }
         let resp = http_get(&client, &sched_url, None).await?;
         if !resp.status().is_success() {
@@ -612,331 +523,98 @@ pub async fn run_full_flow(
         if last_sealed >= epoch_id {
             break;
         }
-        tokio::time::sleep(budget.interval).await;
+        tokio::time::sleep(opts.seal_wait.interval).await;
     }
     log(7, &format!("/v1/schedule confirms epoch {epoch_id} sealed"));
 
-    // ── 8. GET /trees/by-leaf/{leaf}?method=evm ──────────────────────────
-    let by_leaf_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=evm");
-    // A sealed epoch is not yet a served witness: the anchor may be
-    // outstanding (D51) or not final, and every witness passes the server's
-    // pre-serve self-check first (OW1.4). Poll on 202 within the budget.
-    let resp = loop {
-        let resp = http_get(&client, &by_leaf_url, Some(&token_primary)).await?;
-        if resp.status() != StatusCode::ACCEPTED {
-            break resp;
-        }
-        if std::time::Instant::now() >= budget.deadline {
-            let b = resp.text().await.unwrap_or_default();
+    // 8. Fetch BOTH witnesses. A sealed epoch is not yet a served witness (the anchor may be
+    // outstanding or not final): poll 202 to the timeout. 404, a stub, a timeout: failure.
+    let deadline = Instant::now() + opts.witness_timeout;
+    let fetch = |method| {
+        fetch_witness(
+            &client,
+            base_url,
+            &leaf_hex,
+            &token,
+            method,
+            deadline,
+            opts.witness_interval,
+        )
+    };
+    let (evm, qtsa) = tokio::join!(fetch(WitnessMethod::Evm), fetch(WitnessMethod::Qtsa));
+    let (evm, qtsa) = match (evm, qtsa) {
+        (Ok(e), Ok(q)) => (e, q),
+        (e, q) => {
+            let lines: Vec<String> = [e.err(), q.err()]
+                .into_iter()
+                .flatten()
+                .map(|x| format!("  - {x}"))
+                .collect();
             bail!(
-                "GET /trees/by-leaf: EVM witness still pending (HTTP 202) at the deadline body={b}"
+                "GET /trees/by-leaf: both anchors are required, not served:\n{}",
+                lines.join("\n")
             );
         }
-        tokio::time::sleep(budget.interval).await;
     };
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let b = resp.text().await.unwrap_or_default();
-        bail!("GET /trees/by-leaf: HTTP {s} body={b}");
-    }
-    let tree_value: Value = resp.json().await.context("tree json")?;
-    let _tree: Tree =
-        serde_json::from_value(tree_value.clone()).context("tree deserialises to SDK Tree")?;
-    let revisions = tree_value
-        .get("revisions")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("tree.revisions missing"))?;
-    let file_index = tree_value
-        .get("file_index")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("tree.file_index missing"))?;
-    if revisions.len() != 2 {
-        bail!(
-            "expected 2 revisions in the witness, got {}",
-            revisions.len()
-        );
-    }
-    if file_index.len() != 2 {
-        bail!("expected 2 file_index entries, got {}", file_index.len());
-    }
     log(
         8,
-        &format!(
-            "retrieved {} witness revisions for leaf {leaf_hex}",
-            revisions.len()
-        ),
+        &format!("fetched the evm and the qtsa witness for leaf {leaf_hex}"),
     );
 
-    // ── 9a. L1: every revision JSON re-hashes to its declared link ───────
-    // `Linkable::calculate_link` is implemented per-variant (Object<P>,
-    // Signature, Template, Anchor) and not on `AnyRevision` directly, so we
-    // match the enum and dispatch to the right impl.
-    for (declared_hash, rev_value) in revisions {
-        let rev: AnyRevision = serde_json::from_value(rev_value.clone())
-            .with_context(|| format!("deserialise revision {declared_hash}"))?;
-        let computed = recompute_link(&rev, declared_hash)?;
-        let computed_hex = format!("0x{}", hex::encode(computed.as_ref()));
-        if !computed_hex.eq_ignore_ascii_case(declared_hash) {
-            bail!("L1: revision {declared_hash} re-hashes to {computed_hex}; map key mismatch");
-        }
-    }
-    log(
-        9,
-        "L1 ok: every revision JSON re-hashes to its declared link",
-    );
-
-    // ── 9b. L2: inclusion proof verifies against the stated merkle_root ──
-    let mut object_value: Option<&Value> = None;
-    let mut object_hash: Option<String> = None;
-    let mut signature_value: Option<&Value> = None;
-    let mut signature_hash: Option<String> = None;
-
-    for (hash, rev_value) in revisions {
-        let rev: AnyRevision = serde_json::from_value(rev_value.clone())?;
-        match rev {
-            AnyRevision::Typed(_) => {
-                object_value = Some(rev_value);
-                object_hash = Some(hash.clone());
-            }
-            AnyRevision::Signature(_) => {
-                signature_value = Some(rev_value);
-                signature_hash = Some(hash.clone());
-            }
-            _ => {}
-        }
-    }
-    let object_value = object_value.ok_or_else(|| anyhow!("witness missing TimestampObject"))?;
-    let signature_value =
-        signature_value.ok_or_else(|| anyhow!("witness missing Signature revision"))?;
-    let object_hash = object_hash.unwrap();
-    let signature_hash = signature_hash.unwrap();
-
-    let payloads = object_value
-        .get("payloads")
-        .ok_or_else(|| anyhow!("TimestampObject.payloads missing"))?;
-    let merkle_root_hex = batch_inclusion(payloads, &leaf_hex)
-        .map_err(|e| anyhow!("L2: inclusion proof failed to verify: {e}"))?;
-    let leaf_index = payloads
-        .get("batch_leaf_index")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let tree_size = payloads
-        .get("batch_tree_size")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-
-    // Sanity: TimestampObject.previous_revision must be the client leaf.
-    let prev = object_value
-        .get("previous_revision")
+    // 9. The SDK verifier on the client tree with both witness pairs merged in.
+    let evm_network = evm
+        .payloads
+        .get("network")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("TimestampObject.previous_revision missing"))?;
-    if !link_digest_hex(prev)?.eq_ignore_ascii_case(&leaf_hex) {
-        bail!("L2: TimestampObject.previous_revision {prev} != submitted leaf {leaf_hex}");
-    }
-    log(
-        9,
-        &format!(
-            "L2 ok: inclusion proof verifies (root={merkle_root_hex}, idx={leaf_index}, size={tree_size})"
-        ),
-    );
-
-    // ── 9c. L3: Signature recovers to the service address. ───────────────
-    let recovered = verify_signature_revision(signature_value, &signature_hash)?;
-    if !recovered.eq_ignore_ascii_case(&server_addr) {
-        bail!("L3: signature recovered {recovered} != server address {server_addr} from identity");
-    }
-    // And the on-wire `signer` field should match the identity's server_did.
-    let signer_did = signature_value
-        .get("signer")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Signature.signer missing"))?;
-    if !signer_did.eq_ignore_ascii_case(&server_did) {
-        bail!("L3: Signature.signer {signer_did} != identity.server_did {server_did}");
-    }
-    // Signature.previous_revision should point at the TimestampObject hash.
-    let sig_prev = signature_value
-        .get("previous_revision")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Signature.previous_revision missing"))?;
-    if !sig_prev.eq_ignore_ascii_case(&object_hash) {
-        bail!("L3: Signature.previous_revision {sig_prev} != object hash {object_hash}");
-    }
-    log(
-        9,
-        &format!("L3 ok: EIP-191 signature recovers to {recovered} (== server_did address)"),
-    );
-
-    // ── 9d. qTSA witness retrieval + verification ────────────────────────
-    //
-    // Same shape as the EVM path: fetch `/trees/by-leaf/{leaf}?method=qtsa`,
-    // assert L1 (revision rehash), L2 (Merkle proof against the same root),
-    // L3 (signature recovers to the same server address). Only the
-    // TimestampObject payload differs (network = "tsa", the SDK TSA label,
-    // tsa_provider = the TSA publisher, transaction_hash = the RFC 3161
-    // TimeStampResp base64). A 404 here doesn't fail the run (qTSA may be
-    // disabled in a given deployment); the fields are checked only when
-    // present.
-    let by_leaf_qtsa_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=qtsa");
-    let resp_q = http_get(&client, &by_leaf_qtsa_url, Some(&token_primary)).await?;
-    if resp_q.status() == StatusCode::NOT_FOUND {
+        .unwrap_or_default()
+        .to_string();
+    let hosts = opts.reader.hosts(&evm_network)?;
+    let verdicts = verify_with_sdk(&client_tree, &[&evm, &qtsa], &hosts, &server_did).await?;
+    for v in &verdicts {
         log(
             9,
-            "qTSA witness not present for this epoch (skipping qtsa verification)",
+            &format!(
+                "SDK verifier: {} timestamp revision verified ({}), aggregator signature ok, root={}",
+                v.method.as_str(),
+                v.anchor_verdict,
+                v.merkle_root_hex
+            ),
         );
-    } else if resp_q.status() == StatusCode::ACCEPTED {
-        // D51: the qTSA anchor is outstanding (HTTP 202, status "pending");
-        // the server retries it every epoch tick.
+    }
+    if verdicts[0].merkle_root_hex != verdicts[1].merkle_root_hex {
+        bail!(
+            "the two anchors cover different roots: evm={} qtsa={}",
+            verdicts[0].merkle_root_hex,
+            verdicts[1].merkle_root_hex
+        );
+    }
+
+    // 10a. Negative: a *different* DID's token is 403 on this leaf (in-process only).
+    let by_leaf_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=evm");
+    if opts.foreign_did_negative {
+        let secondary = ClientKey::random(SignatureMethod::Secp256k1Eip191)?;
+        let token_secondary = mint_bearer(&client, base_url, &secondary).await?;
+        let resp = http_get(&client, &by_leaf_url, Some(&token_secondary)).await?;
+        if resp.status() != StatusCode::FORBIDDEN {
+            let s = resp.status();
+            let b = resp.text().await.unwrap_or_default();
+            bail!("negative-1: expected 403 from foreign DID on by-leaf, got {s} body={b}");
+        }
         log(
-            9,
-            "qTSA anchor pending for this epoch (HTTP 202; skipping qtsa verification)",
+            10,
+            &format!(
+                "negative-1 ok: foreign DID ({}) gets 403 on by-leaf",
+                secondary.did
+            ),
         );
-    } else if !resp_q.status().is_success() {
-        let s = resp_q.status();
-        let b = resp_q.text().await.unwrap_or_default();
-        bail!("GET /trees/by-leaf?method=qtsa: HTTP {s} body={b}");
     } else {
-        let qtsa_tree_value: Value = resp_q.json().await.context("qtsa tree json")?;
-        let _qtsa_tree: Tree = serde_json::from_value(qtsa_tree_value.clone())
-            .context("qtsa tree deserialises to SDK Tree")?;
-        let qtsa_revisions = qtsa_tree_value
-            .get("revisions")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("qtsa tree.revisions missing"))?;
-        if qtsa_revisions.len() != 2 {
-            bail!(
-                "qtsa witness should have 2 revisions, got {}",
-                qtsa_revisions.len()
-            );
-        }
-
-        // L1
-        for (declared_hash, rev_value) in qtsa_revisions {
-            let rev: AnyRevision = serde_json::from_value(rev_value.clone())?;
-            let computed = recompute_link(&rev, declared_hash)?;
-            let computed_hex = format!("0x{}", hex::encode(computed.as_ref()));
-            if !computed_hex.eq_ignore_ascii_case(declared_hash) {
-                bail!("qtsa L1: rev {declared_hash} re-hashes to {computed_hex}");
-            }
-        }
         log(
-            9,
-            "qtsa L1 ok: every revision JSON re-hashes to its declared link",
-        );
-
-        // L2 + L3
-        let mut q_obj: Option<&Value> = None;
-        let mut q_sig: Option<&Value> = None;
-        let mut q_sig_hash: Option<String> = None;
-        let mut q_obj_hash: Option<String> = None;
-        for (h, v) in qtsa_revisions {
-            let rev: AnyRevision = serde_json::from_value(v.clone())?;
-            match rev {
-                AnyRevision::Typed(_) => {
-                    q_obj = Some(v);
-                    q_obj_hash = Some(h.clone());
-                }
-                AnyRevision::Signature(_) => {
-                    q_sig = Some(v);
-                    q_sig_hash = Some(h.clone());
-                }
-                _ => {}
-            }
-        }
-        let q_obj = q_obj.ok_or_else(|| anyhow!("qtsa witness missing TimestampObject"))?;
-        let q_sig = q_sig.ok_or_else(|| anyhow!("qtsa witness missing Signature"))?;
-        let q_sig_hash_str = q_sig_hash.as_deref().expect("set with q_sig");
-
-        let q_payloads = q_obj
-            .get("payloads")
-            .ok_or_else(|| anyhow!("qtsa payloads missing"))?;
-        let q_root_hex = batch_inclusion(q_payloads, &leaf_hex)
-            .map_err(|e| anyhow!("qtsa L2: inclusion proof failed: {e}"))?;
-        let q_idx = q_payloads
-            .get("batch_leaf_index")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let q_size = q_payloads
-            .get("batch_tree_size")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let q_prev = q_obj
-            .get("previous_revision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("qtsa previous_revision missing"))?;
-        if !link_digest_hex(q_prev)?.eq_ignore_ascii_case(&leaf_hex) {
-            bail!("qtsa L2: previous_revision {q_prev} != leaf {leaf_hex}");
-        }
-        log(
-            9,
-            &format!(
-                "qtsa L2 ok: inclusion proof verifies (root={q_root_hex}, idx={q_idx}, size={q_size})"
-            ),
-        );
-
-        let q_recovered = verify_signature_revision(q_sig, q_sig_hash_str)?;
-        if !q_recovered.eq_ignore_ascii_case(&server_addr) {
-            bail!("qtsa L3: recovered {q_recovered} != server addr {server_addr}");
-        }
-        let q_sig_prev = q_sig
-            .get("previous_revision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("qtsa sig previous_revision missing"))?;
-        let q_obj_hash = q_obj_hash.unwrap();
-        if !q_sig_prev.eq_ignore_ascii_case(&q_obj_hash) {
-            bail!("qtsa L3: sig prev {q_sig_prev} != obj hash {q_obj_hash}");
-        }
-        log(
-            9,
-            &format!("qtsa L3 ok: EIP-191 signature recovers to {q_recovered}"),
-        );
-
-        // Surface the qTSA-specific payload fields so the transcript shows
-        // the RFC 3161 evidence the operator's eIDAS-qualified provider
-        // returned: who signed (publisher), what TSA URL produced it, and
-        // when the qualified TSA's `genTime` stamped the root.
-        let tsa_provider = q_payloads
-            .get("tsa_provider")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let tsa_url = q_payloads
-            .get("smart_contract_address")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let tsa_time = q_payloads
-            .get("timestamp")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let tsa_tx_len = q_payloads
-            .get("transaction_hash")
-            .and_then(Value::as_str)
-            .map(|s| s.len())
-            .unwrap_or(0);
-        log(
-            9,
-            &format!(
-                "qtsa payload: provider={tsa_provider} url={tsa_url} gen_time={tsa_time} response_bytes={tsa_tx_len}"
-            ),
+            10,
+            "negative-1 skipped: needs a second (random) identity, in-process runs only",
         );
     }
 
-    // ── 10a. Negative: a *different* DID's token is 403 on this leaf. ────
-    let secondary = ClientKey::random(SignatureMethod::Secp256k1Eip191)?;
-    let token_secondary = mint_bearer(&client, base_url, &secondary).await?;
-    let resp = http_get(&client, &by_leaf_url, Some(&token_secondary)).await?;
-    if resp.status() != StatusCode::FORBIDDEN {
-        let s = resp.status();
-        let b = resp.text().await.unwrap_or_default();
-        bail!("negative-1: expected 403 from foreign DID on by-leaf, got {s} body={b}");
-    }
-    log(
-        10,
-        &format!(
-            "negative-1 ok: foreign DID ({}) gets 403 on by-leaf",
-            secondary.did
-        ),
-    );
-
-    // ── 10b. Negative: POST /v1/leaves without a Bearer is 401. ──────────
+    // 10b. Negative: POST /v1/leaves without a Bearer is 401.
     let resp = http_post(
         &client,
         &leaves_url,
@@ -957,45 +635,6 @@ pub async fn run_full_flow(
         client_did: primary.did.clone(),
         leaf_hex,
         epoch_id,
-        merkle_root_hex,
-        object_hash_hex: object_hash,
-        signature_hash_hex: signature_hash,
-        recovered_signer_address: recovered,
+        witnesses: verdicts,
     })
-}
-
-/// L2 for one witness payload, judged by the SDK's batch inclusion primitives
-/// (PCA-0015 section 3.8): the shielded leaf of the submitted leaf under the
-/// payload's `shielding_nonce` sits at `batch_leaf_index` of the tree whose
-/// root is `merkle_root`. Returns the root as the payload states it.
-fn batch_inclusion(payloads: &Value, leaf_hex: &str) -> Result<String> {
-    let field = |name: &str| {
-        payloads
-            .get(name)
-            .ok_or_else(|| anyhow!("payloads.{name} missing"))
-    };
-    let root_hex = field("merkle_root")?
-        .as_str()
-        .ok_or_else(|| anyhow!("payloads.merkle_root not a string"))?
-        .to_string();
-    let root = parse_batch_root(&root_hex).map_err(|e| anyhow!("merkle_root: {e:?}"))?;
-    let nonce = parse_batch_digest(
-        field("shielding_nonce")?
-            .as_str()
-            .ok_or_else(|| anyhow!("payloads.shielding_nonce not a string"))?,
-    )
-    .map_err(|e| anyhow!("shielding_nonce: {e:?}"))?;
-    let proof =
-        parse_batch_proof(field("merkle_proof")?).map_err(|e| anyhow!("merkle_proof: {e:?}"))?;
-    let index = field("batch_leaf_index")?
-        .as_u64()
-        .ok_or_else(|| anyhow!("payloads.batch_leaf_index not a number"))?;
-    let size = field("batch_tree_size")?
-        .as_u64()
-        .ok_or_else(|| anyhow!("payloads.batch_tree_size not a number"))?;
-    let target = RevisionLink::from_bytes(parse_hex32(leaf_hex)?);
-    let leaf = shielded_leaf(&target, &nonce).map_err(|e| anyhow!("leaf: {e:?}"))?;
-    verify_batch_inclusion(&leaf, index, size, &proof, &root)
-        .map_err(|e| anyhow!("against {root_hex}: {e:?}"))?;
-    Ok(root_hex)
 }

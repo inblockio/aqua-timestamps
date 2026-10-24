@@ -1,31 +1,34 @@
-//! Live + selfcheck e2e client for aqua-timestamp.
+//! Live + selfcheck e2e client for aqua-timestamp (OW1.5).
 //!
-//! Two subcommands:
+//! Subcommands:
 //!
-//! * `live`: runs the full M-E2E flow against `BASE_URL`
-//!   (default `https://openwitness.org`). Reads the test client
-//!   BIP39 mnemonic from `AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC`. Exits 0
-//!   on full success; nonzero on any failure (with a clear per-step
-//!   error).
-//! * `selfcheck`: spins up an in-process server (mirroring
-//!   `crates/aqua-timestamp/tests/witness_flow.rs`) on a free localhost
-//!   port, drives the same flow against it using a fast
-//!   `SealDriver::Channel` so seals are deterministic. This is what
-//!   `cargo test selfcheck` exercises in `tests/selfcheck.rs`.
+//! * `live --base-url <URL>`: the main path against a deployed aggregator. The base URL has
+//!   no default (a bare run must never reach production) and is printed. Signs in with the ONE
+//!   standing secp256k1 identity from `~/.local/state/openwitness-seal-e2e/` (created once,
+//!   never rotated), submits the tip of a fresh client tree, waits for the seal, fetches BOTH
+//!   witnesses (EVM and qTSA) and has the SDK verifier judge the client tree with both merged
+//!   in. 404, a stub or a timeout is a failure. The production host needs
+//!   `--allow-production`; that run belongs to OW2 / SP3, not to OW1.
+//! * `selfcheck`: the same main path against an in-process aggregator on localhost whose
+//!   anchors are the offline test doubles; the reader asks the same doubles (see README).
+//! * `selfcheck-all`: `selfcheck` plus ed25519 and p256 clients with ephemeral in-process keys
+//!   (those key types have no standing identity and never run against a remote).
 //!
-//! The verification logic lives in [`flow`]; both subcommands call the
-//! same function so any regression in the verifier surfaces in both.
+//! The verification logic lives in [`witness`] (SDK) and [`flow`]; every subcommand calls the
+//! same flow function.
 
 mod flow;
+mod identity;
 mod selfcheck;
+mod witness;
 
-use anyhow::{anyhow, Context, Result};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::flow::{run_full_flow, ClientKey, PollBudget, SealTrigger, SignatureMethod};
-
-/// Public env var the shell wrapper exports before launching the binary.
-const ENV_TEST_CLIENT_MNEMONIC: &str = "AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC";
+use crate::flow::{run_full_flow, FlowOptions, PollBudget, ReaderConfig, SealTrigger};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -39,41 +42,65 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Run the live M-E2E flow against `BASE_URL`. Reads the test client
-    /// mnemonic from `AQUA_TIMESTAMP_TEST_CLIENT_MNEMONIC`. Default
-    /// `BASE_URL` is `https://openwitness.org`.
+    /// Run the main path against a deployed aggregator. `--base-url` is required.
     Live {
-        /// Override base URL.
-        #[arg(long, env = "BASE_URL", default_value = "https://openwitness.org")]
+        /// Base URL of the aggregator under test (no default; printed at the start).
+        #[arg(long, env = "OPENWITNESS_E2E_BASE_URL")]
         base_url: String,
-        /// Maximum wall-clock seconds to wait for the epoch to seal,
-        /// independent of the server's reported `epoch_closes_at`.
+        /// Allow the production host (openwitness.org). Not for OW1: that run is OW2 / SP3.
+        #[arg(long)]
+        allow_production: bool,
+        /// Directory of the standing identity (default ~/.local/state/openwitness-seal-e2e).
+        #[arg(long, env = "OPENWITNESS_E2E_IDENTITY_DIR")]
+        identity_dir: Option<PathBuf>,
+        /// Seconds to wait for the epoch to seal.
         #[arg(long, default_value_t = 1500)]
-        max_wait_secs: u64,
+        seal_wait_secs: u64,
+        /// Seconds, after the seal, to wait for BOTH witnesses (EVM serves at finality).
+        #[arg(long, default_value_t = 1200)]
+        witness_timeout_secs: u64,
+        /// Seconds between polls.
+        #[arg(long, default_value_t = 5)]
+        poll_interval_secs: u64,
+        /// EVM RPC URL of the reader's chain host (default: the SDK host's own endpoint).
+        #[arg(long, env = "OPENWITNESS_E2E_EVM_RPC_URL")]
+        evm_rpc_url: Option<String>,
     },
-    /// Run the live flow three times, once per DID method that
-    /// `aqua-rs-auth` supports (secp256k1+EIP-191, Ed25519, P-256). The
-    /// secp256k1 run uses the keyring-stored test mnemonic; the other two
-    /// use fresh random keypairs generated in-process. Each run uses its
-    /// own epoch, so this command takes up to `3 * 600s` against a 600s
-    /// production epoch. Exits 0 only if all three runs succeed.
-    LiveAll {
-        #[arg(long, env = "BASE_URL", default_value = "https://openwitness.org")]
-        base_url: String,
-        #[arg(long, default_value_t = 1500)]
-        max_wait_secs: u64,
+    /// Run the main path against an in-process aggregator on localhost (offline test doubles).
+    Selfcheck {
+        /// Identity directory to use (default: a throwaway temporary directory).
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
     },
-    /// Run the same flow against an in-process server. Used by
-    /// `cargo test --test selfcheck`.
-    Selfcheck,
-    /// Run the in-process flow three times, once per DID method
-    /// (secp256k1+EIP-191, Ed25519, P-256). Used by
-    /// `cargo test --test multi_method`.
-    SelfcheckAll,
+    /// `selfcheck` for secp256k1, then ed25519 and p256 with ephemeral in-process keys.
+    SelfcheckAll {
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
+    },
 }
 
 fn print_step(n: usize, msg: &str) {
     println!("[step {n}] OK   {msg}");
+}
+
+/// Refuse the production host unless asked, and any URL that does not parse.
+fn check_base_url(raw: &str, allow_production: bool) -> Result<String> {
+    let url = reqwest::Url::parse(raw).with_context(|| format!("--base-url {raw:?}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("--base-url must be http or https, got {raw:?}");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("--base-url {raw:?} has no host"))?
+        .to_ascii_lowercase();
+    let production = host == "openwitness.org" || host.ends_with(".openwitness.org");
+    if production && !allow_production {
+        bail!(
+            "{host} is production: refusing without --allow-production (the live production run \
+             belongs to OW2 / SP3, not to OW1)"
+        );
+    }
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -82,103 +109,70 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Live {
             base_url,
-            max_wait_secs,
+            allow_production,
+            identity_dir,
+            seal_wait_secs,
+            witness_timeout_secs,
+            poll_interval_secs,
+            evm_rpc_url,
         } => {
-            let key = secp256k1_client_from_env().await?;
+            let base_url = check_base_url(&base_url, allow_production)?;
             println!("aqua-timestamp e2e :: live");
             println!("base_url = {base_url}");
-            let budget = make_budget(max_wait_secs);
-            let outcome = run_full_flow(&base_url, &key, SealTrigger::None, budget, &print_step)
+            let dir = match identity_dir {
+                Some(d) => d,
+                None => identity::default_dir()?,
+            };
+            let id = identity::load_or_create(&dir)?;
+            println!(
+                "identity = {} ({}, alias {}, created_at {}){}",
+                id.record.did,
+                dir.display(),
+                id.record.alias,
+                id.record.created_at,
+                if id.created { "  [CREATED NOW]" } else { "" }
+            );
+            let key = id.client_key()?;
+            let interval = Duration::from_secs(poll_interval_secs.max(1));
+            let opts = FlowOptions {
+                seal_wait: PollBudget {
+                    deadline: Instant::now() + Duration::from_secs(seal_wait_secs),
+                    interval,
+                },
+                witness_timeout: Duration::from_secs(witness_timeout_secs),
+                witness_interval: interval,
+                foreign_did_negative: false,
+                reader: ReaderConfig::Live { evm_rpc_url },
+            };
+            let outcome = run_full_flow(&base_url, &key, SealTrigger::None, &opts, &print_step)
                 .await
                 .context("live flow failed")?;
             print_summary(&outcome);
             Ok(())
         }
-        Cmd::LiveAll {
-            base_url,
-            max_wait_secs,
-        } => {
-            println!("aqua-timestamp e2e :: live-all (secp256k1 + ed25519 + p256)");
-            println!("base_url = {base_url}");
-
-            let keys: Vec<(SignatureMethod, ClientKey)> = vec![
-                (
-                    SignatureMethod::Secp256k1Eip191,
-                    secp256k1_client_from_env().await?,
-                ),
-                (
-                    SignatureMethod::Ed25519,
-                    ClientKey::random(SignatureMethod::Ed25519)?,
-                ),
-                (
-                    SignatureMethod::P256,
-                    ClientKey::random(SignatureMethod::P256)?,
-                ),
-            ];
-
-            let mut summaries: Vec<(SignatureMethod, crate::flow::E2eOutcome)> = Vec::new();
-            let mut failures: Vec<(SignatureMethod, anyhow::Error)> = Vec::new();
-            for (method, key) in keys {
-                println!();
-                println!("===== method = {} =====", method.label());
-                let budget = make_budget(max_wait_secs);
-                let labelled = move |n: usize, msg: &str| {
-                    println!("[{} step {n}] OK   {msg}", method.label());
-                };
-                match run_full_flow(&base_url, &key, SealTrigger::None, budget, &labelled).await {
-                    Ok(o) => summaries.push((method, o)),
-                    Err(e) => {
-                        eprintln!("[{} FAIL] {e:#}", method.label());
-                        failures.push((method, e));
-                    }
-                }
-            }
-
-            println!();
-            println!("====== live-all summary ======");
-            for (method, outcome) in &summaries {
-                println!(
-                    "[{}] STATUS=OK  client_did={}",
-                    method.label(),
-                    outcome.client_did
-                );
-                println!(
-                    "    leaf={}  epoch={}  tx_anchor={}",
-                    outcome.leaf_hex, outcome.epoch_id, outcome.merkle_root_hex
-                );
-            }
-            for (method, err) in &failures {
-                println!("[{}] STATUS=FAIL {err}", method.label());
-            }
-            if failures.is_empty() {
-                println!("OVERALL = OK ({} methods)", summaries.len());
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "{} of {} methods failed",
-                    failures.len(),
-                    summaries.len() + failures.len()
-                ))
-            }
-        }
-        Cmd::Selfcheck => {
-            println!("aqua-timestamp e2e :: selfcheck");
-            let outcome = selfcheck::run(&print_step).await?;
+        Cmd::Selfcheck { identity_dir } => {
+            println!("aqua-timestamp e2e :: selfcheck (in-process aggregator, offline doubles)");
+            let outcome = selfcheck::run(&print_step, identity_dir.as_deref()).await?;
             print_summary(&outcome);
             Ok(())
         }
-        Cmd::SelfcheckAll => {
+        Cmd::SelfcheckAll { identity_dir } => {
             println!("aqua-timestamp e2e :: selfcheck-all (secp256k1 + ed25519 + p256)");
-            let outcomes = selfcheck::run_all_methods(&print_step).await?;
+            let outcomes = selfcheck::run_all_methods(&print_step, identity_dir.as_deref()).await?;
             println!();
             println!("====== selfcheck-all summary ======");
             for (method, outcome) in &outcomes {
                 println!(
-                    "[{}] STATUS=OK  client_did={}  epoch={}  root={}",
+                    "[{}] STATUS=OK  client_did={}  epoch={}  anchors={}",
                     method.label(),
                     outcome.client_did,
                     outcome.epoch_id,
-                    outcome.merkle_root_hex,
+                    outcome
+                        .witnesses
+                        .iter()
+                        .map(|w| w.method.as_str())
+                        .collect::<Vec<_>>()
+                        .join("+"),
                 );
             }
             assert_eq!(outcomes.len(), 3, "expected one outcome per DID method");
@@ -186,28 +180,6 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn make_budget(max_wait_secs: u64) -> PollBudget {
-    PollBudget {
-        deadline: std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs),
-        interval: std::time::Duration::from_secs(5),
-    }
-}
-
-async fn secp256k1_client_from_env() -> Result<ClientKey> {
-    let mnemonic = std::env::var(ENV_TEST_CLIENT_MNEMONIC).with_context(|| {
-        format!(
-            "{ENV_TEST_CLIENT_MNEMONIC} not set; the wrapper script should look it up from the keyring"
-        )
-    })?;
-    let mnemonic = mnemonic.trim();
-    if mnemonic.is_empty() {
-        return Err(anyhow!(
-            "{ENV_TEST_CLIENT_MNEMONIC} is empty; keyring lookup likely returned nothing"
-        ));
-    }
-    ClientKey::from_mnemonic(mnemonic).await
 }
 
 fn print_summary(outcome: &crate::flow::E2eOutcome) {
@@ -218,9 +190,61 @@ fn print_summary(outcome: &crate::flow::E2eOutcome) {
     println!("client_did     = {}", outcome.client_did);
     println!("epoch_id       = {}", outcome.epoch_id);
     println!("leaf           = {}", outcome.leaf_hex);
-    println!("merkle_root    = {}", outcome.merkle_root_hex);
-    println!("object_hash    = {}", outcome.object_hash_hex);
-    println!("signature_hash = {}", outcome.signature_hash_hex);
-    println!("signer_recover = {}", outcome.recovered_signer_address);
+    for w in &outcome.witnesses {
+        println!(
+            "[{}] merkle_root={} timestamp_revision={} signature_revision={}",
+            w.method.as_str(),
+            w.merkle_root_hex,
+            w.timestamp_revision,
+            w.signature_revision
+        );
+        println!(
+            "[{}] sdk anchor verdict = {}",
+            w.method.as_str(),
+            w.anchor_verdict
+        );
+    }
     println!("STATUS         = OK");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_host_needs_the_flag() {
+        for url in [
+            "https://openwitness.org",
+            "https://openwitness.org/",
+            "https://OpenWitness.org:443/x",
+            "https://api.openwitness.org",
+        ] {
+            assert!(check_base_url(url, false).is_err(), "{url}");
+            assert!(check_base_url(url, true).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn other_hosts_pass_and_are_normalised() {
+        assert_eq!(
+            check_base_url("http://127.0.0.1:8080/", false).unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert!(check_base_url("https://staging.example.org", false).is_ok());
+        assert!(check_base_url("https://notopenwitness.org", false).is_ok());
+    }
+
+    #[test]
+    fn junk_urls_are_refused() {
+        assert!(check_base_url("openwitness.org", true).is_err());
+        assert!(check_base_url("ftp://example.org", false).is_err());
+    }
+
+    #[test]
+    fn live_has_no_default_base_url() {
+        // SAFETY of the test: the env var must not leak in from the shell.
+        std::env::remove_var("OPENWITNESS_E2E_BASE_URL");
+        assert!(Cli::try_parse_from(["e2e", "live"]).is_err());
+        assert!(Cli::try_parse_from(["e2e", "live", "--base-url", "http://127.0.0.1:1"]).is_ok());
+    }
 }

@@ -4,7 +4,7 @@ version     = { workspace = true }
 edition     = { workspace = true }
 license     = { workspace = true }
 repository  = { workspace = true }
-description = "Live + in-process end-to-end test client for the aqua-timestamp aggregator."
+description = "Live + in-process end-to-end test client for the aqua-timestamp aggregator (one standing identity, both anchors judged by the SDK verifier)."
 
 [[bin]]
 name = "aqua-timestamp-e2e"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aqua-rs-sdk         = { workspace = true }
 aqua-evm-provider   = { workspace = true }
+aqua-tsa-provider   = { workspace = true }
 aqua-timestamp      = { path = "../aqua-timestamp" }
 aqua-timestamp-core = { path = "../aqua-timestamp-core", features = ["test-doubles"] }
 
@@ -30,6 +31,7 @@ sha3               = { workspace = true }
 rand               = { workspace = true }
 tracing            = { workspace = true }
 tempfile           = { workspace = true }
+chrono             = { workspace = true }
 
 k256               = { version = "0.13", features = ["ecdsa"] }
 ed25519-dalek      = { version = "2", features = ["rand_core"] }
