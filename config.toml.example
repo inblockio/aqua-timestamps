@@ -43,10 +43,12 @@ enabled       = true
 rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
 # One of `mainnet`, `sepolia`, `holesky`, or `custom:<chain_id>`.
 chain         = "sepolia"
-# `network` field embedded in the EVM witness payload. Usually matches
-# `chain`. Kept separate so `custom:<id>` setups can still surface a
-# human-readable name in witnesses.
-network_label = "sepolia"
+# Deprecated (OW1.6): the witness payload `network` and the self-check
+# chain both come from `chain` (`mainnet`, `sepolia`, `holesky`,
+# `evm:<chain_id>`). If `network_label` (or the legacy
+# `[anchor] evm_network`) is set, it must name the same chain, otherwise
+# the service refuses to start.
+# network_label = "sepolia"
 
 [anchors.qtsa]
 # Live qTSA toggle. `true` constructs an `aqua-rs-sdk`

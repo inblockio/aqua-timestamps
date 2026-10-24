@@ -122,6 +122,9 @@ pub async fn build_app_with_anchors(
             .check_enabled_anchors(identity.mnemonic.as_str())
             .context("anchor configuration (decision D51: no placeholder witnesses)")?;
     }
+    // OW1.6 F1/M1: one chain source, checked even for injected providers.
+    cfg.check_evm_chain_source()
+        .context("anchor configuration (one EVM chain source)")?;
     let identity_tree = build_identity_tree(&identity, &overrides).await?;
     let identity_response_json = build_response(&identity, &identity_tree)?;
 
@@ -171,7 +174,7 @@ pub async fn build_app_with_anchors(
     // the injected override); a failed anchor call leaves that method's
     // witnesses pending and the sealer retries the same epoch root on every
     // tick. A disabled method is an explicit opt-out: it mints nothing.
-    let evm_anchor_cfg = cfg.effective_evm_anchor();
+    let evm_anchor_cfg = cfg.anchors.evm.clone();
     let mut methods = Vec::new();
     let evm_anchor: Option<Arc<dyn AnchorProvider>> = if !evm_anchor_cfg.enabled {
         warn!("evm anchor disabled by config: no evm witnesses are minted");
@@ -187,7 +190,6 @@ pub async fn build_app_with_anchors(
         info!(
             chain = %chain,
             rpc_url = %evm_anchor_cfg.rpc_url,
-            network_label = %evm_anchor_cfg.network_label,
             "evm anchor enabled (CliEthTimestamper)"
         );
         methods.push(AnchorMethod::Evm);
@@ -227,7 +229,6 @@ pub async fn build_app_with_anchors(
     let mut witness_ctx = WitnessContext::new(
         Arc::clone(&signer),
         format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
-        evm_anchor_cfg.network_label.clone(),
         methods,
     );
     if let Some(anchor) = evm_anchor {
@@ -245,15 +246,11 @@ pub async fn build_app_with_anchors(
         (false, _) => None,
         (true, Some(host)) => Some(host),
         (true, None) => {
-            let chain_id = aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(
-                &evm_anchor_cfg.network_label,
-            )
-            .with_context(|| {
-                format!(
-                    "self-check: anchors.evm.network_label {:?} is not a network the SDK verifies",
-                    evm_anchor_cfg.network_label
-                )
-            })?;
+            // OW1.6 F1/M1: the chain the provider writes into the payload.
+            let chain_id = evm_anchor_cfg
+                .evm_chain()
+                .context("parsing anchors.evm.chain")?
+                .chain_id();
             Some(Arc::new(
                 aqua_evm_provider::EthBlockchainHost::new(tokio::runtime::Handle::current())
                     .with_endpoint(chain_id, evm_anchor_cfg.rpc_url.clone()),

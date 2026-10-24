@@ -41,8 +41,6 @@ pub struct WitnessContext {
     pub signer: Arc<Secp256k1Signer>,
     /// EIP-55 ethereum address of the service key, prefixed with `0x`.
     pub service_eth_address: String,
-    /// Network name written into the EVM witness payload (e.g. `"sepolia"`).
-    pub evm_network: String,
     /// Methods to mint per leaf. Production uses both; tests can mint one.
     pub methods: Vec<AnchorMethod>,
     /// Live EVM anchor provider. The sealer submits the per-epoch batch
@@ -76,7 +74,6 @@ impl WitnessContext {
     pub fn new(
         signer: Arc<Secp256k1Signer>,
         service_eth_address: String,
-        evm_network: String,
         methods: Vec<AnchorMethod>,
     ) -> Self {
         let service_did = signer
@@ -86,7 +83,6 @@ impl WitnessContext {
         Self {
             signer,
             service_eth_address,
-            evm_network,
             methods,
             evm_anchor: None,
             qtsa_anchor: None,
@@ -756,7 +752,6 @@ mod tests {
         WitnessContext::new(
             signer,
             "0x0000000000000000000000000000000000000000".into(),
-            "sepolia".into(),
             vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
         )
         .with_sims()

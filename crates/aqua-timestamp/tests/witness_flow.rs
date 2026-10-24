@@ -699,3 +699,78 @@ async fn by_leaf_answers_202_pending_for_a_pending_method() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["revisions"].as_object().unwrap().len(), 2);
 }
+
+/// `cfg` with the anchor blocks of `toml_anchors` (an `[anchor]` and/or
+/// `[anchors.evm]` fragment), parsed as an operator config would be.
+fn cfg_with_anchor_toml(storage: PathBuf, toml_anchors: &str) -> Config {
+    let parsed: Config = toml::from_str(&format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\n{toml_anchors}"
+    ))
+    .expect("config toml");
+    let mut c = cfg(vec![CLIENT_A_DID.to_string()], storage, 10_000);
+    c.anchor_legacy = parsed.anchor_legacy;
+    c.anchors = parsed.anchors;
+    c
+}
+
+/// OW1.6 F1/M1: the EVM chain has one source. The provider writes the
+/// payload `network` from `anchors.evm.chain`; a deprecated label
+/// (`anchors.evm.network_label`, or the legacy `[anchor].evm_network`) that
+/// names another chain would key the self-check host to a chain the payload
+/// never names, so every EVM witness would stay pending forever. The service
+/// refuses to start instead, naming both settings, even with injected
+/// providers. A label that names the same chain still starts.
+#[tokio::test]
+async fn evm_label_naming_another_chain_refuses_to_start() {
+    for (fragment, setting) in [
+        (
+            "[anchors.evm]\nchain = \"sepolia\"\nnetwork_label = \"mainnet\"",
+            "anchors.evm.network_label",
+        ),
+        (
+            "[anchors.evm]\nchain = \"mainnet\"\nnetwork_label = \"sepolia\"",
+            "anchors.evm.network_label",
+        ),
+        ("[anchor]\nevm_network = \"mainnet\"", "anchor.evm_network"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_anchor_toml(tmp.path().to_path_buf(), fragment);
+        let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+            .await
+            .unwrap();
+        let (_tx, rx) = mpsc::channel::<SealTick>(8);
+        let err = match build_app_with_anchors(
+            cfg,
+            identity,
+            IdentityClaimOverrides::default(),
+            SealDriver::Channel(rx),
+            canned_anchors(),
+        )
+        .await
+        {
+            Ok(_) => panic!("{fragment:?}: a second chain source must refuse to start"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(setting), "{fragment:?}: {err}");
+        assert!(err.contains("anchors.evm.chain"), "{fragment:?}: {err}");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nchain = \"sepolia\"\nnetwork_label = \"sepolia\"",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .expect("a label naming the same chain starts");
+}

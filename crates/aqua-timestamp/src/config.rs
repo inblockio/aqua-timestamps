@@ -22,11 +22,10 @@ pub struct Config {
     #[serde(default)]
     pub epoch: EpochConfig,
     /// Legacy M3 `[anchor]` block. Retained so an M3 config still loads
-    /// after the M4 upgrade without manual editing; the only field here
-    /// is `evm_network`, which the resolver below promotes into the new
-    /// `[anchors.evm]` shape if `[anchors.evm].network_label` is absent.
-    /// Operators should migrate to `[anchors.evm]` at their next config
-    /// edit; the legacy block will be removed at M6.
+    /// after the M4 upgrade without manual editing; its only field,
+    /// `evm_network`, is deprecated: the chain comes from
+    /// `[anchors.evm].chain` alone ([`Config::check_evm_chain_source`]).
+    /// The legacy block will be removed at M6.
     #[serde(default, alias = "anchor")]
     pub anchor_legacy: AnchorConfig,
     /// M4+ anchors block. Defaults pick up Sepolia / live provider on,
@@ -48,24 +47,42 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolve the effective `[anchors.evm]` for this config.
-    ///
-    /// Currently the only legacy-promotion rule is: if the deprecated
-    /// `[anchor].evm_network` is present and `[anchors.evm].network_label`
-    /// is still at its default, use the legacy value as the network
-    /// label. This keeps existing M3 configs that say
-    /// `[anchor]\nevm_network = "sepolia"` semantically equivalent to
-    /// the new shape without an explicit edit.
-    pub fn effective_evm_anchor(&self) -> EvmAnchorConfig {
-        let mut evm = self.anchors.evm.clone();
-        // Only inherit when the legacy value diverges from the modern
-        // default; this avoids "promoting" the implicit default Sepolia.
-        if self.anchor_legacy.evm_network != default_evm_network()
-            && evm.network_label == default_evm_network()
-        {
-            evm.network_label = self.anchor_legacy.evm_network.clone();
+    /// OW1.6 F1/M1: the EVM chain has one source, `[anchors.evm].chain`.
+    /// The provider writes the payload `network` from it
+    /// (`EvmChain::network_claim`) and the self-check host is keyed by its
+    /// chain id. The deprecated labels `[anchors.evm].network_label` and
+    /// `[anchor].evm_network` choose nothing; when one is set it must name
+    /// the same chain, otherwise the service refuses to start with a message
+    /// that names both settings (a split would leave every EVM witness
+    /// pending while each epoch still spends a transaction).
+    pub fn check_evm_chain_source(&self) -> Result<()> {
+        let evm = &self.anchors.evm;
+        if !evm.enabled {
+            return Ok(());
         }
-        evm
+        let chain = evm.evm_chain().map_err(|e| {
+            anyhow::anyhow!("anchors.evm is enabled but anchors.evm.chain is invalid: {e}")
+        })?;
+        let labels = [
+            ("anchors.evm.network_label", evm.network_label.as_deref()),
+            ("anchor.evm_network", self.anchor_legacy.evm_network.as_deref()),
+        ];
+        for (setting, label) in labels {
+            let Some(label) = label else { continue };
+            let label_chain = aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(label);
+            if label_chain != Some(chain.chain_id()) {
+                anyhow::bail!(
+                    "{setting} = {label:?} does not name the chain of anchors.evm.chain = {:?} \
+                     (chain id {}, payload network {:?}); the chain comes from anchors.evm.chain \
+                     alone: remove {setting} or set it to {:?}",
+                    evm.chain,
+                    chain.chain_id(),
+                    chain.network_claim(),
+                    chain.network_claim()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Decision D51: an enabled anchor method must have its provider
@@ -75,7 +92,7 @@ impl Config {
     /// explicit: `[anchors.evm].enabled = false` / `[anchors.qtsa].enabled =
     /// false`. `mnemonic` is the service mnemonic the EVM provider signs with.
     pub fn check_enabled_anchors(&self, mnemonic: &str) -> Result<()> {
-        let evm = self.effective_evm_anchor();
+        let evm = &self.anchors.evm;
         if evm.enabled {
             if mnemonic.trim().is_empty() {
                 anyhow::bail!(
@@ -179,24 +196,13 @@ pub struct StorageConfig {
 
 /// Legacy M3 `[anchor]` block. Replaced by `[anchors.evm]` at M4 but kept
 /// for one milestone so existing deploys load without manual editing.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct AnchorConfig {
-    /// The `network` field embedded in EVM timestamp witness payloads.
-    /// Defaults to `"sepolia"`, the M4 target chain.
-    #[serde(default = "default_evm_network")]
-    pub evm_network: String,
-}
-
-fn default_evm_network() -> String {
-    "sepolia".to_string()
-}
-
-impl Default for AnchorConfig {
-    fn default() -> Self {
-        Self {
-            evm_network: default_evm_network(),
-        }
-    }
+    /// Deprecated (OW1.6 F1/M1). The payload `network` comes from
+    /// `[anchors.evm].chain`; when set, this must name the same chain or the
+    /// service refuses to start ([`Config::check_evm_chain_source`]).
+    #[serde(default)]
+    pub evm_network: Option<String>,
 }
 
 /// New-shape anchors block. One sub-table per method.
@@ -230,12 +236,13 @@ pub struct EvmAnchorConfig {
     #[serde(default = "default_evm_chain")]
     pub chain: String,
 
-    /// Free-form network label the witness payload's `network` field
-    /// carries. Usually the same string as `chain`. Kept separate so a
-    /// custom chain id (`chain = "custom:12345"`) can still surface a
-    /// human-readable network name in witnesses.
-    #[serde(default = "default_evm_network")]
-    pub network_label: String,
+    /// Deprecated (OW1.6 F1/M1). The payload `network` is derived from
+    /// `chain` by the SDK (`mainnet`, `sepolia`, `holesky`, `evm:<id>`), and
+    /// the self-check host uses the same chain id. When set, this must name
+    /// the same chain or the service refuses to start
+    /// ([`Config::check_evm_chain_source`]).
+    #[serde(default)]
+    pub network_label: Option<String>,
 
     /// EVM finality a witness needs before the pre-serve self-check (OW1.4)
     /// lets it be served: `"finalized"` (default), `"safe"` or
@@ -263,7 +270,7 @@ impl Default for EvmAnchorConfig {
             enabled: default_evm_enabled(),
             rpc_url: default_evm_rpc_url(),
             chain: default_evm_chain(),
-            network_label: default_evm_network(),
+            network_label: None,
             self_check_finality: Default::default(),
         }
     }

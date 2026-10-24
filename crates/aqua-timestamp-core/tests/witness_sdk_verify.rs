@@ -150,7 +150,6 @@ async fn ctx(
     let mut ctx = WitnessContext::new(
         signer().await,
         evm_chain::SENDER.to_string(),
-        evm_chain::NETWORK.to_string(),
         vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
     );
     ctx.evm_anchor = evm;
