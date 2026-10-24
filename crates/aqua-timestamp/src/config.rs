@@ -67,6 +67,15 @@ impl Config {
         // or the self-check answers every EVM witness "unsupported network"
         // (not the anchor's fault, so no cap) while each epoch still spends
         // a transaction.
+        // OW1.6b N8: with 0, an anchor a lagging node answers "not found" in
+        // the tick it was sent is abandoned at once and re-anchored.
+        if evm.not_found_timeout_secs == 0 {
+            anyhow::bail!(
+                "anchors.evm.not_found_timeout_secs = 0 would abandon every anchor the node \
+                 has not seen yet in the tick it was sent and re-anchor it: set it above \
+                 propagation and finality time (default 3600)"
+            );
+        }
         let claim = chain.network_claim();
         if aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(&claim) != Some(chain.chain_id())
         {

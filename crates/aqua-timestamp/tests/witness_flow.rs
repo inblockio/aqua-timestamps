@@ -1007,3 +1007,32 @@ async fn evm_custom_chain_the_sdk_cannot_name_refuses_to_start() {
     .await
     .expect("a custom chain id the SDK names starts");
 }
+
+/// OW1.6b N8: `anchors.evm.not_found_timeout_secs = 0` refuses to start: an
+/// anchor a lagging node answers "not found" in the tick it was sent would be
+/// abandoned at once and re-anchored, again and again.
+#[tokio::test]
+async fn evm_zero_not_found_timeout_refuses_to_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nnot_found_timeout_secs = 0",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let err = match build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    {
+        Ok(_) => panic!("a zero not-found timeout must refuse to start"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("anchors.evm.not_found_timeout_secs"), "{err}");
+}
