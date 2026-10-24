@@ -425,6 +425,45 @@ async fn b_qtsa_payload_timestamp_is_token_gentime() {
     }
 }
 
+// ---- G: qTSA network label --------------------------------------------------------------------
+
+/// A TSA provider that labels its answer with an operator name (the label `deploy/config.toml`
+/// carried for `[anchors.qtsa]`) instead of the SDK's TSA network label.
+struct OperatorLabelTsa;
+
+#[async_trait]
+impl AnchorProvider for OperatorLabelTsa {
+    async fn create_timestamp(&self, merkle_root_hex: &str) -> Result<TimestampValue, AnchorError> {
+        let mut value = TestTsa.create_timestamp(merkle_root_hex).await?;
+        value.network = "sectigo-qualified-tsa".to_string();
+        Ok(value)
+    }
+}
+
+/// Audit G: the qTSA payload's `network` is the label the SDK's TSA template requires
+/// (`timestamp_tsa.json`: `"const": "tsa"`), whatever label the provider or the operator
+/// config uses, and the witness then verifies in the SDK.
+#[tokio::test]
+async fn g_qtsa_network_label_is_the_sdk_tsa_label() {
+    let a = client_tree("ow1_g_label_a");
+    let b = client_tree("ow1_g_label_b");
+    let ctx = ctx(
+        Some(Arc::new(ChainAnchor)),
+        Some(Arc::new(OperatorLabelTsa)),
+    )
+    .await;
+    let ws = seal(&[&a, &b], &ctx).await;
+    for c in [&a, &b] {
+        let w = witness_for(&ws, &c.leaf, AnchorMethod::Qtsa);
+        assert_eq!(
+            payloads(w)["network"],
+            Value::String("tsa".to_string()),
+            "[G] qTSA payload network is not the SDK TSA label"
+        );
+        assert_witness_verifies(&verify(c, &[w]), w);
+    }
+}
+
 // ---- C: never a stub ------------------------------------------------------------------------
 
 fn stub_witnesses(ws: &[MintedWitness]) -> Vec<String> {
