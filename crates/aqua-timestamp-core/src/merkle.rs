@@ -81,7 +81,10 @@ pub fn merkle_root_for_leaves(leaves: &[Hash32]) -> Hash32 {
         return empty_merkle_root();
     }
     let owned: Vec<Vec<u8>> = leaves.iter().map(|h| h.to_vec()).collect();
-    let root = sdk_merkle_root(&owned, &HashType::Sha3_256);
+    // Since aqua-rs-sdk#200 the SDK returns `None` only for an empty slice, which
+    // is handled above; for every non-empty input the root is byte-identical.
+    let root =
+        sdk_merkle_root(&owned, &HashType::Sha3_256).expect("non-empty leaf set always has a root");
     let mut out = [0u8; 32];
     out.copy_from_slice(&root);
     out

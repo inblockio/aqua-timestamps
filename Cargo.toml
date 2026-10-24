@@ -16,14 +16,19 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Train dependencies (aqua-ops train/train.toml, rules in
-# development-conventions/CONVENTIONS-dependency-pins.md): pinned by annotated
-# release tag, canonical https URL, one git source per repo. The tag is an alias;
-# compliance is judged on the commit Cargo.lock resolves. Move these only with
-# the train. aqua-evm-provider and aqua-tsa-provider are crates of the
-# aqua-rs-sdk repo and share its pin.
-aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0", default-features = false, features = ["native"] }
-aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0" }
-aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v6.0.0" }
+# development-conventions/CONVENTIONS-dependency-pins.md): normally pinned by
+# annotated release tag, canonical https URL, one git source per repo.
+# aqua-evm-provider and aqua-tsa-provider are crates of the aqua-rs-sdk repo and
+# share its pin.
+#
+# TEMPORARY (OW1, branch ow/1-dual-anchor): pinned by rev to aqua-rs-sdk main
+# b8859a16 for the two-phase batch producer (#213 prepare_batch_timestamp /
+# finish_batch_timestamp) and #238. No SDK release tag holds them yet (newest is
+# v7.0.0, 2026-10-18). The merge of this branch into aqua-timestamps main waits
+# for the release train: repin to the first release tag that contains b8859a16.
+aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4", default-features = false, features = ["native"] }
+aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
+aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
 aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.9.0", default-features = false, features = ["http"] }
 
 # Async + HTTP

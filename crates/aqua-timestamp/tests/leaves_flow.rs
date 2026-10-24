@@ -228,7 +228,7 @@ async fn submit_seal_and_fetch_epoch() {
         .map(|s| hex::decode(s.trim_start_matches("0x")).unwrap())
         .collect();
     sorted.sort();
-    let expected = merkle_root(&sorted, &HashType::Sha3_256);
+    let expected = merkle_root(&sorted, &HashType::Sha3_256).expect("non-empty leaf set");
     let expected_hex = format!("0x{}", hex::encode(expected));
     assert_eq!(rec["merkle_root"].as_str().unwrap(), expected_hex);
 }
