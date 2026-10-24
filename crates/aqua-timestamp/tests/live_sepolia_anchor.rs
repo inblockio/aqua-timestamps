@@ -82,6 +82,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf) -> Config {
                 rpc_url: SEPOLIA_RPC.to_string(),
                 chain: "sepolia".to_string(),
                 network_label: "sepolia".to_string(),
+                ..EvmAnchorConfig::default()
             },
             // The Sepolia anchor test exercises only the EVM path; leave
             // qTSA off so the test does not depend on Sectigo reachability.

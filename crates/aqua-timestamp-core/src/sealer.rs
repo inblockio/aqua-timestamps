@@ -21,12 +21,14 @@ use crate::accumulator::{Accumulator, SealedSnapshot};
 use crate::anchors::AnchorProvider;
 use crate::epoch::{EpochRecord, HASH_TYPE_LABEL};
 use crate::merkle::{empty_merkle_root, Hash32};
+use crate::selfcheck::{verify_minted_witness, SelfCheckHosts, SelfCheckVerdict};
 use crate::storage::{Store, StoreError};
 use crate::time::Clock;
 use crate::witness::{
     mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome, MintedWitness,
     PendingEpoch, WitnessError,
 };
+use aqua_rs_sdk::schema::timestamp::TimestampValue;
 
 /// Per-process configuration the sealer needs in addition to its
 /// already-required `(accumulator, store, clock, duration)` quad: which
@@ -52,7 +54,23 @@ pub struct WitnessContext {
     /// Live qTSA anchor provider. Required when `methods` holds
     /// [`AnchorMethod::Qtsa`].
     pub qtsa_anchor: Option<Arc<dyn AnchorProvider>>,
+    /// Hosts of the pre-serve self-check (OW1.4): every minted witness is
+    /// verified with the SDK before it is written for serving. Each enabled
+    /// method needs its host ([`Self::validate`]).
+    pub self_check: SelfCheckHosts,
+    /// The service DID every witness signature must name
+    /// (`did:pkh:eip155:1:<EIP-55 address>`, derived from `signer`).
+    pub service_did: String,
+    /// Test seam (feature `test-doubles`): runs on every freshly minted batch
+    /// of witnesses before the self-check; an `Err` stands for a mint
+    /// failure, a mutation for corruption between mint and serve.
+    #[cfg(feature = "test-doubles")]
+    pub after_mint: Option<AfterMint>,
 }
+
+/// See [`WitnessContext::after_mint`].
+#[cfg(feature = "test-doubles")]
+pub type AfterMint = Arc<dyn Fn(&mut Vec<MintedWitness>) -> Result<(), WitnessError> + Send + Sync>;
 
 impl WitnessContext {
     pub fn new(
@@ -61,6 +79,10 @@ impl WitnessContext {
         evm_network: String,
         methods: Vec<AnchorMethod>,
     ) -> Self {
+        let service_did = signer
+            .derive_did_pkh()
+            .map(|(did, _)| did)
+            .unwrap_or_default();
         Self {
             signer,
             service_eth_address,
@@ -68,7 +90,17 @@ impl WitnessContext {
             methods,
             evm_anchor: None,
             qtsa_anchor: None,
+            self_check: SelfCheckHosts::default(),
+            service_did,
+            #[cfg(feature = "test-doubles")]
+            after_mint: None,
         }
+    }
+
+    /// Builder-style: the self-check hosts.
+    pub fn with_self_check(mut self, hosts: SelfCheckHosts) -> Self {
+        self.self_check = hosts;
+        self
     }
 
     /// Builder-style: attach a live EVM anchor provider.
@@ -94,11 +126,24 @@ impl WitnessContext {
     /// Decision D51: every enabled method has a provider. A context that
     /// fails this must not start a sealer ([`seal_once`] refuses it before
     /// it closes the epoch).
+    ///
+    /// OW1.4: every enabled method also has its self-check host, and the
+    /// service DID is known; without them no witness could be served.
     pub fn validate(&self) -> Result<(), SealError> {
-        match self.methods.iter().find(|m| self.provider(**m).is_none()) {
-            Some(m) => Err(SealError::MissingProvider(*m)),
-            None => Ok(()),
+        if let Some(m) = self.methods.iter().find(|m| self.provider(**m).is_none()) {
+            return Err(SealError::MissingProvider(*m));
         }
+        let host_missing = |m: &AnchorMethod| match m {
+            AnchorMethod::Evm => self.self_check.blockchain.is_none(),
+            AnchorMethod::Qtsa => self.self_check.tsa.is_none(),
+        };
+        if let Some(m) = self.methods.iter().find(|m| host_missing(m)) {
+            return Err(SealError::MissingSelfCheckHost(*m));
+        }
+        if self.service_did.is_empty() {
+            return Err(SealError::NoServiceDid);
+        }
+        Ok(())
     }
 }
 
@@ -113,6 +158,13 @@ pub enum SealError {
         .0.as_str()
     )]
     MissingProvider(AnchorMethod),
+    #[error(
+        "anchor method {} is enabled but has no self-check host; witnesses could never be served",
+        .0.as_str()
+    )]
+    MissingSelfCheckHost(AnchorMethod),
+    #[error("the service DID could not be derived from the signer")]
+    NoServiceDid,
 }
 
 /// A test-driven seal request. The contained `now` value is used as the
@@ -124,7 +176,7 @@ pub struct SealTick {
 }
 
 /// Run a single seal cycle and return the persisted record together with
-/// every witness minted during the cycle.
+/// every witness minted and served during the cycle.
 ///
 /// `closed_at` is the moment the seal observed; the next epoch opens at
 /// `closed_at` and closes `duration_secs` later. When `witness_ctx` is
@@ -132,18 +184,23 @@ pub struct SealTick {
 /// minting (used by accumulator-only tests and by the M2-shape callers
 /// that have not yet plumbed in a signer).
 ///
-/// Anchoring follows decision D51. Each tick first retries every
-/// outstanding anchor ([`retry_pending`]), then closes the epoch: one SDK
-/// batch, its root ([`EpochBatch::anchor_root`], `0x1620` + digest,
-/// PCA-0015 section 3.8) anchored once per method. A method whose anchor
-/// succeeds is minted now. A method whose anchor fails is minted never as a
-/// placeholder: its witnesses stay pending, the prepared batch is persisted
-/// with the epoch ([`PendingEpoch`]) and every later tick anchors the SAME
-/// root again until it succeeds. The methods are independent. A context
-/// with an enabled method and no provider is refused before the epoch is
-/// closed ([`WitnessContext::validate`]).
+/// Anchoring follows decision D51 and the pre-serve self-check (OW1.4). Each
+/// tick first settles every outstanding epoch ([`retry_pending`]), then
+/// closes the epoch: one SDK batch, its root ([`EpochBatch::anchor_root`],
+/// `0x1620` + digest, PCA-0015 section 3.8). The closed epoch is persisted
+/// with every enabled method pending ([`PendingEpoch`]) BEFORE anything is
+/// anchored, so no later failure loses its leaves; it is then settled like
+/// any pending epoch ([`settle_method`]): anchor once per method (the anchor
+/// is stored in the pending record before minting), mint from the stored
+/// anchor, self-check every witness with the SDK
+/// ([`crate::selfcheck::verify_minted_witness`]) and only then write the
+/// witnesses to the serving partitions. Whatever fails leaves the method
+/// pending; every later tick retries until it succeeds (no backoff). The
+/// methods are independent. A context with an enabled method and no
+/// provider or self-check host is refused before the epoch is closed
+/// ([`WitnessContext::validate`]).
 ///
-/// The returned witnesses are every witness minted during the cycle: late
+/// The returned witnesses are every witness served during the cycle: late
 /// ones of earlier epochs (retries) first, then the closed epoch's.
 ///
 /// Empty epochs are never anchored and mint nothing: no batch, no provider
@@ -158,7 +215,7 @@ pub async fn seal_once(
     if let Some(ctx) = witness_ctx {
         ctx.validate()?;
     }
-    let (mut witnesses, down) = match witness_ctx {
+    let (mut witnesses, mut down) = match witness_ctx {
         Some(ctx) => retry_pending(store, ctx).await,
         None => (Vec::new(), HashSet::new()),
     };
@@ -168,47 +225,34 @@ pub async fn seal_once(
     let batch = EpochBatch::prepare(&leaves)?;
     let record = build_record(&snapshot, batch.as_ref())?;
 
-    let mut minted = Vec::new();
-    let mut pending = None;
-    if let (Some(ctx), Some(batch)) = (witness_ctx, batch.as_ref()) {
-        let mut outcomes = Vec::with_capacity(ctx.methods.len());
-        let mut pending_methods = Vec::new();
-        for method in &ctx.methods {
-            if down.contains(method) {
-                warn!(
-                    epoch_id = record.id,
-                    method = method.as_str(),
-                    "anchor provider failed earlier this tick; witnesses stay pending, retried next tick"
-                );
-                pending_methods.push(*method);
-                continue;
-            }
-            match anchor_root(ctx, *method, record.id, batch.anchor_root()).await {
-                Some(outcome) => outcomes.push((*method, outcome)),
-                None => pending_methods.push(*method),
-            }
+    // OW1.3 finding 2: the epoch and its leaves are durable, every method
+    // pending, before the first anchor call; a later anchor, mint, save or
+    // self-check failure leaves the method pending, never loses the leaves.
+    let pending = match (witness_ctx, batch.as_ref()) {
+        (Some(ctx), Some(batch)) if !ctx.methods.is_empty() => {
+            Some(PendingEpoch::new(&snapshot, batch, ctx.methods.clone()))
         }
-        minted =
-            mint_witnesses_for_epoch(&snapshot, batch, &outcomes, Arc::clone(&ctx.signer)).await?;
-        log_minted(&minted);
-        if !pending_methods.is_empty() {
-            pending = Some(PendingEpoch::new(&snapshot, batch, pending_methods));
-        }
-    }
+        _ => None,
+    };
+    store.persist_sealed_epoch_with_pending(&record, &snapshot.leaves, &[], pending.as_ref())?;
 
-    store.persist_sealed_epoch_with_pending(
-        &record,
-        &snapshot.leaves,
-        &minted,
-        pending.as_ref(),
-    )?;
+    let mut minted = Vec::new();
+    let mut still_pending = Vec::new();
+    if let (Some(ctx), Some(mut pending)) = (witness_ctx, pending) {
+        for method in pending.methods.clone() {
+            if let Some(ws) = settle_method(store, ctx, &mut pending, method, &mut down).await {
+                minted.extend(ws);
+            }
+        }
+        still_pending = pending.methods.clone();
+    }
 
     info!(
         id = record.id,
         root = %record.merkle_root_hex(),
         leaves = record.leaf_count,
         witnesses = minted.len(),
-        pending = ?pending.as_ref().map(|p| p.methods.iter().map(|m| m.as_str()).collect::<Vec<_>>()),
+        pending = ?still_pending.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
         "epoch sealed"
     );
     witnesses.extend(minted);
@@ -227,18 +271,16 @@ fn log_minted(minted: &[MintedWitness]) {
     }
 }
 
-/// Retry every outstanding anchor, oldest epoch first (decision D51).
+/// Settle every outstanding epoch, oldest first (decision D51).
 ///
-/// Each pending `(epoch, method)` anchors the epoch's stored root through
-/// the method's provider; on success the witnesses are minted from the
-/// stored [`PendingEpoch`] (the SDK's own prepared batch, so the same root,
-/// nonces and proofs) and persisted together with the shrunken pending
-/// record. Per-tick cost: at most one failing provider call per method; a
-/// method whose call failed is skipped for the rest of the tick (returned
-/// in the second tuple element, so the new epoch does not call it again).
-/// The qTSA provider's own request throttle applies to every call. A
-/// pending method that is no longer enabled stays pending and is logged.
-/// Nothing here fails the seal: errors are logged and retried next tick.
+/// Each pending `(epoch, method)` goes through [`settle_method`]. Per-tick
+/// cost: at most one failing provider call per method; a method whose call
+/// failed is skipped for the rest of the tick (returned in the second tuple
+/// element, so the new epoch does not call it again). A stored anchor is
+/// re-minted and re-checked without a provider call. The qTSA provider's own
+/// request throttle applies to every call. A pending method that is no
+/// longer enabled stays pending and is logged. Nothing here fails the seal:
+/// errors are logged and retried next tick.
 async fn retry_pending(
     store: &Store,
     ctx: &WitnessContext,
@@ -254,70 +296,197 @@ async fn retry_pending(
     };
     for mut pending in pendings {
         for method in pending.methods.clone() {
-            if !ctx.methods.contains(&method) {
-                warn!(
+            if let Some(minted) = settle_method(store, ctx, &mut pending, method, &mut down).await {
+                info!(
                     epoch_id = pending.epoch_id,
                     method = method.as_str(),
-                    "pending anchor for a disabled method; left pending"
+                    witnesses = minted.len(),
+                    "pending anchor minted"
                 );
-                continue;
+                out.extend(minted);
             }
-            if down.contains(&method) {
-                continue;
-            }
-            let Some(outcome) =
-                anchor_root(ctx, method, pending.epoch_id, pending.anchor_root()).await
-            else {
-                down.insert(method);
-                continue;
-            };
-            let minted = match pending.restore() {
-                Ok((snapshot, batch)) => {
-                    mint_witnesses_for_epoch(
-                        &snapshot,
-                        &batch,
-                        &[(method, outcome)],
-                        Arc::clone(&ctx.signer),
-                    )
-                    .await
-                }
-                Err(e) => Err(e),
-            };
-            let minted = match minted {
-                Ok(m) => m,
-                Err(e) => {
-                    error!(
-                        epoch_id = pending.epoch_id,
-                        method = method.as_str(),
-                        error = %e,
-                        "minting a pending anchor failed; retried next tick"
-                    );
-                    continue;
-                }
-            };
-            let mut remaining = pending.clone();
-            remaining.methods.retain(|m| *m != method);
-            if let Err(e) = store.persist_pending_minted(&remaining, method, &minted) {
-                error!(
-                    epoch_id = pending.epoch_id,
-                    method = method.as_str(),
-                    error = %e,
-                    "persisting a pending anchor's witnesses failed; retried next tick"
-                );
-                continue;
-            }
-            info!(
-                epoch_id = pending.epoch_id,
-                method = method.as_str(),
-                witnesses = minted.len(),
-                "pending anchor minted"
-            );
-            log_minted(&minted);
-            out.extend(minted);
-            pending = remaining;
         }
     }
     (out, down)
+}
+
+/// Take one pending `(epoch, method)` as far as it goes this tick; `Some`
+/// with the witnesses when they were self-checked and written for serving
+/// (and `pending` no longer lists `method`), `None` when the method stays
+/// pending.
+///
+/// 1. Anchor: the stored anchor if there is one, else one provider call; a
+///    successful anchor is stored in the pending record before minting
+///    (OW1.3 finding 1), a failed call marks the method down for the tick.
+/// 2. Mint from the anchor through the SDK batch producer. A failure keeps
+///    the anchor; next tick mints again from it.
+/// 3. Self-check every witness ([`verify_minted_witness`]). Not yet final:
+///    anchor kept, re-checked next tick. A failure is logged as an error
+///    with epoch, method, leaf and the SDK's reason; it discards the stored
+///    anchor only when the anchor itself is at fault
+///    ([`SelfCheckVerdict::Failed`]), so the next tick re-anchors.
+/// 4. Write the witnesses for serving and drop the method (and its anchor)
+///    from the pending record in one atomic batch. A failure keeps the
+///    anchor.
+async fn settle_method(
+    store: &Store,
+    ctx: &WitnessContext,
+    pending: &mut PendingEpoch,
+    method: AnchorMethod,
+    down: &mut HashSet<AnchorMethod>,
+) -> Option<Vec<MintedWitness>> {
+    let epoch_id = pending.epoch_id;
+    if !ctx.methods.contains(&method) {
+        warn!(
+            epoch_id,
+            method = method.as_str(),
+            "pending anchor for a disabled method; left pending"
+        );
+        return None;
+    }
+
+    // 1. The anchor.
+    let value = match pending.anchor(method) {
+        Some(value) => value.clone(),
+        None => {
+            if down.contains(&method) {
+                warn!(
+                    epoch_id,
+                    method = method.as_str(),
+                    "anchor provider failed earlier this tick; witnesses stay pending, retried next tick"
+                );
+                return None;
+            }
+            let Some(value) = anchor_root(ctx, method, epoch_id, pending.anchor_root()).await
+            else {
+                down.insert(method);
+                return None;
+            };
+            pending.set_anchor(method, value.clone());
+            if let Err(e) = store.save_pending(pending) {
+                error!(
+                    epoch_id,
+                    method = method.as_str(),
+                    error = %e,
+                    "storing the anchor before minting failed; minting continues from memory"
+                );
+            }
+            value
+        }
+    };
+
+    // 2. Mint from the anchor.
+    let outcome = MethodAnchorOutcome::from_value(method, &value);
+    let minted = match pending.restore() {
+        Ok((snapshot, batch)) => {
+            mint_witnesses_for_epoch(
+                &snapshot,
+                &batch,
+                &[(method, outcome)],
+                Arc::clone(&ctx.signer),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    #[cfg(feature = "test-doubles")]
+    let minted = minted.and_then(|mut ws| match &ctx.after_mint {
+        Some(hook) => hook(&mut ws).map(|()| ws),
+        None => Ok(ws),
+    });
+    let minted = match minted {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                epoch_id,
+                method = method.as_str(),
+                error = %e,
+                "minting from the stored anchor failed; anchor kept, retried next tick"
+            );
+            return None;
+        }
+    };
+
+    // 3. Self-check every witness with the SDK before it is served.
+    let verdicts = self_check(ctx, &minted).await;
+    for (w, verdict) in minted.iter().zip(verdicts.iter()) {
+        let leaf = format!("0x{}", hex::encode(w.leaf));
+        match verdict {
+            SelfCheckVerdict::Verified => {}
+            SelfCheckVerdict::NotYet(reason) => {
+                info!(
+                    epoch_id,
+                    method = method.as_str(),
+                    leaf = %leaf,
+                    reason = %reason,
+                    "witness not verifiable yet; not served, anchor kept, re-checked next tick"
+                );
+                return None;
+            }
+            SelfCheckVerdict::Failed {
+                reason,
+                anchor_at_fault,
+            } => {
+                error!(
+                    epoch_id,
+                    method = method.as_str(),
+                    leaf = %leaf,
+                    reason = %reason,
+                    anchor_discarded = *anchor_at_fault,
+                    "witness self-check failed; not served, method stays pending"
+                );
+                if *anchor_at_fault {
+                    pending.drop_anchor(method);
+                    if let Err(e) = store.save_pending(pending) {
+                        error!(epoch_id, method = method.as_str(), error = %e,
+                            "discarding the failed anchor failed; retried next tick");
+                    }
+                }
+                return None;
+            }
+        }
+    }
+
+    // 4. Serve.
+    let mut remaining = pending.clone();
+    remaining.methods.retain(|m| *m != method);
+    remaining.drop_anchor(method);
+    if let Err(e) = store.persist_pending_minted(&remaining, method, &minted) {
+        error!(
+            epoch_id,
+            method = method.as_str(),
+            error = %e,
+            "persisting self-checked witnesses failed; anchor kept, retried next tick"
+        );
+        return None;
+    }
+    *pending = remaining;
+    log_minted(&minted);
+    Some(minted)
+}
+
+/// [`verify_minted_witness`] over every witness, on a blocking thread (the
+/// SDK hosts block). A panicked check counts as a failure, never as a pass.
+async fn self_check(ctx: &WitnessContext, minted: &[MintedWitness]) -> Vec<SelfCheckVerdict> {
+    let hosts = ctx.self_check.clone();
+    let did = ctx.service_did.clone();
+    let ws = minted.to_vec();
+    let n = ws.len();
+    tokio::task::spawn_blocking(move || {
+        ws.iter()
+            .map(|w| verify_minted_witness(w, &did, &hosts))
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        vec![
+            SelfCheckVerdict::Failed {
+                reason: format!("self-check task: {e}"),
+                anchor_at_fault: false,
+            };
+            n
+        ]
+    })
 }
 
 /// Anchor `root` (epoch `epoch_id`) through `method`'s provider. `None` when
@@ -328,7 +497,7 @@ async fn anchor_root(
     method: AnchorMethod,
     epoch_id: u64,
     root: &str,
-) -> Option<MethodAnchorOutcome> {
+) -> Option<TimestampValue> {
     let anchor = ctx.provider(method)?;
     match anchor.create_timestamp(root).await {
         Ok(value) => {
@@ -341,10 +510,7 @@ async fn anchor_root(
                 tsa_provider = %value.tsa_provider,
                 "anchor submitted"
             );
-            Some(match method {
-                AnchorMethod::Evm => MethodAnchorOutcome::from_evm_timestamp_value(&value),
-                AnchorMethod::Qtsa => MethodAnchorOutcome::from_tsa_timestamp_value(&value),
-            })
+            Some(value)
         }
         Err(e) => {
             warn!(
@@ -570,7 +736,8 @@ pub fn run_sealer_with_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anchors::{FailingProvider, MockProvider};
+    use crate::anchors::FailingProvider;
+    use crate::selfcheck::doubles::{SimChain, SimTsa};
     use crate::time::FixedClock;
     use aqua_rs_sdk::schema::{timestamp::TimestampValue, AnyRevision};
     use tempfile::tempdir;
@@ -592,12 +759,23 @@ mod tests {
             "sepolia".into(),
             vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
         )
-        .with_evm_anchor(Arc::new(MockProvider {
-            value: canned_evm_value(),
-        }))
-        .with_qtsa_anchor(Arc::new(MockProvider {
-            value: canned_tsa_value(),
-        }))
+        .with_sims()
+    }
+
+    impl WitnessContext {
+        /// The canned anchors as self-checkable test doubles: each provider
+        /// is also the host its anchors are judged by.
+        fn with_sims(self) -> Self {
+            let chain = Arc::new(SimChain::new(canned_evm_value()));
+            let tsa = Arc::new(SimTsa::new(canned_tsa_value()));
+            self.with_evm_anchor(chain.clone())
+                .with_qtsa_anchor(tsa.clone())
+                .with_self_check(SelfCheckHosts {
+                    blockchain: Some(chain),
+                    tsa: Some(tsa),
+                    ..SelfCheckHosts::default()
+                })
+        }
     }
 
     fn canned_evm_value() -> TimestampValue {
@@ -638,10 +816,7 @@ mod tests {
         let acc = Accumulator::new(1, 0, 60);
         acc.append_batch(&[[1u8; 32]], DID_A);
         let signer = build_signer().await;
-        let mock: Arc<dyn AnchorProvider> = Arc::new(MockProvider {
-            value: canned_evm_value(),
-        });
-        let ctx = base_ctx(signer).with_evm_anchor(Arc::clone(&mock));
+        let ctx = base_ctx(signer);
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         let evm_payloads = extract_evm_payloads(&witnesses);
         assert_eq!(evm_payloads.len(), 1);
@@ -782,10 +957,7 @@ mod tests {
         let acc = Accumulator::new(1, 0, 60);
         acc.append_batch(&[[1u8; 32]], DID_A);
         let signer = build_signer().await;
-        let mock: Arc<dyn AnchorProvider> = Arc::new(MockProvider {
-            value: canned_tsa_value(),
-        });
-        let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&mock));
+        let ctx = base_ctx(signer);
         let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         let qtsa_payloads = extract_qtsa_payloads(&witnesses);
         assert_eq!(qtsa_payloads.len(), 1);

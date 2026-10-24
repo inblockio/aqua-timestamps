@@ -832,6 +832,7 @@ dependencies = [
  "aqua-evm-provider",
  "aqua-qualified-pki",
  "aqua-rs-sdk",
+ "aqua-timestamp-core",
  "aqua-tsa-provider",
  "async-trait",
  "base64 0.22.1",
@@ -852,6 +853,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "x509-cert",
  "x509-tsp",
 ]

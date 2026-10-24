@@ -285,6 +285,15 @@ impl Store {
         Ok(())
     }
 
+    /// Overwrite a pending record (its stored anchors changed, OW1.4). The
+    /// per-leaf pending lookups are unchanged: the methods are the same.
+    pub fn save_pending(&self, pending: &PendingEpoch) -> Result<(), StoreError> {
+        self.pending_anchors
+            .insert(pending.epoch_id.to_be_bytes(), serde_json::to_vec(pending)?)?;
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
     /// Every epoch with an outstanding anchor, oldest first.
     pub fn list_pending_epochs(&self) -> Result<Vec<PendingEpoch>, StoreError> {
         self.pending_anchors

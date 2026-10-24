@@ -80,6 +80,12 @@ pub enum SealDriver {
 pub struct AnchorOverrides {
     pub evm: Option<Arc<dyn AnchorProvider>>,
     pub qtsa: Option<Arc<dyn AnchorProvider>>,
+    /// Chain host the pre-serve self-check judges EVM witnesses against, in
+    /// place of `EthBlockchainHost` on `[anchors.evm].rpc_url`.
+    pub evm_check_host: Option<Arc<dyn aqua_rs_sdk::BlockchainHost>>,
+    /// TSA host the pre-serve self-check judges qTSA tokens with, in place of
+    /// `TsaWebHost::new()` (the reader's default EU trust list validation).
+    pub tsa_check_host: Option<Arc<dyn aqua_rs_sdk::WebHost>>,
 }
 
 pub async fn build_app(
@@ -230,9 +236,50 @@ pub async fn build_app_with_anchors(
     if let Some(anchor) = qtsa_anchor {
         witness_ctx = witness_ctx.with_qtsa_anchor(anchor);
     }
+    // Pre-serve self-check (OW1.4): every minted witness is verified with
+    // the SDK, against the reader's default hosts, before it is served.
+    let evm_check_host: Option<Arc<dyn aqua_rs_sdk::BlockchainHost>> = match (
+        witness_ctx.methods.contains(&AnchorMethod::Evm),
+        anchors.evm_check_host,
+    ) {
+        (false, _) => None,
+        (true, Some(host)) => Some(host),
+        (true, None) => {
+            let chain_id = aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(
+                &evm_anchor_cfg.network_label,
+            )
+            .with_context(|| {
+                format!(
+                    "self-check: anchors.evm.network_label {:?} is not a network the SDK verifies",
+                    evm_anchor_cfg.network_label
+                )
+            })?;
+            Some(Arc::new(
+                aqua_evm_provider::EthBlockchainHost::new(tokio::runtime::Handle::current())
+                    .with_endpoint(chain_id, evm_anchor_cfg.rpc_url.clone()),
+            ))
+        }
+    };
+    let tsa_check_host: Option<Arc<dyn aqua_rs_sdk::WebHost>> = match (
+        witness_ctx.methods.contains(&AnchorMethod::Qtsa),
+        anchors.tsa_check_host,
+    ) {
+        (false, _) => None,
+        (true, Some(host)) => Some(host),
+        (true, None) => Some(Arc::new(aqua_tsa_provider::TsaWebHost::new())),
+    };
+    info!(
+        evm_finality = ?evm_anchor_cfg.self_check_finality,
+        "pre-serve self-check enabled"
+    );
+    witness_ctx = witness_ctx.with_self_check(aqua_timestamp_core::selfcheck::SelfCheckHosts {
+        blockchain: evm_check_host,
+        tsa: tsa_check_host,
+        evm_finality: evm_anchor_cfg.self_check_finality,
+    });
     witness_ctx
         .validate()
-        .context("anchor providers (decision D51)")?;
+        .context("anchor providers and self-check hosts (decision D51, OW1.4)")?;
 
     // EventBus: fan-out broadcast channel for SSE subscribers. Created once
     // here so both the sealer task and the AppState share the same sender.

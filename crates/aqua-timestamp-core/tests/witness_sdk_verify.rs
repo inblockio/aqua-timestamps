@@ -33,6 +33,7 @@ use aqua_rs_sdk::{Aquafier, QualifiedVerifyLevel, Secp256k1Signer, VerificationR
 use aqua_timestamp_core::accumulator::Accumulator;
 use aqua_timestamp_core::anchors::{AnchorError, AnchorProvider, FailingProvider};
 use aqua_timestamp_core::sealer::{seal_once, WitnessContext};
+use aqua_timestamp_core::selfcheck::SelfCheckHosts;
 use aqua_timestamp_core::storage::Store;
 use aqua_timestamp_core::witness::{revision_wire_hex, AnchorMethod, MintedWitness};
 use aqua_tsa_provider::TsaWebHost;
@@ -152,7 +153,12 @@ async fn ctx(
     );
     ctx.evm_anchor = evm;
     ctx.qtsa_anchor = qtsa;
-    ctx
+    // OW1.4: the pre-serve self-check judges with the reader's hosts.
+    ctx.with_self_check(SelfCheckHosts {
+        blockchain: Some(Arc::new(evm_chain::HonestChain)),
+        tsa: Some(Arc::new(tsa_host())),
+        ..SelfCheckHosts::default()
+    })
 }
 
 /// A client's tree (one file genesis) and the file it covers. Its tip digest is the leaf.

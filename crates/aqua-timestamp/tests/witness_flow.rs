@@ -30,8 +30,9 @@ use aqua_timestamp::{
     identity::{IdentityClaimOverrides, ServiceIdentity},
     AnchorOverrides, SealDriver,
 };
-use aqua_timestamp_core::anchors::{AnchorProvider, FailingProvider, MockProvider};
+use aqua_timestamp_core::anchors::FailingProvider;
 use aqua_timestamp_core::sealer::SealTick;
+use aqua_timestamp_core::selfcheck::doubles::{SimChain, SimTsa};
 use axum::{
     body::{to_bytes, Body},
     http::{Method, Request, StatusCode},
@@ -43,13 +44,13 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-/// Offline anchor providers for route tests: fixed anchor facts (these
-/// witnesses are not meant to verify against a chain or a TSA; the SDK
-/// verification of minted witnesses lives in aqua-timestamp-core's
-/// `witness_sdk_verify` suite).
-fn canned_evm() -> Arc<dyn AnchorProvider> {
-    Arc::new(MockProvider {
-        value: TimestampValue::new(
+/// Offline anchor facts for route tests. They are served only after the
+/// pre-serve self-check, here against simulated hosts ([`canned_anchors`]);
+/// the SDK verification of minted witnesses against the real TSA host lives
+/// in aqua-timestamp-core's `witness_sdk_verify` suite.
+fn canned_evm_value() -> TimestampValue {
+    {
+        TimestampValue::new(
             vec![],
             "0xCAFE000000000000000000000000000000000000".into(),
             String::new(),
@@ -61,13 +62,13 @@ fn canned_evm() -> Arc<dyn AnchorProvider> {
             1,
             0,
             String::new(),
-        ),
-    })
+        )
+    }
 }
 
-fn canned_qtsa() -> Arc<dyn AnchorProvider> {
-    Arc::new(MockProvider {
-        value: TimestampValue::new(
+fn canned_qtsa_value() -> TimestampValue {
+    {
+        TimestampValue::new(
             vec![],
             String::new(),
             "Canned Test TSA".into(),
@@ -79,14 +80,20 @@ fn canned_qtsa() -> Arc<dyn AnchorProvider> {
             1,
             0,
             String::new(),
-        ),
-    })
+        )
+    }
 }
 
+/// The canned anchors as the pre-serve self-check's test doubles (OW1.4):
+/// each provider is also the host its own anchors are judged by.
 fn canned_anchors() -> AnchorOverrides {
+    let chain = Arc::new(SimChain::new(canned_evm_value()));
+    let tsa = Arc::new(SimTsa::new(canned_qtsa_value()));
     AnchorOverrides {
-        evm: Some(canned_evm()),
-        qtsa: Some(canned_qtsa()),
+        evm: Some(chain.clone()),
+        qtsa: Some(tsa.clone()),
+        evm_check_host: Some(chain),
+        tsa_check_host: Some(tsa),
     }
 }
 
@@ -257,6 +264,12 @@ async fn drain_seal(harness: &Harness, now: u64) {
     harness.seal_tx.send(SealTick { now }).await.unwrap();
     // Yield enough times for the seal task to drain the queue without
     // closing the channel (other tests in the same harness may seal too).
+    for _ in 0..40 {
+        tokio::task::yield_now().await;
+    }
+    // The pre-serve self-check (OW1.4) runs on a blocking thread: give the
+    // seal task real time to finish it before the test reads the routes.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     for _ in 0..40 {
         tokio::task::yield_now().await;
     }
@@ -648,7 +661,7 @@ async fn by_leaf_answers_202_pending_for_a_pending_method() {
             evm: Some(Arc::new(FailingProvider {
                 message: "synthetic outage".into(),
             })),
-            qtsa: Some(canned_qtsa()),
+            ..canned_anchors()
         },
     )
     .await

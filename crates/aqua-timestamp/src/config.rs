@@ -236,6 +236,15 @@ pub struct EvmAnchorConfig {
     /// human-readable network name in witnesses.
     #[serde(default = "default_evm_network")]
     pub network_label: String,
+
+    /// EVM finality a witness needs before the pre-serve self-check (OW1.4)
+    /// lets it be served: `"finalized"` (default), `"safe"` or
+    /// `{ confirmations = N }`. The default is the SDK reader's own default;
+    /// a witness served below it would not verify for a default reader.
+    /// Until then the witness stays pending and is re-checked every tick,
+    /// without a second transaction.
+    #[serde(default)]
+    pub self_check_finality: aqua_rs_sdk::core::evm_anchor::EvmFinalityRequirement,
 }
 
 fn default_evm_enabled() -> bool {
@@ -255,6 +264,7 @@ impl Default for EvmAnchorConfig {
             rpc_url: default_evm_rpc_url(),
             chain: default_evm_chain(),
             network_label: default_evm_network(),
+            self_check_finality: Default::default(),
         }
     }
 }

@@ -47,6 +47,8 @@ alloy              = { workspace = true }
 async-trait        = { workspace = true }
 
 [dev-dependencies]
+# OW1.4: the self-check test doubles (simulated chain and TSA) for route tests.
+aqua-timestamp-core = { path = "../aqua-timestamp-core", features = ["test-doubles"] }
 reqwest = { workspace = true }
 tokio   = { workspace = true }
 serde_json = { workspace = true }

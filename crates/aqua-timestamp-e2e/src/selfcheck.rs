@@ -24,8 +24,8 @@ use aqua_timestamp::{
     identity::{IdentityClaimOverrides, ServiceIdentity},
     AnchorOverrides, SealDriver,
 };
-use aqua_timestamp_core::anchors::MockProvider;
 use aqua_timestamp_core::sealer::SealTick;
+use aqua_timestamp_core::selfcheck::doubles::{SimChain, SimTsa};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -246,24 +246,26 @@ fn offline_anchors() -> AnchorOverrides {
             String::new(),
         )
     };
+    // OW1.4: each simulated anchor is also the host the pre-serve self-check
+    // judges it by.
+    let chain = Arc::new(SimChain::new(fact(
+        "0xCAFE000000000000000000000000000000000000",
+        "",
+        format!("0x{}", "ab".repeat(32)),
+        "0xDEAD000000000000000000000000000000000000",
+        "sepolia",
+    )));
+    let tsa = Arc::new(SimTsa::new(fact(
+        "",
+        "Offline Selfcheck TSA",
+        "AAAA".into(),
+        "http://tsa.test/",
+        "tsa",
+    )));
     AnchorOverrides {
-        evm: Some(Arc::new(MockProvider {
-            value: fact(
-                "0xCAFE000000000000000000000000000000000000",
-                "",
-                format!("0x{}", "ab".repeat(32)),
-                "0xDEAD000000000000000000000000000000000000",
-                "sepolia",
-            ),
-        })),
-        qtsa: Some(Arc::new(MockProvider {
-            value: fact(
-                "",
-                "Offline Selfcheck TSA",
-                "AAAA".into(),
-                "http://tsa.test/",
-                "tsa",
-            ),
-        })),
+        evm: Some(chain.clone()),
+        qtsa: Some(tsa.clone()),
+        evm_check_host: Some(chain),
+        tsa_check_host: Some(tsa),
     }
 }

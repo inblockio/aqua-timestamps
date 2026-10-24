@@ -6,6 +6,11 @@ license     = { workspace = true }
 repository  = { workspace = true }
 description = "Core types and primitives for the Aqua Aggregator (epoch, accumulator, witness minting)."
 
+[features]
+# Self-check test doubles (`selfcheck::doubles`): simulated chain and TSA that
+# are their own verification hosts. Tests and the offline e2e selfcheck only.
+test-doubles = []
+
 [dependencies]
 aqua-rs-sdk = { workspace = true }
 aqua-auth   = { workspace = true }
@@ -24,6 +29,8 @@ postcard = { workspace = true }
 tokio    = { workspace = true }
 
 [dev-dependencies]
+aqua-timestamp-core = { path = ".", features = ["test-doubles"] }
+tracing-subscriber = { workspace = true }
 aqua-evm-provider = { workspace = true }
 # OW1.1 (tests/witness_sdk_verify.rs): the SDK's TSA host as the reader's verifier,
 # and the crates the copied SDK test-token generator (tests/support/test_tsa.rs)

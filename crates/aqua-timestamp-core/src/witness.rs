@@ -142,6 +142,14 @@ pub struct MethodAnchorOutcome {
 }
 
 impl MethodAnchorOutcome {
+    /// The outcome of `method` from a provider's [`TimestampValue`].
+    pub fn from_value(method: AnchorMethod, value: &TimestampValue) -> Self {
+        match method {
+            AnchorMethod::Evm => Self::from_evm_timestamp_value(value),
+            AnchorMethod::Qtsa => Self::from_tsa_timestamp_value(value),
+        }
+    }
+
     /// Build an EVM outcome from a [`TimestampValue`] returned by a live
     /// provider. Only the anchor-derived fields are pulled across; the batch
     /// fields come from the SDK's prepared batch.
@@ -326,6 +334,21 @@ pub struct PendingEpoch {
     pub methods: Vec<AnchorMethod>,
     pub leaves: Vec<PendingLeaf>,
     pub batch: PreparedBatch,
+    /// Anchors that succeeded but whose witnesses are not served yet (OW1.4):
+    /// stored before minting, so a mint, save or not-yet-final self-check
+    /// retries from the same anchor and never spends a second transaction or
+    /// token for this root. Removed when the method's witnesses are served,
+    /// or discarded when the self-check finds the anchor itself at fault.
+    #[serde(default)]
+    pub anchors: Vec<StoredAnchor>,
+}
+
+/// One method's successful anchor of a [`PendingEpoch`]'s root, as the
+/// provider returned it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAnchor {
+    pub method: AnchorMethod,
+    pub value: TimestampValue,
 }
 
 /// A leaf of a [`PendingEpoch`]: `0x` + 64 hex, and its submitter.
@@ -352,7 +375,27 @@ impl PendingEpoch {
                 })
                 .collect(),
             batch: batch.prepared.clone(),
+            anchors: Vec::new(),
         }
+    }
+
+    /// The stored anchor of `method`, if one succeeded and is kept.
+    pub fn anchor(&self, method: AnchorMethod) -> Option<&TimestampValue> {
+        self.anchors
+            .iter()
+            .find(|a| a.method == method)
+            .map(|a| &a.value)
+    }
+
+    /// Store (or replace) `method`'s anchor.
+    pub fn set_anchor(&mut self, method: AnchorMethod, value: TimestampValue) {
+        self.drop_anchor(method);
+        self.anchors.push(StoredAnchor { method, value });
+    }
+
+    /// Discard `method`'s stored anchor.
+    pub fn drop_anchor(&mut self, method: AnchorMethod) {
+        self.anchors.retain(|a| a.method != method);
     }
 
     /// The anchored root every method of this epoch carries.

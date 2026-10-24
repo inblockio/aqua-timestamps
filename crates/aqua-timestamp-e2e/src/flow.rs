@@ -618,13 +618,22 @@ pub async fn run_full_flow(
 
     // ── 8. GET /trees/by-leaf/{leaf}?method=evm ──────────────────────────
     let by_leaf_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=evm");
-    let resp = http_get(&client, &by_leaf_url, Some(&token_primary)).await?;
-    if resp.status() == StatusCode::ACCEPTED {
-        // D51: the epoch's EVM anchor is outstanding; the server retries it
-        // every epoch tick and never serves a placeholder witness.
-        let b = resp.text().await.unwrap_or_default();
-        bail!("GET /trees/by-leaf: EVM anchor pending (HTTP 202) body={b}");
-    }
+    // A sealed epoch is not yet a served witness: the anchor may be
+    // outstanding (D51) or not final, and every witness passes the server's
+    // pre-serve self-check first (OW1.4). Poll on 202 within the budget.
+    let resp = loop {
+        let resp = http_get(&client, &by_leaf_url, Some(&token_primary)).await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            break resp;
+        }
+        if std::time::Instant::now() >= budget.deadline {
+            let b = resp.text().await.unwrap_or_default();
+            bail!(
+                "GET /trees/by-leaf: EVM witness still pending (HTTP 202) at the deadline body={b}"
+            );
+        }
+        tokio::time::sleep(budget.interval).await;
+    };
     if !resp.status().is_success() {
         let s = resp.status();
         let b = resp.text().await.unwrap_or_default();
