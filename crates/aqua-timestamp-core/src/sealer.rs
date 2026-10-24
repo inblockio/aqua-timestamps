@@ -60,6 +60,12 @@ pub struct WitnessContext {
     /// counts as dropped or reorged out: discarded, the next attempt
     /// re-anchors (OW1.6 H2). Config `anchors.evm.not_found_timeout_secs`.
     pub evm_not_found_timeout_secs: u64,
+    /// Anchors found at fault per (epoch, method) before the method is no
+    /// longer re-anchored for that epoch (OW1.6 M4: a systematic fault, such
+    /// as a sender or contract mismatch, would otherwise spend one
+    /// transaction per pending epoch per tick). Default
+    /// [`DEFAULT_MAX_ANCHOR_FAULTS`].
+    pub max_anchor_faults: u32,
     /// The service DID every witness signature must name
     /// (`did:pkh:eip155:1:<EIP-55 address>`, derived from `signer`).
     pub service_did: String,
@@ -73,6 +79,9 @@ pub struct WitnessContext {
 /// Default of [`WitnessContext::evm_not_found_timeout_secs`]: one hour,
 /// well past Sepolia and mainnet finality (about 13 minutes).
 pub const DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS: u64 = 3600;
+
+/// Default of [`WitnessContext::max_anchor_faults`].
+pub const DEFAULT_MAX_ANCHOR_FAULTS: u32 = 3;
 
 /// See [`WitnessContext::after_mint`].
 #[cfg(feature = "test-doubles")]
@@ -96,6 +105,7 @@ impl WitnessContext {
             qtsa_anchor: None,
             self_check: SelfCheckHosts::default(),
             evm_not_found_timeout_secs: DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS,
+            max_anchor_faults: DEFAULT_MAX_ANCHOR_FAULTS,
             service_did,
             #[cfg(feature = "test-doubles")]
             after_mint: None,
@@ -371,6 +381,17 @@ async fn settle_method(
                 );
                 return None;
             }
+            let faults = pending.anchor_fault_count(method);
+            if faults >= ctx.max_anchor_faults {
+                error!(
+                    epoch_id,
+                    method = method.as_str(),
+                    faults,
+                    "anchor found at fault too often; not re-anchored for this epoch, \
+                     witnesses stay pending until ops intervenes"
+                );
+                return None;
+            }
             let Some(value) = anchor_root(ctx, method, epoch_id, pending.anchor_root()).await
             else {
                 down.insert(method);
@@ -450,6 +471,17 @@ async fn settle_method(
                     "witness self-check failed; not served, method stays pending"
                 );
                 if *anchor_at_fault {
+                    // OW1.6 M4: counted, and no further anchor call for this
+                    // method in this tick.
+                    let faults = pending.count_anchor_fault(method);
+                    warn!(
+                        epoch_id,
+                        method = method.as_str(),
+                        faults,
+                        max = ctx.max_anchor_faults,
+                        "anchor at fault; method down for this tick"
+                    );
+                    down.insert(method);
                     pending.drop_anchor(method);
                     if let Err(e) = store.save_pending(pending) {
                         error!(epoch_id, method = method.as_str(), error = %e,

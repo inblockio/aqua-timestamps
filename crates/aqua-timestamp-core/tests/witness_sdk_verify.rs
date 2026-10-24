@@ -1319,3 +1319,63 @@ async fn ow16_f2_unstored_anchor_not_minted_method_down() {
     witness_for(&ws, &a.leaf, AnchorMethod::Evm);
     witness_for(&ws, &b.leaf, AnchorMethod::Evm);
 }
+
+/// An EVM provider whose transactions land on the honest chain, but whose returned anchor names
+/// another sender: the self-check finds the anchor itself at fault (SenderMismatch) every time.
+#[derive(Default)]
+struct WrongSenderAnchor(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl AnchorProvider for WrongSenderAnchor {
+    async fn create_timestamp(&self, merkle_root_hex: &str) -> Result<TimestampValue, AnchorError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut value = ChainAnchor.create_timestamp(merkle_root_hex).await?;
+        value.sender_account_address = "0x2222222222222222222222222222222222222222".into();
+        Ok(value)
+    }
+}
+
+/// OW1.6 M4: an anchor-fault verdict puts the method down for the rest of the tick (no anchor
+/// call for another pending epoch in that tick), and after the default 3 anchors at fault an
+/// (epoch, method) is not re-anchored again.
+#[tokio::test]
+async fn ow16_m4_reanchor_at_fault_capped_and_method_down() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_m4_a");
+    let b = client_tree("ow16_m4_b");
+    let evm = Arc::new(WrongSenderAnchor::default());
+    let mut c = ctx(Some(evm.clone()), None).await;
+    c.methods = vec![AnchorMethod::Evm];
+    let calls = || evm.0.load(std::sync::atomic::Ordering::SeqCst);
+
+    assert!(seal_into(&store, &[&a], &c).await.is_empty());
+    assert_eq!(calls(), 1);
+
+    let acc = Accumulator::new(2, EPOCH_CLOSE, EPOCH_SECS);
+    acc.append_batch(&[b.leaf], DID_B);
+    seal_once(&acc, &store, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS, Some(&c))
+        .await
+        .expect("seal_once");
+    assert_eq!(
+        calls(),
+        2,
+        "down after the fault: epoch 2 makes no call this tick"
+    );
+
+    tick_at(&store, &c, 3, EPOCH_CLOSE + 2 * EPOCH_SECS).await;
+    assert_eq!(calls(), 3, "epoch 1: third anchor at fault");
+    tick_at(&store, &c, 4, EPOCH_CLOSE + 3 * EPOCH_SECS).await;
+    assert_eq!(
+        calls(),
+        4,
+        "epoch 1 stopped after 3 faults; epoch 2 anchors"
+    );
+    tick_at(&store, &c, 5, EPOCH_CLOSE + 4 * EPOCH_SECS).await;
+    assert_eq!(calls(), 5, "epoch 1 stays stopped");
+    assert_eq!(
+        pending_methods(&store),
+        vec![(1, vec![AnchorMethod::Evm]), (2, vec![AnchorMethod::Evm])],
+        "stopped is still pending, never served"
+    );
+}

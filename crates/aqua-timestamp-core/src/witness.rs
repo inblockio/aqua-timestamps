@@ -350,6 +350,18 @@ pub struct PendingEpoch {
     /// or discarded when the self-check finds the anchor itself at fault.
     #[serde(default)]
     pub anchors: Vec<StoredAnchor>,
+    /// Anchors the self-check found at fault, per method (OW1.6 M4). After
+    /// [`crate::sealer::WitnessContext::max_anchor_faults`] the method is not
+    /// re-anchored for this epoch.
+    #[serde(default)]
+    pub anchor_faults: Vec<AnchorFaults>,
+}
+
+/// One method's count of anchors found at fault ([`PendingEpoch::anchor_faults`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorFaults {
+    pub method: AnchorMethod,
+    pub count: u32,
 }
 
 /// One method's successful anchor of a [`PendingEpoch`]'s root, as the
@@ -391,6 +403,7 @@ impl PendingEpoch {
                 .collect(),
             batch: batch.prepared.clone(),
             anchors: Vec::new(),
+            anchor_faults: Vec::new(),
         }
     }
 
@@ -422,6 +435,28 @@ impl PendingEpoch {
             None => {
                 a.first_seen = Some(now);
                 Some((now, true))
+            }
+        }
+    }
+
+    /// How many of `method`'s anchors were found at fault (OW1.6 M4).
+    pub fn anchor_fault_count(&self, method: AnchorMethod) -> u32 {
+        self.anchor_faults
+            .iter()
+            .find(|f| f.method == method)
+            .map_or(0, |f| f.count)
+    }
+
+    /// Count one more anchor of `method` found at fault; the new count.
+    pub fn count_anchor_fault(&mut self, method: AnchorMethod) -> u32 {
+        match self.anchor_faults.iter_mut().find(|f| f.method == method) {
+            Some(f) => {
+                f.count += 1;
+                f.count
+            }
+            None => {
+                self.anchor_faults.push(AnchorFaults { method, count: 1 });
+                1
             }
         }
     }
