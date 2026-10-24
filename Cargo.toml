@@ -29,6 +29,8 @@ rust-version = "1.85"
 aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4", default-features = false, features = ["native"] }
 aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
 aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
+# Test-only (OW1.1 TSA token fixture), same repo and pin as aqua-rs-sdk.
+aqua-qualified-pki = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
 aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.9.0", default-features = false, features = ["http"] }
 
 # Async + HTTP

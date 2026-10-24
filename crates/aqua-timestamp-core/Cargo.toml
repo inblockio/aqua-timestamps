@@ -25,6 +25,20 @@ tokio    = { workspace = true }
 
 [dev-dependencies]
 aqua-evm-provider = { workspace = true }
+# OW1.1 (tests/witness_sdk_verify.rs): the SDK's TSA host as the reader's verifier,
+# and the crates the copied SDK test-token generator (tests/support/test_tsa.rs)
+# needs; all already in the graph through aqua-tsa-provider.
+aqua-tsa-provider  = { workspace = true }
+aqua-qualified-pki = { workspace = true }
+base64    = "0.22"
+cms       = "0.2"
+const-oid = "0.9"
+der       = { version = "0.7", features = ["std"] }
+p256      = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+sha2      = "0.10"
+spki      = "0.7"
+x509-cert = "0.2"
+x509-tsp  = "0.1"
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
