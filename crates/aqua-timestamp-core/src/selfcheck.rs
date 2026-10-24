@@ -364,7 +364,9 @@ fn check_evm(payloads: &serde_json::Value, hosts: &SelfCheckHosts) -> SelfCheckV
                 // Configuration errors: nothing a later tick changes on its
                 // own, but the anchor is not at fault either.
                 R::UnsupportedNetwork | R::NetworkNotConfigured => SelfCheckVerdict::failed(text),
-                R::NotFound | R::NotIncluded => SelfCheckVerdict::Missing(text),
+                // Only an unknown tx times out (ruled). A tx the node knows but has
+                // not included keeps its nonce; a new anchor would queue behind it.
+                R::NotFound => SelfCheckVerdict::Missing(text),
                 _ => SelfCheckVerdict::NotYet(text),
             }
         }
