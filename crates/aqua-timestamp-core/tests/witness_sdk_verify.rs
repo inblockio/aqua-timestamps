@@ -33,7 +33,9 @@ use aqua_rs_sdk::{Aquafier, QualifiedVerifyLevel, Secp256k1Signer, VerificationR
 use aqua_timestamp_core::accumulator::Accumulator;
 use aqua_timestamp_core::anchors::{AnchorError, AnchorProvider, FailingProvider};
 use aqua_timestamp_core::sealer::{seal_once, WitnessContext};
-use aqua_timestamp_core::selfcheck::SelfCheckHosts;
+use aqua_timestamp_core::selfcheck::{
+    doubles::SimChain, verify_minted_witness, SelfCheckHosts, SelfCheckVerdict,
+};
 use aqua_timestamp_core::storage::Store;
 use aqua_timestamp_core::witness::{revision_wire_hex, AnchorMethod, MintedWitness};
 use aqua_tsa_provider::TsaWebHost;
@@ -729,5 +731,335 @@ async fn d51_pending_survives_store_reopen() {
     let late = next_tick(&store, &up).await;
     let w = witness_for(&late, &a.leaf, AnchorMethod::Qtsa);
     assert_witness_verifies(&verify(&a, &[w]), w);
+    assert!(pending_methods(&store).is_empty());
+}
+
+// ---- OW1.4: pre-serve self-check -----------------------------------------------------------
+
+/// Captures the sealer's log lines (tracing) for one test thread.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log sink").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogSink {
+    /// The process-wide sink. One global subscriber: a thread-local one loses events to the
+    /// callsite interest cache when other test threads run without a subscriber. Tests share
+    /// it and pick their own lines by their unique leaf.
+    fn global() -> Self {
+        static SINK: std::sync::OnceLock<LogSink> = std::sync::OnceLock::new();
+        SINK.get_or_init(|| {
+            let sink = LogSink::default();
+            let writer = sink.clone();
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .init();
+            sink
+        })
+        .clone()
+    }
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log sink")).into_owned()
+    }
+}
+
+/// Counts the calls of the wrapped provider and lets a test corrupt its answer.
+struct Counting<P> {
+    inner: P,
+    calls: std::sync::atomic::AtomicUsize,
+    corrupt_token_byte: bool,
+}
+
+impl<P> Counting<P> {
+    fn new(inner: P) -> Self {
+        Self {
+            inner,
+            calls: Default::default(),
+            corrupt_token_byte: false,
+        }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl<P: AnchorProvider> AnchorProvider for Counting<P> {
+    async fn create_timestamp(&self, merkle_root_hex: &str) -> Result<TimestampValue, AnchorError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut value = self.inner.create_timestamp(merkle_root_hex).await?;
+        if self.corrupt_token_byte {
+            // One byte of the TimeStampResp (the last byte: inside the CMS signature).
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let mut resp = b64.decode(&value.transaction_hash).expect("base64 token");
+            *resp.last_mut().expect("token bytes") ^= 0x01;
+            value.transaction_hash = b64.encode(resp);
+        }
+        Ok(value)
+    }
+}
+
+fn pending_anchor(store: &Store, method: AnchorMethod) -> Option<TimestampValue> {
+    store
+        .list_pending_epochs()
+        .expect("pending")
+        .first()
+        .and_then(|p| p.anchor(method).cloned())
+}
+
+/// A TSA token with one corrupted byte: the qTSA witness is not served, the method stays
+/// pending, an error with epoch, method, leaf and the SDK's reason is logged, and the stored
+/// token is discarded (the token itself is at fault), so the next tick asks the TSA again.
+#[tokio::test]
+async fn ow14_corrupted_tsa_token_not_served_pending() {
+    let logs = LogSink::global();
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow14_bad_token");
+    let mut bad = Counting::new(TestTsa);
+    bad.corrupt_token_byte = true;
+    let bad = Arc::new(bad);
+    let c = ctx(Some(Arc::new(ChainAnchor)), Some(bad.clone())).await;
+
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(
+        served.iter().all(|w| w.method != AnchorMethod::Qtsa),
+        "a witness whose token does not verify is never served"
+    );
+    assert!(store
+        .get_tip_for_leaf(&a.leaf, AnchorMethod::Qtsa)
+        .expect("store")
+        .is_none());
+    assert!(served.iter().any(|w| w.method == AnchorMethod::Evm));
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Qtsa])]);
+    assert!(
+        pending_anchor(&store, AnchorMethod::Qtsa).is_none(),
+        "anchor discarded"
+    );
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("witness self-check failed") && l.contains(&hex::encode(a.leaf)))
+        .unwrap_or_else(|| panic!("error logged: {text}"));
+    assert!(line.contains("ERROR"), "{line}");
+    assert!(
+        line.contains("epoch_id=1") && line.contains("method=\"qtsa\""),
+        "{line}"
+    );
+    assert!(line.contains("TSA token"), "{line}");
+
+    next_tick(&store, &c).await;
+    assert_eq!(
+        bad.calls(),
+        2,
+        "the discarded token is replaced by a new request"
+    );
+}
+
+/// Corruption between mint and serve (a changed shielding nonce in the timestamp payload): the
+/// SDK checks refuse the witness, it is not served, the method stays pending with its anchor
+/// kept, and the next tick re-mints from the stored anchor without a second provider call.
+#[tokio::test]
+async fn ow14_corrupted_nonce_not_served_pending() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow14_bad_nonce");
+    let evm = Arc::new(Counting::new(ChainAnchor));
+    let mut c = ctx(Some(evm.clone()), Some(Arc::new(TestTsa))).await;
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = once.clone();
+    c.after_mint = Some(Arc::new(move |ws: &mut Vec<MintedWitness>| {
+        if ws[0].method == AnchorMethod::Evm
+            && flag.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let mut obj = serde_json::to_value(&ws[0].object_revision).expect("object");
+            obj["payloads"]["shielding_nonce"] = Value::String(format!("0x{}", "00".repeat(32)));
+            ws[0].object_revision = serde_json::from_value(obj).expect("object parses");
+        }
+        Ok(())
+    }));
+
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(served.iter().all(|w| w.method != AnchorMethod::Evm));
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Evm])]);
+    assert!(
+        pending_anchor(&store, AnchorMethod::Evm).is_some(),
+        "anchor kept"
+    );
+
+    let late = next_tick(&store, &c).await;
+    let w = witness_for(&late, &a.leaf, AnchorMethod::Evm);
+    assert_witness_verifies(&verify(&a, &[w]), w);
+    assert_eq!(evm.calls(), 1, "re-minted from the stored anchor");
+    assert!(pending_methods(&store).is_empty());
+}
+
+/// The inclusion check itself: a witness whose shielding nonce was changed and which is then
+/// consistently re-hashed and re-signed passes the content-hash and signature checks and is
+/// refused by the batch inclusion check (not the anchor's fault).
+#[tokio::test]
+async fn ow14_corrupted_inclusion_refused_by_self_check() {
+    let a = client_tree("ow14_inclusion");
+    let c = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
+    let served = seal(&[&a], &c).await;
+    let good = witness_for(&served, &a.leaf, AnchorMethod::Evm).clone();
+    assert_eq!(
+        verify_minted_witness(&good, &c.service_did, &c.self_check),
+        SelfCheckVerdict::Verified
+    );
+
+    let mut obj = serde_json::to_value(&good.object_revision).expect("object");
+    obj["payloads"]["shielding_nonce"] = Value::String(format!("0x{}", "11".repeat(32)));
+    let object: AnyRevision = serde_json::from_value(obj).expect("object parses");
+    let AnyRevision::Typed(typed) = &object else {
+        panic!("typed object")
+    };
+    use aqua_rs_sdk::verification::Linkable;
+    let link = typed
+        .calculate_link(aqua_rs_sdk::primitives::HashType::Sha3_256)
+        .expect("link");
+    let sig = aqua_rs_sdk::Signer::sign_revision(
+        c.signer.as_ref(),
+        &link,
+        Method::Scalar,
+        aqua_rs_sdk::primitives::HashType::Sha3_256,
+    )
+    .await
+    .expect("sign");
+    let sig_link = sig
+        .calculate_link(aqua_rs_sdk::primitives::HashType::Sha3_256)
+        .expect("sig link");
+    let digest = |l: &aqua_rs_sdk::primitives::RevisionLink| -> [u8; 32] {
+        l.as_ref()[2..].try_into().expect("sha3 digest")
+    };
+    let mut bad = good.clone();
+    bad.object_hash = digest(&link);
+    bad.signature_hash = digest(&sig_link);
+    bad.object_revision = object;
+    bad.signature_revision = AnyRevision::Signature(sig);
+
+    match verify_minted_witness(&bad, &c.service_did, &c.self_check) {
+        SelfCheckVerdict::Failed {
+            reason,
+            anchor_at_fault,
+        } => {
+            assert!(reason.starts_with("batch inclusion"), "{reason}");
+            assert!(!anchor_at_fault);
+        }
+        other => panic!("inclusion corruption must fail, got {other:?}"),
+    }
+}
+
+fn sim_evm() -> Arc<SimChain> {
+    Arc::new(SimChain::new(TimestampValue::new(
+        vec![],
+        evm_chain::SENDER.to_string(),
+        String::new(),
+        format!("0x{}", "5e".repeat(32)),
+        evm_chain::CONTRACT.to_string(),
+        evm_chain::NETWORK.to_string(),
+        String::new(),
+        BLOCK_TIME,
+        1,
+        0,
+        String::new(),
+    )))
+}
+
+/// EVM transaction not final yet: the witness is not served and the method stays pending
+/// (not an error); once the chain finalizes it, a later tick serves it without a second anchor.
+#[tokio::test]
+async fn ow14_evm_not_final_then_served_without_second_anchor() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow14_finality");
+    let chain = sim_evm();
+    chain.set_final(false);
+    let mut c = ctx(Some(chain.clone()), Some(Arc::new(TestTsa))).await;
+    c.self_check.blockchain = Some(chain.clone());
+
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(served.iter().all(|w| w.method != AnchorMethod::Evm));
+    assert!(served.iter().any(|w| w.method == AnchorMethod::Qtsa));
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Evm])]);
+    assert!(next_tick(&store, &c).await.is_empty(), "still not final");
+
+    chain.set_final(true);
+    let acc = Accumulator::new(3, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS);
+    let (_r, late) = seal_once(
+        &acc,
+        &store,
+        EPOCH_CLOSE + 2 * EPOCH_SECS,
+        EPOCH_SECS,
+        Some(&c),
+    )
+    .await
+    .expect("seal");
+    witness_for(&late, &a.leaf, AnchorMethod::Evm);
+    assert_eq!(
+        chain.anchor_calls(),
+        1,
+        "no second anchor for the same root"
+    );
+    assert!(pending_methods(&store).is_empty());
+}
+
+/// A mint failure after a successful anchor (here: the new epoch's, every method): the leaves
+/// are not lost (the epoch is pending with both anchors stored), and the next tick mints from
+/// the stored anchors, each provider called once.
+#[tokio::test]
+async fn ow14_mint_failure_after_anchor_keeps_leaves_and_anchor() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow14_mint_fail_a");
+    let b = client_tree("ow14_mint_fail_b");
+    let evm = Arc::new(Counting::new(ChainAnchor));
+    let tsa = Arc::new(Counting::new(TestTsa));
+    let mut c = ctx(Some(evm.clone()), Some(tsa.clone())).await;
+    let failures = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+    let left = failures.clone();
+    c.after_mint = Some(Arc::new(move |_ws: &mut Vec<MintedWitness>| {
+        let n = left.load(std::sync::atomic::Ordering::SeqCst);
+        if n > 0 {
+            left.store(n - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err(aqua_timestamp_core::witness::WitnessError::Batch(
+                "synthetic mint failure".into(),
+            ));
+        }
+        Ok(())
+    }));
+
+    let served = seal_into(&store, &[&a, &b], &c).await;
+    assert!(served.is_empty());
+    assert_eq!(
+        pending_methods(&store),
+        vec![(1, vec![AnchorMethod::Evm, AnchorMethod::Qtsa])]
+    );
+    let pending = store.list_pending_epochs().expect("pending");
+    let leaves = pending[0].leaf_hashes().expect("leaves");
+    assert_eq!(leaves, vec![a.leaf, b.leaf], "leaves not lost");
+    assert!(pending[0].anchor(AnchorMethod::Evm).is_some());
+    assert!(pending[0].anchor(AnchorMethod::Qtsa).is_some());
+
+    let late = next_tick(&store, &c).await;
+    for client in [&a, &b] {
+        let e = witness_for(&late, &client.leaf, AnchorMethod::Evm);
+        let q = witness_for(&late, &client.leaf, AnchorMethod::Qtsa);
+        assert_witness_verifies(&verify(client, &[e, q]), e);
+    }
+    assert_eq!(
+        (evm.calls(), tsa.calls()),
+        (1, 1),
+        "no second transaction or token"
+    );
     assert!(pending_methods(&store).is_empty());
 }
