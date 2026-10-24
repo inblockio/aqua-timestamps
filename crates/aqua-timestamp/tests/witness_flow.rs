@@ -955,3 +955,55 @@ async fn legacy_tip_with_pending_resubmit_answers_202() {
     assert!(body["epoch"].as_u64().unwrap() > 1, "the new epoch: {body}");
     assert_eq!(body["leaf"], old_hex, "{body}");
 }
+
+/// OW1.6b F2: a custom chain id whose payload `network` (`evm:<id>`) the SDK
+/// cannot name (`custom:0`, or an id above 2^53-1) refuses to start: the
+/// self-check would answer every EVM witness "unsupported network" while each
+/// epoch still spends a transaction. A custom id the SDK names starts.
+#[tokio::test]
+async fn evm_custom_chain_the_sdk_cannot_name_refuses_to_start() {
+    for chain in ["custom:0", "custom:9007199254740992"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_anchor_toml(
+            tmp.path().to_path_buf(),
+            &format!("[anchors.evm]\nchain = \"{chain}\""),
+        );
+        let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+            .await
+            .unwrap();
+        let (_tx, rx) = mpsc::channel::<SealTick>(8);
+        let err = match build_app_with_anchors(
+            cfg,
+            identity,
+            IdentityClaimOverrides::default(),
+            SealDriver::Channel(rx),
+            canned_anchors(),
+        )
+        .await
+        {
+            Ok(_) => panic!("{chain}: a chain the SDK cannot name must refuse to start"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("anchors.evm.chain"), "{chain}: {err}");
+        assert!(err.contains(chain), "{chain}: {err}");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nchain = \"custom:31337\"",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let _app = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .expect("a custom chain id the SDK names starts");
+}

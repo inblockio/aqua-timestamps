@@ -63,6 +63,21 @@ impl Config {
         let chain = evm.evm_chain().map_err(|e| {
             anyhow::anyhow!("anchors.evm is enabled but anchors.evm.chain is invalid: {e}")
         })?;
+        // OW1.6b F2: the payload `network` must name this chain for the SDK,
+        // or the self-check answers every EVM witness "unsupported network"
+        // (not the anchor's fault, so no cap) while each epoch still spends
+        // a transaction.
+        let claim = chain.network_claim();
+        if aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(&claim) != Some(chain.chain_id())
+        {
+            anyhow::bail!(
+                "anchors.evm.chain = {:?} gives the payload network {claim:?}, which the SDK \
+                 does not read back as chain id {}; no EVM witness could pass the self-check \
+                 while every epoch spends a transaction: use a chain id from 1 to 2^53-1",
+                evm.chain,
+                chain.chain_id()
+            );
+        }
         let labels = [
             ("anchors.evm.network_label", evm.network_label.as_deref()),
             (
