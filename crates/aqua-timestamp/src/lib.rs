@@ -73,12 +73,49 @@ pub enum SealDriver {
 /// golden bytes stay stable across runs. `seal_driver` chooses between
 /// the production interval-based sealer and the deterministic channel
 /// sealer used by tests.
+/// Anchor providers injected in place of the ones `build_app` builds from
+/// the config (tests, offline tooling). An override serves an ENABLED method
+/// only; a disabled method mints nothing whatever is injected.
+#[derive(Clone, Default)]
+pub struct AnchorOverrides {
+    pub evm: Option<Arc<dyn AnchorProvider>>,
+    pub qtsa: Option<Arc<dyn AnchorProvider>>,
+}
+
 pub async fn build_app(
     cfg: Config,
     identity: ServiceIdentity,
     overrides: IdentityClaimOverrides,
     seal_driver: SealDriver,
 ) -> Result<(Router, Arc<AppState>)> {
+    build_app_with_anchors(
+        cfg,
+        identity,
+        overrides,
+        seal_driver,
+        AnchorOverrides::default(),
+    )
+    .await
+}
+
+/// [`build_app`] with injected anchor providers ([`AnchorOverrides`]).
+pub async fn build_app_with_anchors(
+    cfg: Config,
+    identity: ServiceIdentity,
+    overrides: IdentityClaimOverrides,
+    seal_driver: SealDriver,
+    anchors: AnchorOverrides,
+) -> Result<(Router, Arc<AppState>)> {
+    // D51: an enabled method without a provider refuses to start. An
+    // injected provider stands in for the configured one.
+    if anchors.evm.is_none() || anchors.qtsa.is_none() {
+        let mut check = cfg.clone();
+        check.anchors.evm.enabled &= anchors.evm.is_none();
+        check.anchors.qtsa.enabled &= anchors.qtsa.is_none();
+        check
+            .check_enabled_anchors(identity.mnemonic.as_str())
+            .context("anchor configuration (decision D51: no placeholder witnesses)")?;
+    }
     let identity_tree = build_identity_tree(&identity, &overrides).await?;
     let identity_response_json = build_response(&identity, &identity_tree)?;
 
@@ -123,13 +160,21 @@ pub async fn build_app(
     // so both the sealer task and any future on-demand minter paths reuse
     // the same in-memory key material.
     let signer = Arc::new(Secp256k1Signer::new(identity.private_key.as_ref().clone()));
-    // M4: if `[anchors.evm].enabled = true` (the default), construct a
-    // real `CliEthTimestamper` against Sepolia and let the sealer call
-    // it once per non-empty epoch. On any failure the sealer falls back
-    // to stub witness data and keeps sealing; sealing never fails
-    // because the anchor failed. See `sealer::resolve_evm_outcome`.
+    // Anchor providers (decision D51). An enabled method gets its live
+    // provider (`CliEthTimestamper` for EVM, `TsaTimestamper` for qTSA, or
+    // the injected override); a failed anchor call leaves that method's
+    // witnesses pending and the sealer retries the same epoch root on every
+    // tick. A disabled method is an explicit opt-out: it mints nothing.
     let evm_anchor_cfg = cfg.effective_evm_anchor();
-    let evm_anchor: Option<Arc<dyn AnchorProvider>> = if evm_anchor_cfg.enabled {
+    let mut methods = Vec::new();
+    let evm_anchor: Option<Arc<dyn AnchorProvider>> = if !evm_anchor_cfg.enabled {
+        warn!("evm anchor disabled by config: no evm witnesses are minted");
+        None
+    } else if let Some(injected) = anchors.evm {
+        info!("evm anchor enabled (injected provider)");
+        methods.push(AnchorMethod::Evm);
+        Some(injected)
+    } else {
         let chain = evm_anchor_cfg
             .evm_chain()
             .context("parsing anchors.evm.chain")?;
@@ -139,22 +184,25 @@ pub async fn build_app(
             network_label = %evm_anchor_cfg.network_label,
             "evm anchor enabled (CliEthTimestamper)"
         );
-        let timestamper = CliEthTimestamper::new(
+        methods.push(AnchorMethod::Evm);
+        Some(Arc::new(CliEthTimestamper::new(
             identity.mnemonic.as_ref().clone(),
             evm_anchor_cfg.rpc_url.clone(),
             chain,
-        );
-        Some(Arc::new(timestamper) as Arc<dyn AnchorProvider>)
-    } else {
-        info!("evm anchor disabled: minting stub witnesses for evm method");
-        None
+        )) as Arc<dyn AnchorProvider>)
     };
-    // M5: parallel wiring for qTSA. Same shape as EVM, just a different
-    // SDK provider. `TsaTimestamper::new(url).with_min_request_interval(duration)` honours
-    // the rate-limit guidance the SDK's own docstring gives for
-    // eIDAS-qualified endpoints; no interval disables the throttle.
+    // `TsaTimestamper::with_min_request_interval` honours the rate-limit
+    // guidance the SDK gives for eIDAS-qualified endpoints; every call,
+    // retries included, goes through it.
     let qtsa_anchor_cfg = cfg.anchors.qtsa.clone();
-    let qtsa_anchor: Option<Arc<dyn AnchorProvider>> = if qtsa_anchor_cfg.enabled {
+    let qtsa_anchor: Option<Arc<dyn AnchorProvider>> = if !qtsa_anchor_cfg.enabled {
+        warn!("qtsa anchor disabled by config: no qtsa witnesses are minted");
+        None
+    } else if let Some(injected) = anchors.qtsa {
+        info!("qtsa anchor enabled (injected provider)");
+        methods.push(AnchorMethod::Qtsa);
+        Some(injected)
+    } else {
         info!(
             url = %qtsa_anchor_cfg.url,
             min_request_interval_secs = qtsa_anchor_cfg.min_request_interval_secs,
@@ -166,17 +214,15 @@ pub async fn build_app(
             }
             None => TsaTimestamper::new(qtsa_anchor_cfg.url.clone()),
         };
+        methods.push(AnchorMethod::Qtsa);
         Some(Arc::new(timestamper) as Arc<dyn AnchorProvider>)
-    } else {
-        info!("qtsa anchor disabled: minting stub witnesses for qtsa method");
-        None
     };
 
     let mut witness_ctx = WitnessContext::new(
         Arc::clone(&signer),
         format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
         evm_anchor_cfg.network_label.clone(),
-        vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
+        methods,
     );
     if let Some(anchor) = evm_anchor {
         witness_ctx = witness_ctx.with_evm_anchor(anchor);
@@ -184,6 +230,9 @@ pub async fn build_app(
     if let Some(anchor) = qtsa_anchor {
         witness_ctx = witness_ctx.with_qtsa_anchor(anchor);
     }
+    witness_ctx
+        .validate()
+        .context("anchor providers (decision D51)")?;
 
     // EventBus: fan-out broadcast channel for SSE subscribers. Created once
     // here so both the sealer task and the AppState share the same sender.

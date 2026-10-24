@@ -1,8 +1,7 @@
 //! Anchor providers: pluggable timestamp services that the seal-time
 //! witness minter calls once per epoch to anchor the Merkle root.
 //!
-//! M3 carried hard-coded stub anchor outputs inside `witness.rs`. M4
-//! extracts the "anchor for this Merkle root" surface into a tiny trait
+//! M4 extracts the "anchor for this Merkle root" surface into a tiny trait
 //! ([`AnchorProvider`]) so production can plug in
 //! `aqua_rs_sdk::CliEthTimestamper` while tests plug in a [`MockProvider`]
 //! or a [`FailingProvider`]. The trait has a blanket impl over the SDK's
@@ -13,11 +12,11 @@
 //! anchor call entirely when there are no leaves. See `sealer.rs` for the
 //! call-site that enforces that.
 //!
-//! Failure semantics. The seal-time anchor is best-effort: an
-//! [`AnchorProvider::create_timestamp`] error is logged and the sealer
-//! falls back to stub witness data for that epoch's EVM method. Sealing
-//! never fails because the anchor failed; the next epoch retries. The
-//! `with_warn` / fall-back path is owned by the sealer, not this module.
+//! Failure semantics (decision D51). An [`AnchorProvider::create_timestamp`]
+//! error is logged and that method's witnesses for the epoch stay pending:
+//! no witness is minted for it until a later tick anchors the same epoch
+//! root successfully. Sealing never fails because an anchor failed. The
+//! pending and retry path is owned by the sealer, not this module.
 
 use aqua_rs_sdk::{
     schema::timestamp::TimestampValue, TimestampError as SdkTimestampError, TimestampProvider,
@@ -100,9 +99,8 @@ impl AnchorProvider for MockProvider {
     }
 }
 
-/// Anchor provider that always errors. Used by unit tests to assert the
-/// sealer falls back to stub witness data without panicking or failing
-/// the seal.
+/// Anchor provider that always errors. Used by tests to assert the sealer
+/// keeps the method pending without panicking or failing the seal.
 pub struct FailingProvider {
     pub message: String,
 }

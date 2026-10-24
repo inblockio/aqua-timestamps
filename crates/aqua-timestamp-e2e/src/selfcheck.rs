@@ -13,16 +13,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use aqua_rs_sdk::schema::timestamp::TimestampValue;
 use aqua_timestamp::{
-    build_app,
+    build_app_with_anchors,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
         EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
         StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
-    SealDriver,
+    AnchorOverrides, SealDriver,
 };
+use aqua_timestamp_core::anchors::MockProvider;
 use aqua_timestamp_core::sealer::SealTick;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -195,15 +197,11 @@ async fn build_in_process(
             max_leaves_per_request: 10_000,
         },
         anchor_legacy: AnchorConfig::default(),
+        // Both methods enabled (D51: a disabled method mints nothing); the
+        // providers are injected offline stand-ins (`offline_anchors`).
         anchors: AnchorsConfig {
-            evm: EvmAnchorConfig {
-                enabled: false,
-                ..EvmAnchorConfig::default()
-            },
-            qtsa: QtsaAnchorConfig {
-                enabled: false,
-                ..QtsaAnchorConfig::default()
-            },
+            evm: EvmAnchorConfig::default(),
+            qtsa: QtsaAnchorConfig::default(),
         },
         bonding_curve: BondingCurveConfig::default(),
         leaderboard: LeaderboardConfig::default(),
@@ -214,14 +212,58 @@ async fn build_in_process(
         .context("ServiceIdentity::from_mnemonic")?;
 
     let (seal_tx, seal_rx) = mpsc::channel::<SealTick>(8);
-    let (router, state) = build_app(
+    let (router, state) = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(seal_rx),
+        offline_anchors(),
     )
     .await
     .context("build_app")?;
 
     Ok((router, state, seal_tx, tmp))
+}
+
+/// Offline anchor providers for the in-process selfcheck: fixed anchor facts,
+/// no RPC and no TSA. The selfcheck checks the server's flow (revision
+/// rehash, batch inclusion, service signature), not an anchor; these
+/// witnesses do not verify against a chain or a TSA. Never used by the
+/// server binary.
+fn offline_anchors() -> AnchorOverrides {
+    let fact = |sender: &str, provider: &str, tx: String, contract: &str, network: &str| {
+        TimestampValue::new(
+            vec![],
+            sender.to_string(),
+            provider.to_string(),
+            tx,
+            contract.to_string(),
+            network.to_string(),
+            String::new(),
+            1_000,
+            1,
+            0,
+            String::new(),
+        )
+    };
+    AnchorOverrides {
+        evm: Some(Arc::new(MockProvider {
+            value: fact(
+                "0xCAFE000000000000000000000000000000000000",
+                "",
+                format!("0x{}", "ab".repeat(32)),
+                "0xDEAD000000000000000000000000000000000000",
+                "sepolia",
+            ),
+        })),
+        qtsa: Some(Arc::new(MockProvider {
+            value: fact(
+                "",
+                "Offline Selfcheck TSA",
+                "AAAA".into(),
+                "http://tsa.test/",
+                "tsa",
+            ),
+        })),
+    }
 }

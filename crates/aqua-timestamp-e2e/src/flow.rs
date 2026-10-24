@@ -619,6 +619,12 @@ pub async fn run_full_flow(
     // ── 8. GET /trees/by-leaf/{leaf}?method=evm ──────────────────────────
     let by_leaf_url = format!("{base_url}/trees/by-leaf/{leaf_hex}?method=evm");
     let resp = http_get(&client, &by_leaf_url, Some(&token_primary)).await?;
+    if resp.status() == StatusCode::ACCEPTED {
+        // D51: the epoch's EVM anchor is outstanding; the server retries it
+        // every epoch tick and never serves a placeholder witness.
+        let b = resp.text().await.unwrap_or_default();
+        bail!("GET /trees/by-leaf: EVM anchor pending (HTTP 202) body={b}");
+    }
     if !resp.status().is_success() {
         let s = resp.status();
         let b = resp.text().await.unwrap_or_default();
@@ -767,6 +773,13 @@ pub async fn run_full_flow(
         log(
             9,
             "qTSA witness not present for this epoch (skipping qtsa verification)",
+        );
+    } else if resp_q.status() == StatusCode::ACCEPTED {
+        // D51: the qTSA anchor is outstanding (HTTP 202, status "pending");
+        // the server retries it every epoch tick.
+        log(
+            9,
+            "qTSA anchor pending for this epoch (HTTP 202; skipping qtsa verification)",
         );
     } else if !resp_q.status().is_success() {
         let s = resp_q.status();

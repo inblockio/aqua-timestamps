@@ -36,7 +36,7 @@ use aqua_rs_sdk::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::accumulator::SealedSnapshot;
+use crate::accumulator::{LeafEntry, SealedSnapshot};
 use crate::merkle::Hash32;
 
 /// The `network` value of every qTSA payload: the SDK's TSA timestamp
@@ -118,14 +118,14 @@ pub enum WitnessError {
 /// the batch fields (`merkle_root`, `merkle_proof`, `batch_tree_size`,
 /// `batch_leaf_index`, `shielding_nonce`) belong to the SDK's prepared batch.
 ///
-/// Live outcomes come from an anchor provider (`CliEthTimestamper` for EVM,
-/// `TsaTimestamper` for qTSA); on a missing or failed provider the sealer
-/// constructs a stub outcome via [`Self::stub_evm`] / [`Self::stub_qtsa`].
+/// Outcomes come only from a live anchor provider (`CliEthTimestamper` for
+/// EVM, `TsaTimestamper` for qTSA). There is no placeholder outcome: a
+/// missing or failed provider leaves the method pending (decision D51).
 #[derive(Debug, Clone)]
 pub struct MethodAnchorOutcome {
-    /// The `0x` + 64-hex transaction id, or 64 zeros for a stub.
+    /// The `0x` + 64-hex transaction id (EVM), the base64 `TimeStampResp` (qTSA).
     pub transaction_hash: String,
-    /// The `0x` + 40-hex EIP-55 sender address (EVM), or `"stub"` for qTSA.
+    /// The `0x` + 40-hex EIP-55 sender address (EVM), the TSA name (qTSA).
     pub sender_account_address: String,
     /// EVM contract address. For qTSA this is the TSA URL (the SDK overloads
     /// the field); qTSA payloads do not carry it.
@@ -133,48 +133,15 @@ pub struct MethodAnchorOutcome {
     /// `"sepolia"` / `"mainnet"` etc. for EVM. A qTSA payload always carries
     /// [`QTSA_NETWORK_LABEL`], whatever this field says.
     pub network: String,
-    /// For qTSA only: the provider name (`"stub"` for a stub).
+    /// For qTSA only: the provider name.
     pub tsa_provider: String,
     /// The anchor's own time as the provider returned it: the TSA token's
     /// genTime for qTSA (the SDK binds `payloads.timestamp` to it, audit B),
-    /// the provider's time for EVM. `None` for a stub, whose payload keeps the
-    /// epoch close time.
-    pub timestamp: Option<u64>,
+    /// the provider's time for EVM.
+    pub timestamp: u64,
 }
 
 impl MethodAnchorOutcome {
-    /// Stub EVM outcome the sealer falls back to when the live provider
-    /// errors (or `[anchors.evm].enabled = false`).
-    ///
-    /// `service_eth_addr` is the `0x`-prefixed EIP-55 address of the
-    /// service key, the same value the success-path output would carry.
-    /// `network` is the configured network label (`"sepolia"` by default)
-    /// so a stub witness is indistinguishable from a real witness apart
-    /// from the all-zero `transaction_hash` and contract address.
-    pub fn stub_evm(service_eth_addr: &str, network: &str) -> Self {
-        Self {
-            transaction_hash: format!("0x{}", "0".repeat(64)),
-            sender_account_address: ensure_0x(service_eth_addr),
-            smart_contract_address: format!("0x{}", "0".repeat(40)),
-            network: network.to_string(),
-            tsa_provider: String::new(),
-            timestamp: None,
-        }
-    }
-
-    /// Stub qTSA outcome the sealer falls back to when the live provider
-    /// errors or is not configured.
-    pub fn stub_qtsa() -> Self {
-        Self {
-            transaction_hash: format!("0x{}", "0".repeat(64)),
-            sender_account_address: "stub".to_string(),
-            smart_contract_address: format!("0x{}", "0".repeat(40)),
-            network: QTSA_NETWORK_LABEL.to_string(),
-            tsa_provider: "stub".to_string(),
-            timestamp: None,
-        }
-    }
-
     /// Build an EVM outcome from a [`TimestampValue`] returned by a live
     /// provider. Only the anchor-derived fields are pulled across; the batch
     /// fields come from the SDK's prepared batch.
@@ -185,7 +152,7 @@ impl MethodAnchorOutcome {
             smart_contract_address: value.smart_contract_address.clone(),
             network: value.network.clone(),
             tsa_provider: String::new(),
-            timestamp: Some(value.timestamp),
+            timestamp: value.timestamp,
         }
     }
 
@@ -206,20 +173,15 @@ impl MethodAnchorOutcome {
             smart_contract_address: value.smart_contract_address.clone(),
             network: QTSA_NETWORK_LABEL.to_string(),
             tsa_provider: value.tsa_provider.clone(),
-            timestamp: Some(value.timestamp),
+            timestamp: value.timestamp,
         }
     }
 
     /// The anchor facts `finish_batch_timestamp` takes for `method`: this
-    /// outcome's fields, the anchored root, and the time (the provider's,
-    /// or `epoch_timestamp` for a stub). The batch fields are left empty;
-    /// finish ignores them and writes the prepared batch's own.
-    fn facts(
-        &self,
-        method: AnchorMethod,
-        merkle_root: &str,
-        epoch_timestamp: u64,
-    ) -> TimestampValue {
+    /// outcome's fields, the anchored root, and the provider's time. The batch
+    /// fields are left empty; finish ignores them and writes the prepared
+    /// batch's own.
+    fn facts(&self, method: AnchorMethod, merkle_root: &str) -> TimestampValue {
         let (sender, network) = match method {
             AnchorMethod::Evm => (
                 ensure_0x(&self.sender_account_address),
@@ -238,7 +200,7 @@ impl MethodAnchorOutcome {
             self.smart_contract_address.clone(),
             network,
             merkle_root.to_string(),
-            self.timestamp.unwrap_or(epoch_timestamp),
+            self.timestamp,
             0,
             0,
             String::new(),
@@ -326,6 +288,108 @@ impl EpochBatch {
     pub fn leaves(&self) -> &[Hash32] {
         &self.leaves
     }
+
+    /// Rebuild a batch from a stored [`PreparedBatch`] and its leaves (in
+    /// batch order), so a pending method can be anchored and finished later
+    /// for the same root. Nothing is recomputed here: the carriers are the
+    /// same link-only trees [`Self::prepare`] built, and
+    /// `finish_batch_timestamp` itself re-derives the root from the stored
+    /// targets and nonces and refuses a batch that does not follow.
+    pub fn from_parts(prepared: PreparedBatch, leaves: Vec<Hash32>) -> Self {
+        let carriers = leaves.iter().map(link_only_carrier).collect();
+        Self {
+            prepared,
+            leaves,
+            carriers,
+        }
+    }
+
+    /// The SDK's prepared batch (serde), as persisted for a pending method.
+    pub fn prepared(&self) -> &PreparedBatch {
+        &self.prepared
+    }
+}
+
+/// One sealed epoch whose anchor is still outstanding for `methods`
+/// (decision D51): the anchor call failed, so those methods' witnesses are
+/// not minted yet. Persisted by the store so every later tick, also after a
+/// restart, retries anchoring the SAME root: `batch` is the SDK's own
+/// [`PreparedBatch`] (root, per-leaf targets, shielding nonces and proofs,
+/// serde as the SDK defines it) and `leaves` carries what minting needs
+/// besides it (the leaf and its submitter, in batch order).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingEpoch {
+    pub epoch_id: u64,
+    pub opened_at: u64,
+    pub closed_at: u64,
+    /// Methods still to anchor and mint, in the configured order.
+    pub methods: Vec<AnchorMethod>,
+    pub leaves: Vec<PendingLeaf>,
+    pub batch: PreparedBatch,
+}
+
+/// A leaf of a [`PendingEpoch`]: `0x` + 64 hex, and its submitter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingLeaf {
+    pub leaf: String,
+    pub submitter_did: String,
+}
+
+impl PendingEpoch {
+    /// Record `methods` of `snapshot` as pending on `batch`.
+    pub fn new(snapshot: &SealedSnapshot, batch: &EpochBatch, methods: Vec<AnchorMethod>) -> Self {
+        Self {
+            epoch_id: snapshot.epoch_id,
+            opened_at: snapshot.opened_at,
+            closed_at: snapshot.closed_at,
+            methods,
+            leaves: snapshot
+                .leaves
+                .iter()
+                .map(|e| PendingLeaf {
+                    leaf: hex_lower_bytes(&e.leaf),
+                    submitter_did: e.submitter_did.clone(),
+                })
+                .collect(),
+            batch: batch.prepared.clone(),
+        }
+    }
+
+    /// The anchored root every method of this epoch carries.
+    pub fn anchor_root(&self) -> &str {
+        self.batch.merkle_root()
+    }
+
+    /// The 32-byte leaves, in batch order.
+    pub fn leaf_hashes(&self) -> Result<Vec<Hash32>, WitnessError> {
+        self.leaves
+            .iter()
+            .map(|l| {
+                let bytes = hex::decode(l.leaf.trim_start_matches("0x"))
+                    .map_err(|e| WitnessError::Batch(format!("pending leaf hex: {e}")))?;
+                <Hash32>::try_from(bytes.as_slice()).map_err(|_| WitnessError::BadHash(bytes.len()))
+            })
+            .collect()
+    }
+
+    /// The sealed snapshot and the batch, rebuilt for minting.
+    pub fn restore(&self) -> Result<(SealedSnapshot, EpochBatch), WitnessError> {
+        let leaves = self.leaf_hashes()?;
+        let snapshot = SealedSnapshot {
+            epoch_id: self.epoch_id,
+            opened_at: self.opened_at,
+            closed_at: self.closed_at,
+            leaves: leaves
+                .iter()
+                .zip(self.leaves.iter())
+                .map(|(leaf, l)| LeafEntry {
+                    leaf: *leaf,
+                    submitter_did: l.submitter_did.clone(),
+                })
+                .collect(),
+        };
+        Ok((snapshot, EpochBatch::from_parts(self.batch.clone(), leaves)))
+    }
 }
 
 /// A tree that holds only the key of `leaf`, aimed at it, so the SDK's batch
@@ -361,8 +425,6 @@ fn link_only_carrier(leaf: &Hash32) -> AquaTreeWrapper {
 ///   iteration order. Each is handed to `finish_batch_timestamp` once, which
 ///   builds one TimestampObject per leaf.
 /// * `signer` : the service's secp256k1 signer.
-/// * `epoch_timestamp` : the unix time that closed the epoch; the payload
-///   `timestamp` of a stub outcome only (a live outcome carries its own).
 ///
 /// Witnesses are produced in deterministic order: leaves in batch order,
 /// methods in the order given. The storage layer writes the whole list
@@ -372,7 +434,6 @@ pub async fn mint_witnesses_for_epoch(
     batch: &EpochBatch,
     method_outcomes: &[(AnchorMethod, MethodAnchorOutcome)],
     signer: Arc<Secp256k1Signer>,
-    epoch_timestamp: u64,
 ) -> Result<Vec<MintedWitness>, WitnessError> {
     if snapshot.leaves.len() != batch.leaves.len()
         || snapshot
@@ -389,7 +450,7 @@ pub async fn mint_witnesses_for_epoch(
     // One finish per method: per method, one timestamp object per leaf.
     let mut objects: Vec<Vec<(RevisionLink, AnyRevision)>> = Vec::new();
     for (method, outcome) in method_outcomes {
-        let facts = outcome.facts(*method, batch.anchor_root(), epoch_timestamp);
+        let facts = outcome.facts(*method, batch.anchor_root());
         let results = finish_batch_timestamp(
             &batch.prepared,
             &batch.carriers,
@@ -548,17 +609,24 @@ mod tests {
         assert_eq!(AnchorMethod::parse("nope"), None);
     }
 
-    fn stub_outcomes() -> Vec<(AnchorMethod, MethodAnchorOutcome)> {
-        vec![
-            (
-                AnchorMethod::Evm,
-                MethodAnchorOutcome::stub_evm(
-                    "0x0000000000000000000000000000000000000000",
-                    "sepolia",
-                ),
-            ),
-            (AnchorMethod::Qtsa, MethodAnchorOutcome::stub_qtsa()),
-        ]
+    fn canned_outcomes() -> Vec<(AnchorMethod, MethodAnchorOutcome)> {
+        let evm = MethodAnchorOutcome {
+            transaction_hash: format!("0x{}", "ab".repeat(32)),
+            sender_account_address: "0xCAFE000000000000000000000000000000000000".into(),
+            smart_contract_address: "0xDEAD000000000000000000000000000000000000".into(),
+            network: "sepolia".into(),
+            tsa_provider: String::new(),
+            timestamp: 60,
+        };
+        let qtsa = MethodAnchorOutcome {
+            transaction_hash: "AAAA".into(),
+            sender_account_address: "Test TSA".into(),
+            smart_contract_address: "http://tsa.test/".into(),
+            network: QTSA_NETWORK_LABEL.into(),
+            tsa_provider: "Test TSA".into(),
+            timestamp: 60,
+        };
+        vec![(AnchorMethod::Evm, evm), (AnchorMethod::Qtsa, qtsa)]
     }
 
     fn snapshot_of(id: u64, leaves: &[Hash32]) -> (SealedSnapshot, EpochBatch) {
@@ -589,7 +657,7 @@ mod tests {
         let leaves: Vec<Hash32> = (1u8..=3).map(|i| [i; 32]).collect();
         let (snap, batch) = snapshot_of(7, &leaves);
         let witnesses =
-            mint_witnesses_for_epoch(&snap, &batch, &stub_outcomes(), build_signer().await, 60)
+            mint_witnesses_for_epoch(&snap, &batch, &canned_outcomes(), build_signer().await)
                 .await
                 .unwrap();
         assert_eq!(witnesses.len(), 6);
@@ -618,14 +686,10 @@ mod tests {
     async fn witness_chains_to_client_leaf() {
         let leaf: Hash32 = [0x99; 32];
         let (snap, batch) = snapshot_of(2, &[leaf]);
-        let outcomes = vec![(
-            AnchorMethod::Evm,
-            MethodAnchorOutcome::stub_evm("0x0000000000000000000000000000000000000000", "sepolia"),
-        )];
-        let witnesses =
-            mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await, 60)
-                .await
-                .unwrap();
+        let outcomes = vec![canned_outcomes().remove(0)];
+        let witnesses = mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await)
+            .await
+            .unwrap();
         assert_eq!(witnesses.len(), 1);
         let w = &witnesses[0];
         if let AnyRevision::Typed(obj) = &w.object_revision {
@@ -655,19 +719,19 @@ mod tests {
             smart_contract_address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             network: "sepolia".into(),
             tsa_provider: String::new(),
-            timestamp: Some(1234),
+            timestamp: 1234,
         };
         let tsa = MethodAnchorOutcome {
             network: "operator-label".into(),
             tsa_provider: "Some TSA".into(),
-            timestamp: Some(5678),
+            timestamp: 5678,
             ..canned.clone()
         };
         let outcomes = vec![
             (AnchorMethod::Evm, canned.clone()),
             (AnchorMethod::Qtsa, tsa),
         ];
-        let ws = mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await, 60)
+        let ws = mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await)
             .await
             .unwrap();
         let p = payloads(&ws[0]);
@@ -689,17 +753,5 @@ mod tests {
             q["timestamp"], 5678,
             "qTSA payload carries the anchor's time"
         );
-    }
-
-    #[tokio::test]
-    async fn stub_outcome_keeps_the_epoch_close_time() {
-        let (snap, batch) = snapshot_of(4, &[[0x11; 32]]);
-        let ws =
-            mint_witnesses_for_epoch(&snap, &batch, &stub_outcomes(), build_signer().await, 777)
-                .await
-                .unwrap();
-        for w in &ws {
-            assert_eq!(payloads(w)["timestamp"], 777);
-        }
     }
 }

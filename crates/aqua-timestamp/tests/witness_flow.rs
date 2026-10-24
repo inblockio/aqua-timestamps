@@ -21,14 +21,14 @@ use std::sync::Arc;
 
 use aqua_rs_sdk::schema::timestamp::TimestampValue;
 use aqua_timestamp::{
-    build_app_with_anchors, AnchorOverrides,
+    build_app_with_anchors,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
         EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
         StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
-    SealDriver,
+    AnchorOverrides, SealDriver,
 };
 use aqua_timestamp_core::anchors::{AnchorProvider, FailingProvider, MockProvider};
 use aqua_timestamp_core::sealer::SealTick;
@@ -154,7 +154,7 @@ async fn build_harness() -> Harness {
         identity,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx),
- canned_anchors(),
+        canned_anchors(),
     )
     .await
     .expect("build_app");
@@ -555,7 +555,7 @@ async fn witness_retrievable_across_keyspace_reopen() {
             identity,
             IdentityClaimOverrides::default(),
             SealDriver::Channel(rx),
- canned_anchors(),
+            canned_anchors(),
         )
         .await
         .unwrap();
@@ -585,7 +585,7 @@ async fn witness_retrievable_across_keyspace_reopen() {
         identity2,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx2),
- canned_anchors(),
+        canned_anchors(),
     )
     .await
     .unwrap();
@@ -630,7 +630,11 @@ async fn tip_response_shape_matches_aqua_node() {
 #[tokio::test]
 async fn by_leaf_answers_202_pending_for_a_pending_method() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = cfg(vec![CLIENT_A_DID.to_string()], tmp.path().to_path_buf(), 10_000);
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
     let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
         .await
         .unwrap();
@@ -668,7 +672,10 @@ async fn by_leaf_answers_202_pending_for_a_pending_method() {
     assert_eq!(body["method"], "evm", "{body}");
     assert_eq!(body["epoch"], 1, "{body}");
     assert_eq!(body["leaf"], leaf.to_lowercase(), "{body}");
-    assert!(body.get("revisions").is_none(), "no placeholder witness: {body}");
+    assert!(
+        body.get("revisions").is_none(),
+        "no placeholder witness: {body}"
+    );
 
     let (status, body) = get_json(
         &router,

@@ -8,6 +8,7 @@
 //! supplied [`SealTick`] channel; this keeps tests deterministic without
 //! needing `tokio::time::advance`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use crate::storage::{Store, StoreError};
 use crate::time::Clock;
 use crate::witness::{
     mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome, MintedWitness,
-    WitnessError,
+    PendingEpoch, WitnessError,
 };
 
 /// Per-process configuration the sealer needs in addition to its
@@ -42,15 +43,14 @@ pub struct WitnessContext {
     pub evm_network: String,
     /// Methods to mint per leaf. Production uses both; tests can mint one.
     pub methods: Vec<AnchorMethod>,
-    /// Live EVM anchor provider. When `Some`, the sealer submits the
-    /// per-epoch Merkle root to Sepolia (or whatever chain the provider
-    /// was constructed for) and folds the resulting `transaction_hash`,
-    /// `sender`, `smart_contract_address`, `network` into every leaf's
-    /// EVM witness payload. When `None`, EVM witnesses carry stub anchor
-    /// data and look identical to what M3 emitted.
+    /// Live EVM anchor provider. The sealer submits the per-epoch batch
+    /// root through it and folds the resulting `transaction_hash`,
+    /// `sender`, `smart_contract_address`, `network` into every leaf's EVM
+    /// witness payload. Required when `methods` holds [`AnchorMethod::Evm`]
+    /// ([`Self::validate`]); there is no placeholder witness (D51).
     pub evm_anchor: Option<Arc<dyn AnchorProvider>>,
-    /// Live qTSA anchor provider. Always `None` until M5; included so the
-    /// shape is stable across milestones.
+    /// Live qTSA anchor provider. Required when `methods` holds
+    /// [`AnchorMethod::Qtsa`].
     pub qtsa_anchor: Option<Arc<dyn AnchorProvider>>,
 }
 
@@ -77,10 +77,28 @@ impl WitnessContext {
         self
     }
 
-    /// Builder-style: attach a live qTSA anchor provider. M5+ only.
+    /// Builder-style: attach a live qTSA anchor provider.
     pub fn with_qtsa_anchor(mut self, anchor: Arc<dyn AnchorProvider>) -> Self {
         self.qtsa_anchor = Some(anchor);
         self
+    }
+
+    /// The provider wired for `method`, if any.
+    pub fn provider(&self, method: AnchorMethod) -> Option<&Arc<dyn AnchorProvider>> {
+        match method {
+            AnchorMethod::Evm => self.evm_anchor.as_ref(),
+            AnchorMethod::Qtsa => self.qtsa_anchor.as_ref(),
+        }
+    }
+
+    /// Decision D51: every enabled method has a provider. A context that
+    /// fails this must not start a sealer ([`seal_once`] refuses it before
+    /// it closes the epoch).
+    pub fn validate(&self) -> Result<(), SealError> {
+        match self.methods.iter().find(|m| self.provider(**m).is_none()) {
+            Some(m) => Err(SealError::MissingProvider(*m)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -90,6 +108,11 @@ pub enum SealError {
     Store(#[from] StoreError),
     #[error("witness: {0}")]
     Witness(#[from] WitnessError),
+    #[error(
+        "anchor method {} is enabled but has no anchor provider; configure it or disable the method",
+        .0.as_str()
+    )]
+    MissingProvider(AnchorMethod),
 }
 
 /// A test-driven seal request. The contained `now` value is used as the
@@ -109,19 +132,22 @@ pub struct SealTick {
 /// minting (used by accumulator-only tests and by the M2-shape callers
 /// that have not yet plumbed in a signer).
 ///
-/// Live anchors are best-effort. Each per-method provider in
-/// `witness_ctx` is invoked exactly once per non-empty epoch with the
-/// SDK batch root ([`EpochBatch::anchor_root`], `0x1620` + digest, PCA-0015
-/// section 3.8; an EVM provider sends it as selector + root); on success the returned [`TimestampValue`] is
-/// folded into every per-leaf witness for that method, on failure the
-/// sealer logs a `warn!` and falls back to stub data for that method's
-/// witnesses this epoch. Sealing never fails because an anchor failed;
-/// the next epoch retries.
+/// Anchoring follows decision D51. Each tick first retries every
+/// outstanding anchor ([`retry_pending`]), then closes the epoch: one SDK
+/// batch, its root ([`EpochBatch::anchor_root`], `0x1620` + digest,
+/// PCA-0015 section 3.8) anchored once per method. A method whose anchor
+/// succeeds is minted now. A method whose anchor fails is minted never as a
+/// placeholder: its witnesses stay pending, the prepared batch is persisted
+/// with the epoch ([`PendingEpoch`]) and every later tick anchors the SAME
+/// root again until it succeeds. The methods are independent. A context
+/// with an enabled method and no provider is refused before the epoch is
+/// closed ([`WitnessContext::validate`]).
 ///
-/// Empty epochs are never anchored: when `snapshot.leaves.is_empty()` the
-/// live provider is not called (no gas / RPC traffic for a degenerate
-/// root) and no witnesses are minted, matching the M3 behaviour for
-/// empty epochs.
+/// The returned witnesses are every witness minted during the cycle: late
+/// ones of earlier epochs (retries) first, then the closed epoch's.
+///
+/// Empty epochs are never anchored and mint nothing: no batch, no provider
+/// call, no pending record.
 pub async fn seal_once(
     accumulator: &Accumulator,
     store: &Store,
@@ -129,159 +155,206 @@ pub async fn seal_once(
     duration_secs: u64,
     witness_ctx: Option<&WitnessContext>,
 ) -> Result<(EpochRecord, Vec<MintedWitness>), SealError> {
+    if let Some(ctx) = witness_ctx {
+        ctx.validate()?;
+    }
+    let (mut witnesses, down) = match witness_ctx {
+        Some(ctx) => retry_pending(store, ctx).await,
+        None => (Vec::new(), HashSet::new()),
+    };
+
     let snapshot = accumulator.swap_and_open_next(closed_at, closed_at, duration_secs);
     let leaves: Vec<Hash32> = snapshot.leaves.iter().map(|e| e.leaf).collect();
     let batch = EpochBatch::prepare(&leaves)?;
     let record = build_record(&snapshot, batch.as_ref())?;
 
-    let witnesses = if let (Some(ctx), Some(batch)) = (witness_ctx, batch.as_ref()) {
-        let outcomes =
-            resolve_method_outcomes(ctx, record.id, batch.anchor_root(), &snapshot).await;
-        let minted = mint_witnesses_for_epoch(
-            &snapshot,
-            batch,
-            &outcomes,
-            Arc::clone(&ctx.signer),
-            closed_at,
-        )
-        .await?;
-        for w in &minted {
-            info!(
-                leaf = %format!("0x{}", hex::encode(w.leaf)),
-                method = %w.method.as_str(),
-                tip = %format!("0x{}", hex::encode(w.signature_hash)),
-                epoch = w.epoch_id,
-                "witness minted"
-            );
+    let mut minted = Vec::new();
+    let mut pending = None;
+    if let (Some(ctx), Some(batch)) = (witness_ctx, batch.as_ref()) {
+        let mut outcomes = Vec::with_capacity(ctx.methods.len());
+        let mut pending_methods = Vec::new();
+        for method in &ctx.methods {
+            if down.contains(method) {
+                warn!(
+                    epoch_id = record.id,
+                    method = method.as_str(),
+                    "anchor provider failed earlier this tick; witnesses stay pending, retried next tick"
+                );
+                pending_methods.push(*method);
+                continue;
+            }
+            match anchor_root(ctx, *method, record.id, batch.anchor_root()).await {
+                Some(outcome) => outcomes.push((*method, outcome)),
+                None => pending_methods.push(*method),
+            }
         }
-        minted
-    } else {
-        Vec::new()
-    };
+        minted =
+            mint_witnesses_for_epoch(&snapshot, batch, &outcomes, Arc::clone(&ctx.signer)).await?;
+        log_minted(&minted);
+        if !pending_methods.is_empty() {
+            pending = Some(PendingEpoch::new(&snapshot, batch, pending_methods));
+        }
+    }
 
-    store.persist_sealed_epoch(&record, &snapshot.leaves, &witnesses)?;
+    store.persist_sealed_epoch_with_pending(
+        &record,
+        &snapshot.leaves,
+        &minted,
+        pending.as_ref(),
+    )?;
 
     info!(
         id = record.id,
         root = %record.merkle_root_hex(),
         leaves = record.leaf_count,
-        witnesses = witnesses.len(),
+        witnesses = minted.len(),
+        pending = ?pending.as_ref().map(|p| p.methods.iter().map(|m| m.as_str()).collect::<Vec<_>>()),
         "epoch sealed"
     );
+    witnesses.extend(minted);
     Ok((record, witnesses))
 }
 
-/// Resolve the per-method anchor outcomes for one seal cycle.
-///
-/// Walks `ctx.methods` in order and produces a `(method, outcome)` tuple
-/// for each: if a live provider for the method is wired AND the snapshot
-/// has leaves, call the provider and translate the result; otherwise
-/// build a stub outcome with the same shape so the witness minter sees
-/// uniform inputs.
-///
-/// All anchor errors are caught here and logged via `warn!`; never
-/// surfaced upward. The fall-back outcome carries the configured
-/// `network` / EIP-55 address so a stub-fallback witness is
-/// indistinguishable from a real witness except for the all-zero
-/// `transaction_hash` and contract address.
-async fn resolve_method_outcomes(
-    ctx: &WitnessContext,
-    epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> Vec<(AnchorMethod, MethodAnchorOutcome)> {
-    let mut out: Vec<(AnchorMethod, MethodAnchorOutcome)> = Vec::with_capacity(ctx.methods.len());
-    for method in &ctx.methods {
-        let outcome = match method {
-            AnchorMethod::Evm => {
-                resolve_evm_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
-            }
-            AnchorMethod::Qtsa => {
-                resolve_qtsa_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
-            }
-        };
-        out.push((*method, outcome));
+fn log_minted(minted: &[MintedWitness]) {
+    for w in minted {
+        info!(
+            leaf = %format!("0x{}", hex::encode(w.leaf)),
+            method = %w.method.as_str(),
+            tip = %format!("0x{}", hex::encode(w.signature_hash)),
+            epoch = w.epoch_id,
+            "witness minted"
+        );
     }
-    out
 }
 
-async fn resolve_qtsa_outcome(
+/// Retry every outstanding anchor, oldest epoch first (decision D51).
+///
+/// Each pending `(epoch, method)` anchors the epoch's stored root through
+/// the method's provider; on success the witnesses are minted from the
+/// stored [`PendingEpoch`] (the SDK's own prepared batch, so the same root,
+/// nonces and proofs) and persisted together with the shrunken pending
+/// record. Per-tick cost: at most one failing provider call per method; a
+/// method whose call failed is skipped for the rest of the tick (returned
+/// in the second tuple element, so the new epoch does not call it again).
+/// The qTSA provider's own request throttle applies to every call. A
+/// pending method that is no longer enabled stays pending and is logged.
+/// Nothing here fails the seal: errors are logged and retried next tick.
+async fn retry_pending(
+    store: &Store,
     ctx: &WitnessContext,
-    epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> MethodAnchorOutcome {
-    let stub = MethodAnchorOutcome::stub_qtsa;
-    let Some(anchor) = ctx.qtsa_anchor.as_ref() else {
-        return stub();
-    };
-    // Same guard as EVM: empty epoch never triggers a live RFC 3161
-    // request even if a provider is attached.
-    if snapshot.leaves.is_empty() {
-        return stub();
-    }
-    match anchor.create_timestamp(merkle_root_hex).await {
-        Ok(value) => {
-            info!(
-                epoch_id,
-                merkle_root_hex,
-                tx_hash = %value.transaction_hash,
-                tsa_provider = %value.tsa_provider,
-                tsa_url = %value.smart_contract_address,
-                gen_time = value.timestamp,
-                "qtsa anchor submitted"
-            );
-            MethodAnchorOutcome::from_tsa_timestamp_value(&value)
-        }
+) -> (Vec<MintedWitness>, HashSet<AnchorMethod>) {
+    let mut down = HashSet::new();
+    let mut out = Vec::new();
+    let pendings = match store.list_pending_epochs() {
+        Ok(p) => p,
         Err(e) => {
-            warn!(
-                epoch_id,
-                merkle_root_hex,
-                error = %e,
-                "qtsa anchor failed, falling back to stub"
+            error!(error = %e, "reading pending anchors failed; retried next tick");
+            return (out, down);
+        }
+    };
+    for mut pending in pendings {
+        for method in pending.methods.clone() {
+            if !ctx.methods.contains(&method) {
+                warn!(
+                    epoch_id = pending.epoch_id,
+                    method = method.as_str(),
+                    "pending anchor for a disabled method; left pending"
+                );
+                continue;
+            }
+            if down.contains(&method) {
+                continue;
+            }
+            let Some(outcome) =
+                anchor_root(ctx, method, pending.epoch_id, pending.anchor_root()).await
+            else {
+                down.insert(method);
+                continue;
+            };
+            let minted = match pending.restore() {
+                Ok((snapshot, batch)) => {
+                    mint_witnesses_for_epoch(
+                        &snapshot,
+                        &batch,
+                        &[(method, outcome)],
+                        Arc::clone(&ctx.signer),
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            let minted = match minted {
+                Ok(m) => m,
+                Err(e) => {
+                    error!(
+                        epoch_id = pending.epoch_id,
+                        method = method.as_str(),
+                        error = %e,
+                        "minting a pending anchor failed; retried next tick"
+                    );
+                    continue;
+                }
+            };
+            let mut remaining = pending.clone();
+            remaining.methods.retain(|m| *m != method);
+            if let Err(e) = store.persist_pending_minted(&remaining, method, &minted) {
+                error!(
+                    epoch_id = pending.epoch_id,
+                    method = method.as_str(),
+                    error = %e,
+                    "persisting a pending anchor's witnesses failed; retried next tick"
+                );
+                continue;
+            }
+            info!(
+                epoch_id = pending.epoch_id,
+                method = method.as_str(),
+                witnesses = minted.len(),
+                "pending anchor minted"
             );
-            stub()
+            log_minted(&minted);
+            out.extend(minted);
+            pending = remaining;
         }
     }
+    (out, down)
 }
 
-async fn resolve_evm_outcome(
+/// Anchor `root` (epoch `epoch_id`) through `method`'s provider. `None` when
+/// the call failed: logged with the epoch and method, the witnesses stay
+/// pending. The caller has validated that the provider exists.
+async fn anchor_root(
     ctx: &WitnessContext,
+    method: AnchorMethod,
     epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> MethodAnchorOutcome {
-    let stub = || MethodAnchorOutcome::stub_evm(&ctx.service_eth_address, &ctx.evm_network);
-    let Some(anchor) = ctx.evm_anchor.as_ref() else {
-        return stub();
-    };
-    // Defensive: a non-empty `evm_anchor` slot should only ever be hit
-    // for non-empty epochs (the sealer is the only call-site and skips
-    // the anchor for empty snapshots by the time `resolve_*` runs only
-    // when the snapshot is non-empty). Keep the guard so a future caller
-    // can't burn gas on an empty root by accident.
-    if snapshot.leaves.is_empty() {
-        return stub();
-    }
-    match anchor.create_timestamp(merkle_root_hex).await {
+    root: &str,
+) -> Option<MethodAnchorOutcome> {
+    let anchor = ctx.provider(method)?;
+    match anchor.create_timestamp(root).await {
         Ok(value) => {
             info!(
                 epoch_id,
-                merkle_root_hex,
+                method = method.as_str(),
+                root,
                 tx_hash = %value.transaction_hash,
                 sender = %value.sender_account_address,
-                "evm anchor submitted"
+                tsa_provider = %value.tsa_provider,
+                "anchor submitted"
             );
-            MethodAnchorOutcome::from_evm_timestamp_value(&value)
+            Some(match method {
+                AnchorMethod::Evm => MethodAnchorOutcome::from_evm_timestamp_value(&value),
+                AnchorMethod::Qtsa => MethodAnchorOutcome::from_tsa_timestamp_value(&value),
+            })
         }
         Err(e) => {
             warn!(
                 epoch_id,
-                merkle_root_hex,
+                method = method.as_str(),
+                root,
                 error = %e,
-                "evm anchor failed, falling back to stub"
+                "anchor failed; witnesses stay pending, retried next tick"
             );
-            stub()
+            None
         }
     }
 }
@@ -519,6 +592,12 @@ mod tests {
             "sepolia".into(),
             vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
         )
+        .with_evm_anchor(Arc::new(MockProvider {
+            value: canned_evm_value(),
+        }))
+        .with_qtsa_anchor(Arc::new(MockProvider {
+            value: canned_tsa_value(),
+        }))
     }
 
     fn canned_evm_value() -> TimestampValue {
@@ -588,7 +667,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fall_back_path_failing_anchor_does_not_fail_seal() {
+    async fn failing_evm_anchor_stays_pending_and_does_not_fail_seal() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
@@ -600,42 +679,38 @@ mod tests {
         let ctx = base_ctx(signer).with_evm_anchor(Arc::clone(&failing));
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         assert_eq!(rec.leaf_count, 1);
-        let evm_payloads = extract_evm_payloads(&witnesses);
-        assert_eq!(evm_payloads.len(), 1);
-        let p = &evm_payloads[0];
-        // Stub fall-back: 64 zeros + 40 zeros, service address + sepolia.
-        assert_eq!(
-            p["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+        assert!(
+            extract_evm_payloads(&witnesses).is_empty(),
+            "no EVM witness"
         );
+        assert_eq!(extract_qtsa_payloads(&witnesses).len(), 1);
+        let pending = store.list_pending_epochs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].methods, vec![AnchorMethod::Evm]);
         assert_eq!(
-            p["smart_contract_address"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(40))
+            pending[0].anchor_root(),
+            aqua_rs_sdk::primitives::merkle::batch_root_wire(&rec.merkle_root)
         );
-        assert_eq!(
-            p["sender_account_address"].as_str().unwrap(),
-            "0x0000000000000000000000000000000000000000"
-        );
-        assert_eq!(p["network"].as_str().unwrap(), "sepolia");
     }
 
     #[tokio::test]
-    async fn disabled_path_no_provider_uses_stub() {
+    async fn enabled_method_without_provider_refuses_before_closing_the_epoch() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
         acc.append_batch(&[[3u8; 32]], DID_A);
         let signer = build_signer().await;
-        // No `with_evm_anchor`: live provider is never constructed and
-        // the sealer must not call any anchor service.
-        let ctx = base_ctx(signer);
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
-        let evm_payloads = extract_evm_payloads(&witnesses);
-        assert_eq!(evm_payloads.len(), 1);
-        assert_eq!(
-            evm_payloads[0]["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
-        );
+        let mut ctx = base_ctx(signer);
+        ctx.evm_anchor = None;
+        let err = seal_once(&acc, &store, 60, 60, Some(&ctx))
+            .await
+            .expect_err("EVM enabled without a provider");
+        assert!(matches!(err, SealError::MissingProvider(AnchorMethod::Evm)));
+        assert!(err.to_string().contains("evm"), "{err}");
+        // The epoch was not closed: the leaf is still in epoch 1.
+        let ctx = base_ctx(build_signer().await);
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        assert_eq!((rec.id, rec.leaf_count, witnesses.len()), (1, 1, 2));
     }
 
     #[tokio::test]
@@ -723,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fall_back_path_failing_qtsa_does_not_fail_seal() {
+    async fn failing_qtsa_anchor_stays_pending_and_does_not_fail_seal() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
@@ -735,32 +810,19 @@ mod tests {
         let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&failing));
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         assert_eq!(rec.leaf_count, 1);
-        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
-        assert_eq!(qtsa_payloads.len(), 1);
-        let p = &qtsa_payloads[0];
-        assert_eq!(
-            p["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+        assert!(
+            extract_qtsa_payloads(&witnesses).is_empty(),
+            "no qTSA witness"
         );
-        assert_eq!(p["tsa_provider"].as_str().unwrap(), "stub");
-    }
-
-    #[tokio::test]
-    async fn disabled_path_no_qtsa_provider_uses_stub() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[3u8; 32]], DID_A);
-        let signer = build_signer().await;
-        let ctx = base_ctx(signer);
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
-        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
-        assert_eq!(qtsa_payloads.len(), 1);
+        assert_eq!(extract_evm_payloads(&witnesses).len(), 1);
+        let pending = store.list_pending_epochs().unwrap();
+        assert_eq!(pending[0].methods, vec![AnchorMethod::Qtsa]);
         assert_eq!(
-            qtsa_payloads[0]["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+            store
+                .get_pending_epoch_for_leaf(&[2u8; 32], AnchorMethod::Qtsa)
+                .unwrap(),
+            Some(1)
         );
-        assert_eq!(qtsa_payloads[0]["tsa_provider"].as_str().unwrap(), "stub");
     }
 
     #[tokio::test]

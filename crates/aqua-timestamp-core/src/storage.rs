@@ -47,7 +47,7 @@ use crate::epoch::EpochRecord;
 use crate::leaderboard::{
     ContributorEntry, CONTRIBUTOR_STATS_PARTITION, WATCHER_WATERMARK_PARTITION,
 };
-use crate::witness::{AnchorMethod, MintedWitness};
+use crate::witness::{AnchorMethod, MintedWitness, PendingEpoch};
 
 pub const EPOCHS_PARTITION: &str = "epochs";
 pub const EPOCH_LEAVES_PARTITION: &str = "epoch_leaves";
@@ -55,6 +55,12 @@ pub const WITNESS_REVISIONS_PARTITION: &str = "witness_revisions";
 pub const LEAF_TO_TIPS_PARTITION: &str = "leaf_to_tips";
 pub const LEAF_OWNER_PARTITION: &str = "leaf_owner";
 pub const TIP_TO_PAIR_PARTITION: &str = "tip_to_pair";
+/// Epochs with an outstanding anchor (decision D51): `epoch_id` (8 bytes BE)
+/// to the JSON of [`PendingEpoch`].
+pub const PENDING_ANCHORS_PARTITION: &str = "pending_anchors";
+/// Pending lookup for the fetch routes: `leaf || method_byte` to the
+/// `epoch_id` (8 bytes BE) whose anchor for that method is outstanding.
+pub const PENDING_LEAVES_PARTITION: &str = "pending_leaves";
 
 /// Length of a composite `leaf_to_tips` key: 32 (leaf hash) + 1 (method byte).
 pub const LEAF_TO_TIPS_KEY_LEN: usize = 32 + 1;
@@ -75,6 +81,8 @@ pub enum StoreError {
     WitnessJson(#[from] serde_json::Error),
     #[error("witness lookup found an unknown method byte: {0:#x}")]
     UnknownMethodByte(u8),
+    #[error("pending epoch record: {0}")]
+    Pending(String),
 }
 
 /// Length of a composite `epoch_leaves` key: 8 (epoch id) + 32 (leaf hash).
@@ -111,6 +119,8 @@ pub struct Store {
     tip_to_pair: PartitionHandle,
     contributor_stats: PartitionHandle,
     watcher_watermark: PartitionHandle,
+    pending_anchors: PartitionHandle,
+    pending_leaves: PartitionHandle,
 }
 
 impl Store {
@@ -141,8 +151,14 @@ impl Store {
             WATCHER_WATERMARK_PARTITION,
             PartitionCreateOptions::default(),
         )?;
+        let pending_anchors = keyspace
+            .open_partition(PENDING_ANCHORS_PARTITION, PartitionCreateOptions::default())?;
+        let pending_leaves =
+            keyspace.open_partition(PENDING_LEAVES_PARTITION, PartitionCreateOptions::default())?;
         Ok(Self {
             keyspace,
+            pending_anchors,
+            pending_leaves,
             epochs,
             epoch_leaves,
             witness_revisions,
@@ -169,7 +185,42 @@ impl Store {
         leaves: &[LeafEntry],
         witnesses: &[MintedWitness],
     ) -> Result<(), StoreError> {
+        self.persist_sealed_epoch_with_pending(record, leaves, witnesses, None)
+    }
+
+    /// As [`Self::persist_sealed_epoch`], and in the same atomic batch the
+    /// epoch's outstanding anchors (`pending`, decision D51): the prepared
+    /// batch and the methods whose anchor failed, plus the per-leaf pending
+    /// lookup. A crash either keeps the sealed epoch with its pending record
+    /// or neither.
+    pub fn persist_sealed_epoch_with_pending(
+        &self,
+        record: &EpochRecord,
+        leaves: &[LeafEntry],
+        witnesses: &[MintedWitness],
+        pending: Option<&PendingEpoch>,
+    ) -> Result<(), StoreError> {
         let mut batch = self.keyspace.batch();
+        if let Some(p) = pending {
+            batch.insert(
+                &self.pending_anchors,
+                p.epoch_id.to_be_bytes().to_vec(),
+                serde_json::to_vec(p)?,
+            );
+            for leaf in p
+                .leaf_hashes()
+                .map_err(|e| StoreError::Pending(e.to_string()))?
+            {
+                for m in &p.methods {
+                    let key = compose_leaf_to_tips_key(&leaf, m.method_byte());
+                    batch.insert(
+                        &self.pending_leaves,
+                        key.to_vec(),
+                        p.epoch_id.to_be_bytes().to_vec(),
+                    );
+                }
+            }
+        }
 
         let epoch_key = record.id.to_be_bytes().to_vec();
         let encoded = postcard::to_stdvec(record).map_err(StoreError::Encode)?;
@@ -189,6 +240,95 @@ impl Store {
             );
         }
 
+        self.write_witnesses(&mut batch, witnesses)?;
+
+        batch.commit()?;
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    /// Persist the witnesses a retry minted for `done` of a pending epoch,
+    /// and in the same atomic batch drop `done` from it: `remaining` is the
+    /// pending record after the retry (its `methods` without `done`); when
+    /// nothing remains the record is removed.
+    pub fn persist_pending_minted(
+        &self,
+        remaining: &PendingEpoch,
+        done: AnchorMethod,
+        witnesses: &[MintedWitness],
+    ) -> Result<(), StoreError> {
+        let mut batch = self.keyspace.batch();
+        self.write_witnesses(&mut batch, witnesses)?;
+        let epoch_key = remaining.epoch_id.to_be_bytes();
+        for leaf in remaining
+            .leaf_hashes()
+            .map_err(|e| StoreError::Pending(e.to_string()))?
+        {
+            let key = compose_leaf_to_tips_key(&leaf, done.method_byte());
+            // A leaf resubmitted in a later pending epoch points there; only
+            // drop the lookup that belongs to this epoch.
+            if self.pending_leaves.get(key)?.as_deref() == Some(&epoch_key[..]) {
+                batch.remove(&self.pending_leaves, key.to_vec());
+            }
+        }
+        if remaining.methods.is_empty() {
+            batch.remove(&self.pending_anchors, epoch_key.to_vec());
+        } else {
+            batch.insert(
+                &self.pending_anchors,
+                epoch_key.to_vec(),
+                serde_json::to_vec(remaining)?,
+            );
+        }
+        batch.commit()?;
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    /// Every epoch with an outstanding anchor, oldest first.
+    pub fn list_pending_epochs(&self) -> Result<Vec<PendingEpoch>, StoreError> {
+        self.pending_anchors
+            .iter()
+            .map(|kv| {
+                let (_k, v) = kv?;
+                Ok(serde_json::from_slice(&v)?)
+            })
+            .collect()
+    }
+
+    /// The epoch whose `method` anchor for `leaf` is outstanding, if any.
+    pub fn get_pending_epoch_for_leaf(
+        &self,
+        leaf: &[u8; 32],
+        method: AnchorMethod,
+    ) -> Result<Option<u64>, StoreError> {
+        let key = compose_leaf_to_tips_key(leaf, method.method_byte());
+        match self.pending_leaves.get(key)? {
+            Some(v) => Ok(Some(u64_from_be_slice(&v)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether `epoch_id`'s `method` anchor is outstanding.
+    pub fn is_epoch_pending(
+        &self,
+        epoch_id: u64,
+        method: AnchorMethod,
+    ) -> Result<bool, StoreError> {
+        match self.pending_anchors.get(epoch_id.to_be_bytes())? {
+            Some(v) => {
+                let p: PendingEpoch = serde_json::from_slice(&v)?;
+                Ok(p.methods.contains(&method))
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn write_witnesses(
+        &self,
+        batch: &mut fjall::Batch,
+        witnesses: &[MintedWitness],
+    ) -> Result<(), StoreError> {
         for w in witnesses {
             let obj_json = serde_json::to_vec(&w.object_revision)?;
             let sig_json = serde_json::to_vec(&w.signature_revision)?;
@@ -215,9 +355,6 @@ impl Store {
             let index_bytes = postcard::to_stdvec(&index).map_err(StoreError::Encode)?;
             batch.insert(&self.tip_to_pair, w.signature_hash.to_vec(), index_bytes);
         }
-
-        batch.commit()?;
-        self.keyspace.persist(PersistMode::SyncAll)?;
         Ok(())
     }
 

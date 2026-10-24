@@ -32,16 +32,14 @@ pub enum SseEvent {
         merkle_root: String,
         timestamp: u64,
     },
-    /// Emitted after the EVM anchor tx is confirmed (or stub-filled on
-    /// RPC failure). `block` is 0 for stub outcomes.
+    /// Emitted after the EVM anchor tx is confirmed.
     AnchorEvm {
         epoch_id: u64,
         tx_hash: String,
         block: u64,
         network: String,
     },
-    /// Emitted after the qTSA anchor completes (or stub-filled on
-    /// provider failure). `gen_time` is the RFC 3161 `genTime` string.
+    /// Emitted after the qTSA anchor completes. `gen_time` is the RFC 3161 `genTime` string.
     AnchorQtsa {
         epoch_id: u64,
         tsa_provider: String,

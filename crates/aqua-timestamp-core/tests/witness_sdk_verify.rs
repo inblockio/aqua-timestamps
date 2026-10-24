@@ -597,10 +597,18 @@ fn pending_methods(store: &Store) -> Vec<(u64, Vec<AnchorMethod>)> {
 async fn d51_missing_provider_refuses_to_start() {
     let no_evm = ctx(None, Some(Arc::new(TestTsa))).await;
     let err = no_evm.validate().expect_err("EVM enabled without provider");
-    assert!(err.to_string().contains("evm"), "message names the method: {err}");
+    assert!(
+        err.to_string().contains("evm"),
+        "message names the method: {err}"
+    );
     let no_qtsa = ctx(Some(Arc::new(ChainAnchor)), None).await;
-    let err = no_qtsa.validate().expect_err("qTSA enabled without provider");
-    assert!(err.to_string().contains("qtsa"), "message names the method: {err}");
+    let err = no_qtsa
+        .validate()
+        .expect_err("qTSA enabled without provider");
+    assert!(
+        err.to_string().contains("qtsa"),
+        "message names the method: {err}"
+    );
     ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa)))
         .await
         .validate()
@@ -619,14 +627,21 @@ async fn d51_failed_evm_stays_pending_qtsa_minted() {
     assert_eq!(ws.len(), 2, "only the qTSA witnesses are minted");
     assert!(ws.iter().all(|w| w.method == AnchorMethod::Qtsa));
     assert!(stub_witnesses(&ws).is_empty());
-    assert_witness_verifies(&verify(&a, &[witness_for(&ws, &a.leaf, AnchorMethod::Qtsa)]), witness_for(&ws, &a.leaf, AnchorMethod::Qtsa));
+    assert_witness_verifies(
+        &verify(&a, &[witness_for(&ws, &a.leaf, AnchorMethod::Qtsa)]),
+        witness_for(&ws, &a.leaf, AnchorMethod::Qtsa),
+    );
     assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Evm])]);
     assert_eq!(
-        store.get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Evm).expect("store"),
+        store
+            .get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Evm)
+            .expect("store"),
         Some(1)
     );
     assert_eq!(
-        store.get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Qtsa).expect("store"),
+        store
+            .get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Qtsa)
+            .expect("store"),
         None
     );
 }
@@ -661,8 +676,14 @@ async fn d51_later_tick_mints_pending_for_same_root() {
     // Provider back: the tick mints the epoch-1 EVM witnesses.
     let up = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
     let late = next_tick(&store, &up).await;
-    assert_eq!(late.len(), 2, "both leaves of epoch 1 get their EVM witness");
-    assert!(late.iter().all(|w| w.method == AnchorMethod::Evm && w.epoch_id == 1));
+    assert_eq!(
+        late.len(),
+        2,
+        "both leaves of epoch 1 get their EVM witness"
+    );
+    assert!(late
+        .iter()
+        .all(|w| w.method == AnchorMethod::Evm && w.epoch_id == 1));
     assert!(pending_methods(&store).is_empty(), "nothing left pending");
     for c in [&a, &b] {
         let q = witness_for(&on_time, &c.leaf, AnchorMethod::Qtsa);
@@ -674,8 +695,15 @@ async fn d51_later_tick_mints_pending_for_same_root() {
         );
         assert_witness_verifies(&verify(c, &[e]), e);
         let both = verify(c, &[q, e]);
-        assert!(both.is_verified(), "dual anchor tree: {:#?}", error_logs(&both));
-        assert!(store.get_tip_for_leaf(&c.leaf, AnchorMethod::Evm).expect("store").is_some());
+        assert!(
+            both.is_verified(),
+            "dual anchor tree: {:#?}",
+            error_logs(&both)
+        );
+        assert!(store
+            .get_tip_for_leaf(&c.leaf, AnchorMethod::Evm)
+            .expect("store")
+            .is_some());
     }
 }
 

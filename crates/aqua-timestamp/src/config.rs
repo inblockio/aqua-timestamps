@@ -68,6 +68,40 @@ impl Config {
         evm
     }
 
+    /// Decision D51: an enabled anchor method must have its provider
+    /// configured; otherwise the service refuses to start with a message
+    /// that names the method and the missing setting. There is no silent
+    /// disable and no placeholder witness. Opting a method out stays
+    /// explicit: `[anchors.evm].enabled = false` / `[anchors.qtsa].enabled =
+    /// false`. `mnemonic` is the service mnemonic the EVM provider signs with.
+    pub fn check_enabled_anchors(&self, mnemonic: &str) -> Result<()> {
+        let evm = self.effective_evm_anchor();
+        if evm.enabled {
+            if mnemonic.trim().is_empty() {
+                anyhow::bail!(
+                    "anchors.evm is enabled but the service mnemonic is empty: set the mnemonic \
+                     or set [anchors.evm].enabled = false"
+                );
+            }
+            if evm.rpc_url.trim().is_empty() {
+                anyhow::bail!(
+                    "anchors.evm is enabled but anchors.evm.rpc_url is empty: set an RPC URL \
+                     or set [anchors.evm].enabled = false"
+                );
+            }
+            evm.evm_chain().map_err(|e| {
+                anyhow::anyhow!("anchors.evm is enabled but anchors.evm.chain is invalid: {e}")
+            })?;
+        }
+        if self.anchors.qtsa.enabled && self.anchors.qtsa.url.trim().is_empty() {
+            anyhow::bail!(
+                "anchors.qtsa is enabled but anchors.qtsa.url is empty: set a TSA URL \
+                 or set [anchors.qtsa].enabled = false"
+            );
+        }
+        Ok(())
+    }
+
     /// Derive a numeric chain id from the `[anchors.evm].chain` string.
     /// Used by the leaderboard module to query on-chain balances on the
     /// same chain the service is anchoring to.
@@ -148,7 +182,7 @@ pub struct StorageConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AnchorConfig {
     /// The `network` field embedded in EVM timestamp witness payloads.
-    /// Defaults to `"sepolia"` so the M3 stub matches the M4 target chain.
+    /// Defaults to `"sepolia"`, the M4 target chain.
     #[serde(default = "default_evm_network")]
     pub evm_network: String,
 }
@@ -180,8 +214,8 @@ pub struct AnchorsConfig {
 pub struct EvmAnchorConfig {
     /// Live anchor toggle. `true` (default) constructs a
     /// `CliEthTimestamper` at boot and submits one tx per non-empty
-    /// epoch. `false` keeps the M3 stub behaviour: witnesses are minted
-    /// with zero `transaction_hash` / zero contract address.
+    /// epoch. `false` opts the EVM method out: no EVM witnesses are minted.
+    /// Enabled without a usable provider setting is a startup error (D51).
     #[serde(default = "default_evm_enabled")]
     pub enabled: bool,
 
@@ -233,8 +267,8 @@ impl Default for EvmAnchorConfig {
 pub struct QtsaAnchorConfig {
     /// Live anchor toggle. `true` (default) constructs an
     /// [`aqua_rs_sdk::web::tsa::TsaTimestamper`] at boot. `false` keeps
-    /// the M3/M4 stub: qTSA witnesses are minted with zero
-    /// `transaction_hash` and `tsa_provider = "stub"`.
+    /// an explicit opt-out: no qTSA witnesses are minted. Enabled without a
+    /// URL is a startup error (D51).
     #[serde(default = "default_qtsa_enabled")]
     pub enabled: bool,
 
@@ -551,7 +585,9 @@ mod tests {
         cfg.check_enabled_anchors("mnemonic words")
             .expect("defaults configure both providers");
 
-        let err = cfg.check_enabled_anchors("").expect_err("EVM without mnemonic");
+        let err = cfg
+            .check_enabled_anchors("")
+            .expect_err("EVM without mnemonic");
         assert!(err.to_string().contains("anchors.evm"), "{err}");
         assert!(err.to_string().contains("mnemonic"), "{err}");
 
@@ -559,12 +595,16 @@ mod tests {
         let err = cfg.check_enabled_anchors("m").expect_err("EVM without RPC");
         assert!(err.to_string().contains("anchors.evm.rpc_url"), "{err}");
         cfg.anchors.evm.enabled = false;
-        cfg.check_enabled_anchors("m").expect("EVM explicitly disabled");
+        cfg.check_enabled_anchors("m")
+            .expect("EVM explicitly disabled");
 
         cfg.anchors.qtsa.url = String::new();
-        let err = cfg.check_enabled_anchors("m").expect_err("qTSA without URL");
+        let err = cfg
+            .check_enabled_anchors("m")
+            .expect_err("qTSA without URL");
         assert!(err.to_string().contains("anchors.qtsa.url"), "{err}");
         cfg.anchors.qtsa.enabled = false;
-        cfg.check_enabled_anchors("m").expect("both explicitly disabled");
+        cfg.check_enabled_anchors("m")
+            .expect("both explicitly disabled");
     }
 }

@@ -27,9 +27,8 @@ use crate::{
     state::AppState,
 };
 
-/// Anchor methods advertised at M2. The providers themselves are stubbed
-/// until M4 (EVM) and M5 (qTSA); the labels are stable across milestones
-/// so clients can hard-code the strings now.
+/// Anchor methods the aggregator knows. The labels are stable across
+/// milestones so clients can hard-code the strings.
 const ANCHOR_METHODS: &[&str] = &["evm", "qtsa"];
 
 /// Hard cap on `GET /v1/epochs?limit=N`.
@@ -556,6 +555,13 @@ fn union_for_epoch(
     if epoch.is_none() {
         return Ok(not_found_response("epoch not sealed yet"));
     }
+    if state
+        .store
+        .is_epoch_pending(epoch_id, method)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?
+    {
+        return Ok(pending_anchor_response(method, epoch_id, None));
+    }
     let entries = state
         .store
         .list_witnesses_for_did_in_epoch(did, epoch_id, method)
@@ -655,7 +661,16 @@ pub async fn get_tree_by_leaf(
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     let tip = match tip {
         Some(t) => t,
-        None => return Ok(not_found_response("no witness for that leaf/method yet")),
+        None => {
+            let pending = state
+                .store
+                .get_pending_epoch_for_leaf(&leaf, method)
+                .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+            return Ok(match pending {
+                Some(epoch_id) => pending_anchor_response(method, epoch_id, Some(&leaf)),
+                None => not_found_response("no witness for that leaf/method yet"),
+            });
+        }
     };
     let idx = state
         .store
@@ -730,6 +745,32 @@ fn load_pair_into_maps(
 
 fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
     parse_leaf_hex(input).map_err(|e| e.to_string())
+}
+
+/// Decision D51: the leaf's epoch is sealed and its batch root fixed, but
+/// the `method` anchor is outstanding (the provider call failed); the
+/// aggregator retries the same root every epoch tick and mints then.
+/// `202 Accepted` (RFC 9110 section 15.3.3: accepted, processing not
+/// complete) with `{"status":"pending","method","epoch","leaf"?,"detail"}`.
+/// Never a placeholder witness. 404 keeps meaning "unknown / not sealed".
+fn pending_anchor_response(
+    method: AnchorMethod,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    let mut body = json!({
+        "status": "pending",
+        "method": method.as_str(),
+        "epoch": epoch_id,
+        "detail": format!(
+            "epoch {epoch_id} is sealed; its {} anchor is outstanding and retried every epoch tick",
+            method.as_str()
+        ),
+    });
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::ACCEPTED, Json(body)).into_response()
 }
 
 fn not_found_response(msg: &str) -> Response {
