@@ -39,6 +39,5 @@ sha2      = "0.10"
 spki      = "0.7"
 x509-cert = "0.2"
 x509-tsp  = "0.1"
-proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }

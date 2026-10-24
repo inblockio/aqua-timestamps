@@ -8,7 +8,13 @@
 use std::path::PathBuf;
 
 use aqua_rs_sdk::{
-    primitives::{merkle::verify_inclusion, HashType},
+    primitives::{
+        merkle::{
+            parse_batch_digest, parse_batch_proof, parse_batch_root, shielded_leaf,
+            verify_batch_inclusion,
+        },
+        RevisionLink,
+    },
     schema::AnyRevision,
 };
 use aqua_timestamp::{
@@ -264,28 +270,24 @@ async fn round_trip_submit_seal_fetch_witness_verify_proof() {
                 found_object = true;
                 let payloads = rev_value["payloads"].as_object().unwrap();
                 assert_eq!(payloads["type"].as_str().unwrap(), "timestamp");
-                let merkle_root_hex = payloads["merkle_root"].as_str().unwrap();
-                let merkle_root = parse_hex32(merkle_root_hex);
-                let proof: Vec<Vec<u8>> = payloads["merkle_proof"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|p| parse_hex32(p.as_str().unwrap()).to_vec())
-                    .collect();
-                let tree_size = payloads["batch_tree_size"].as_u64().unwrap() as usize;
-                let leaf_index = payloads["batch_leaf_index"].as_u64().unwrap() as usize;
-
-                assert!(
-                    verify_inclusion(
-                        &target_leaf_bytes,
-                        leaf_index,
-                        tree_size,
-                        &proof,
-                        &merkle_root,
-                        &HashType::Sha3_256
-                    ),
-                    "inclusion proof failed to verify against stated merkle_root"
-                );
+                // Inclusion, judged by the SDK's batch primitives (PCA-0015
+                // section 3.8): the shielded leaf under the payload's nonce sits
+                // at `batch_leaf_index` of the tree with root `merkle_root`.
+                let root = parse_batch_root(payloads["merkle_root"].as_str().unwrap())
+                    .expect("merkle_root is a batch root");
+                let nonce = parse_batch_digest(payloads["shielding_nonce"].as_str().unwrap())
+                    .expect("shielding_nonce is a batch digest");
+                let proof = parse_batch_proof(&payloads["merkle_proof"]).expect("proof");
+                let leaf = shielded_leaf(&RevisionLink::from_bytes(target_leaf_bytes), &nonce)
+                    .expect("shielded leaf");
+                verify_batch_inclusion(
+                    &leaf,
+                    payloads["batch_leaf_index"].as_u64().unwrap(),
+                    payloads["batch_tree_size"].as_u64().unwrap(),
+                    &proof,
+                    &root,
+                )
+                .expect("inclusion proof verifies against the stated merkle_root");
 
                 let prev = rev_value["previous_revision"].as_str().unwrap();
                 // `previous_revision` is the leaf as an SDK RevisionLink: `0x1620` + digest.

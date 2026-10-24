@@ -222,15 +222,17 @@ async fn submit_seal_and_fetch_epoch() {
     assert_eq!(rec["leaf_count"].as_u64().unwrap(), 4);
     assert_eq!(rec["hash_type"].as_str().unwrap(), "FIPS_202-SHA3-256");
 
-    // Expected root: decode the four leaves, sort them, feed the SDK.
+    // The record holds the digest of the SDK batch root (shielded leaves, PCA-0015
+    // section 3.8), never the legacy root over the raw leaves.
     let mut sorted: Vec<Vec<u8>> = leaves
         .iter()
         .map(|s| hex::decode(s.trim_start_matches("0x")).unwrap())
         .collect();
     sorted.sort();
-    let expected = merkle_root(&sorted, &HashType::Sha3_256).expect("non-empty leaf set");
-    let expected_hex = format!("0x{}", hex::encode(expected));
-    assert_eq!(rec["merkle_root"].as_str().unwrap(), expected_hex);
+    let legacy = merkle_root(&sorted, &HashType::Sha3_256).expect("non-empty leaf set");
+    let root_hex = rec["merkle_root"].as_str().unwrap();
+    assert_eq!(root_hex.len(), 2 + 64, "0x + 32-byte digest");
+    assert_ne!(root_hex, format!("0x{}", hex::encode(legacy)));
 }
 
 #[tokio::test]
@@ -253,8 +255,8 @@ async fn duplicate_within_one_request_is_deduped() {
     let (_, body) = get_json(&h.router, "/v1/epochs?limit=10", Some(&token)).await;
     let epochs = body["epochs"].as_array().unwrap();
     assert_eq!(epochs[0]["leaf_count"].as_u64().unwrap(), 1);
-    // Single-leaf Merkle root equals the leaf bytes themselves.
-    assert_eq!(
+    // A one-leaf batch's root is its shielded leaf, never the raw leaf.
+    assert_ne!(
         epochs[0]["merkle_root"].as_str().unwrap(),
         leaf.to_lowercase()
     );
@@ -376,7 +378,13 @@ async fn persistence_survives_keyspace_reopen() {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        (leaf.to_lowercase(), leaf)
+        // The root is the SDK batch root (fresh nonces each seal): read it back.
+        let (_, body) = get_json(&router, "/v1/epochs?limit=10", Some(&token)).await;
+        let root = body["epochs"][0]["merkle_root"]
+            .as_str()
+            .expect("sealed epoch listed")
+            .to_string();
+        (root, leaf)
     };
 
     // Second boot at the same path.

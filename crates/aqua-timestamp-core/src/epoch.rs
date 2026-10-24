@@ -13,12 +13,13 @@ pub const HASH_TYPE_LABEL: &str = "FIPS_202-SHA3-256";
 
 /// Persisted summary of a sealed epoch.
 ///
-/// `merkle_root` is the RFC 9162 root over the (sorted) leaf set, computed
-/// via [`aqua_rs_sdk::primitives::merkle::merkle_root`]. For epochs with
-/// zero leaves the root is `sha3_256(b"")` (see
-/// [`empty_merkle_root`](crate::merkle::empty_merkle_root) for the
-/// rationale); this keeps the schedule monotonic without inventing a
-/// sentinel value.
+/// `merkle_root` is the digest of the SDK batch root the epoch's anchors
+/// carry (`prepare_batch_timestamp`: the PCA-0015 shielded RFC 9162 tree,
+/// one shielded leaf per accepted leaf; wire form `0x1620` + this digest).
+/// Records sealed before OW1 hold the legacy raw-leaf root instead, which no
+/// SDK verifier accepts. For epochs with zero leaves nothing is anchored and
+/// the root is `sha3_256(b"")` (see
+/// [`empty_merkle_root`](crate::merkle::empty_merkle_root)).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochRecord {
     pub id: u64,

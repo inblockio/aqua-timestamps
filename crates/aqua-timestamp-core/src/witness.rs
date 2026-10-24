@@ -13,23 +13,22 @@
 //! hash itself, not a tree revision we own; this is exactly the chain
 //! shape aquafire publishes and what the SDK's verifier reconstructs.
 //!
-//! The payloads are filled in via the SDK's built-in template types
-//! ([`EvmTimestampPayload`] / [`TsaTimestampPayload`]) so the JSON schema
-//! validator inside `create_object_util` passes. The on-chain / qTSA
-//! fields are filled from a [`MethodAnchorOutcome`] supplied by the
-//! caller: at M4, EVM carries real Sepolia output (transaction hash,
-//! sender, contract address, network) when the live provider succeeds and
-//! falls back to stub data when it fails; qTSA stays stubbed until M5.
+//! The batch is the SDK's (PCA-0015 section 3.8): [`EpochBatch::prepare`]
+//! calls `prepare_batch_timestamp` (one target per leaf, one shielding nonce
+//! per leaf, the shielded RFC 9162 tree and its `0x1620` root), the sealer
+//! anchors [`EpochBatch::anchor_root`] once per method, and
+//! [`mint_witnesses_for_epoch`] calls `finish_batch_timestamp` with each
+//! method's anchor facts, which builds every TimestampObject. Nothing in this
+//! crate computes a batch leaf, root, proof or nonce.
 
 use std::sync::Arc;
 
 use aqua_rs_sdk::{
-    primitives::{merkle::inclusion_proof, multihash_decode, HashType, Method, RevisionLink},
+    core::timestamp::{finish_batch_timestamp, prepare_batch_timestamp, PreparedBatch},
+    primitives::{merkle::parse_batch_root, multihash_decode, HashType, Method, RevisionLink},
     schema::{
-        template::BuiltInTemplate,
-        templates::{EvmTimestampPayload, TsaTimestampPayload},
-        timestamp::TimestampValue,
-        AnyRevision, Object,
+        template::BuiltInTemplate, templates::TsaTimestampPayload, timestamp::TimestampValue,
+        tree::Tree, AnyRevision, AquaTreeWrapper, Object,
     },
     verification::Linkable,
     Secp256k1Signer, Signer,
@@ -39,6 +38,12 @@ use thiserror::Error;
 
 use crate::accumulator::SealedSnapshot;
 use crate::merkle::Hash32;
+
+/// The `network` value of every qTSA payload: the SDK's TSA timestamp
+/// template fixes it (`src/schema/templates/timestamp_tsa.json`,
+/// `"network": {"const": "tsa"}`) and `finish_batch_timestamp` builds a TSA
+/// payload only for this label (audit G).
+pub const QTSA_NETWORK_LABEL: &str = "tsa";
 
 /// One byte identifying an anchor method inside composite storage keys.
 ///
@@ -95,6 +100,8 @@ impl AnchorMethod {
 pub enum WitnessError {
     #[error("witness object build failed: {0}")]
     Object(String),
+    #[error("witness batch failed: {0}")]
+    Batch(String),
     #[error("witness signature failed: {0}")]
     Sign(String),
     #[error("witness payload serialise failed: {0}")]
@@ -103,31 +110,36 @@ pub enum WitnessError {
     BadHash(usize),
 }
 
-/// Per-method anchor result the seal-time witness minter folds into every
-/// per-leaf TimestampObject payload of the matching method.
+/// Per-method anchor result the seal-time witness minter hands to the SDK's
+/// `finish_batch_timestamp` as the anchor facts of every per-leaf
+/// TimestampObject of the matching method.
 ///
-/// The fields mirror the SDK's [`TimestampValue`] minus the per-leaf
-/// `merkle_proof` / `batch_tree_size` / `batch_leaf_index` (which are
-/// computed per leaf inside the minter, not anchored on-chain).
+/// The fields mirror the anchor-derived part of the SDK's [`TimestampValue`];
+/// the batch fields (`merkle_root`, `merkle_proof`, `batch_tree_size`,
+/// `batch_leaf_index`, `shielding_nonce`) belong to the SDK's prepared batch.
 ///
-/// At M4, EVM outcomes are sourced from a real
-/// [`aqua_rs_sdk::CliEthTimestamper`] call: on success the live values
-/// populate every leaf's witness in the epoch; on RPC / insufficient-funds
-/// failure the sealer constructs a stub outcome via [`Self::stub_evm`].
-/// qTSA outcomes stay stubbed until M5.
+/// Live outcomes come from an anchor provider (`CliEthTimestamper` for EVM,
+/// `TsaTimestamper` for qTSA); on a missing or failed provider the sealer
+/// constructs a stub outcome via [`Self::stub_evm`] / [`Self::stub_qtsa`].
 #[derive(Debug, Clone)]
 pub struct MethodAnchorOutcome {
     /// The `0x` + 64-hex transaction id, or 64 zeros for a stub.
     pub transaction_hash: String,
     /// The `0x` + 40-hex EIP-55 sender address (EVM), or `"stub"` for qTSA.
     pub sender_account_address: String,
-    /// EVM contract address. For qTSA this is the all-zeros placeholder
-    /// (the SDK schema accepts it; qTSA payloads ignore it anyway).
+    /// EVM contract address. For qTSA this is the TSA URL (the SDK overloads
+    /// the field); qTSA payloads do not carry it.
     pub smart_contract_address: String,
-    /// `"sepolia"` / `"mainnet"` / `"tsa"` etc.
+    /// `"sepolia"` / `"mainnet"` etc. for EVM. A qTSA payload always carries
+    /// [`QTSA_NETWORK_LABEL`], whatever this field says.
     pub network: String,
-    /// For qTSA only: the provider name (`"stub"` until M5).
+    /// For qTSA only: the provider name (`"stub"` for a stub).
     pub tsa_provider: String,
+    /// The anchor's own time as the provider returned it: the TSA token's
+    /// genTime for qTSA (the SDK binds `payloads.timestamp` to it, audit B),
+    /// the provider's time for EVM. `None` for a stub, whose payload keeps the
+    /// epoch close time.
+    pub timestamp: Option<u64>,
 }
 
 impl MethodAnchorOutcome {
@@ -146,24 +158,26 @@ impl MethodAnchorOutcome {
             smart_contract_address: format!("0x{}", "0".repeat(40)),
             network: network.to_string(),
             tsa_provider: String::new(),
+            timestamp: None,
         }
     }
 
-    /// Stub qTSA outcome. M5 will swap this for a real RFC 3161 call.
+    /// Stub qTSA outcome the sealer falls back to when the live provider
+    /// errors or is not configured.
     pub fn stub_qtsa() -> Self {
         Self {
             transaction_hash: format!("0x{}", "0".repeat(64)),
             sender_account_address: "stub".to_string(),
             smart_contract_address: format!("0x{}", "0".repeat(40)),
-            network: "tsa".to_string(),
+            network: QTSA_NETWORK_LABEL.to_string(),
             tsa_provider: "stub".to_string(),
+            timestamp: None,
         }
     }
 
     /// Build an EVM outcome from a [`TimestampValue`] returned by a live
-    /// provider. The minter applies its own `merkle_proof` /
-    /// `batch_tree_size` / `batch_leaf_index` per leaf, so only the
-    /// anchor-derived fields are pulled across here.
+    /// provider. Only the anchor-derived fields are pulled across; the batch
+    /// fields come from the SDK's prepared batch.
     pub fn from_evm_timestamp_value(value: &TimestampValue) -> Self {
         Self {
             transaction_hash: value.transaction_hash.clone(),
@@ -171,18 +185,15 @@ impl MethodAnchorOutcome {
             smart_contract_address: value.smart_contract_address.clone(),
             network: value.network.clone(),
             tsa_provider: String::new(),
+            timestamp: Some(value.timestamp),
         }
     }
 
     /// Build a qTSA outcome from a [`TimestampValue`] returned by a live
     /// RFC 3161 provider (the SDK's `TsaTimestamper`). The TSA value carries
-    /// the response identifier in `transaction_hash`, the publisher name
-    /// in `tsa_provider`, and the request URL in `smart_contract_address`
-    /// (the SDK overloads this field as the TSA endpoint). The SDK leaves
-    /// `sender_account_address` empty; the `TsaTimestampPayload` schema
-    /// (`aqua-rs-sdk/src/schema/timestamp.rs`) requires it non-empty, so
-    /// we fall back to the configured `network_label` for parity with
-    /// what the EVM path puts in its sender slot.
+    /// the base64 `TimeStampResp` in `transaction_hash`, the publisher name
+    /// in `tsa_provider`, the request URL in `smart_contract_address` and
+    /// the token's genTime in `timestamp`.
     pub fn from_tsa_timestamp_value(value: &TimestampValue) -> Self {
         let sender = if value.sender_account_address.is_empty() {
             value.tsa_provider.clone()
@@ -193,9 +204,45 @@ impl MethodAnchorOutcome {
             transaction_hash: value.transaction_hash.clone(),
             sender_account_address: sender,
             smart_contract_address: value.smart_contract_address.clone(),
-            network: value.network.clone(),
+            network: QTSA_NETWORK_LABEL.to_string(),
             tsa_provider: value.tsa_provider.clone(),
+            timestamp: Some(value.timestamp),
         }
+    }
+
+    /// The anchor facts `finish_batch_timestamp` takes for `method`: this
+    /// outcome's fields, the anchored root, and the time (the provider's,
+    /// or `epoch_timestamp` for a stub). The batch fields are left empty;
+    /// finish ignores them and writes the prepared batch's own.
+    fn facts(
+        &self,
+        method: AnchorMethod,
+        merkle_root: &str,
+        epoch_timestamp: u64,
+    ) -> TimestampValue {
+        let (sender, network) = match method {
+            AnchorMethod::Evm => (
+                ensure_0x(&self.sender_account_address),
+                self.network.clone(),
+            ),
+            AnchorMethod::Qtsa => (
+                self.sender_account_address.clone(),
+                QTSA_NETWORK_LABEL.to_string(),
+            ),
+        };
+        TimestampValue::new(
+            Vec::new(),
+            sender,
+            self.tsa_provider.clone(),
+            self.transaction_hash.clone(),
+            self.smart_contract_address.clone(),
+            network,
+            merkle_root.to_string(),
+            self.timestamp.unwrap_or(epoch_timestamp),
+            0,
+            0,
+            String::new(),
+        )
     }
 }
 
@@ -228,172 +275,191 @@ pub struct MintedWitness {
     pub signature_revision: AnyRevision,
 }
 
-/// Mint every witness revision implied by a sealed snapshot.
+/// One epoch's batch as the SDK prepared it: one target per accepted leaf
+/// (in the snapshot's order), each with its shielding nonce and inclusion
+/// proof, and the shielded root every anchor of the epoch carries.
+///
+/// The aggregator holds only the client's leaf (a revision link), not the
+/// client's tree, while the SDK's batch producer takes trees. Each target is
+/// therefore handed over in a link-only carrier tree (see
+/// [`link_only_carrier`]); the producer reads nothing from it but the
+/// target's presence, and the minter keeps only the timestamp revision the
+/// producer adds.
+pub struct EpochBatch {
+    prepared: PreparedBatch,
+    leaves: Vec<Hash32>,
+    carriers: Vec<AquaTreeWrapper>,
+}
+
+impl EpochBatch {
+    /// Prepare the batch of `leaves` through `prepare_batch_timestamp`.
+    /// `None` for an empty epoch: there is nothing to anchor.
+    pub fn prepare(leaves: &[Hash32]) -> Result<Option<Self>, WitnessError> {
+        if leaves.is_empty() {
+            return Ok(None);
+        }
+        let carriers: Vec<AquaTreeWrapper> = leaves.iter().map(link_only_carrier).collect();
+        let prepared = prepare_batch_timestamp(&carriers, None)
+            .map_err(|e| WitnessError::Batch(format!("prepare_batch_timestamp: {e:?}")))?;
+        Ok(Some(Self {
+            prepared,
+            leaves: leaves.to_vec(),
+            carriers,
+        }))
+    }
+
+    /// The batch root in its wire form (`0x1620` + digest): the value every
+    /// anchor of the epoch must carry. An EVM provider sends it as
+    /// `PreparedBatch::evm_calldata` (selector + root); a TSA stamps it.
+    pub fn anchor_root(&self) -> &str {
+        self.prepared.merkle_root()
+    }
+
+    /// The bare 32-byte digest of [`Self::anchor_root`], as the epoch record
+    /// stores it.
+    pub fn root_digest(&self) -> Result<Hash32, WitnessError> {
+        parse_batch_root(self.prepared.merkle_root())
+            .map_err(|e| WitnessError::Batch(format!("batch root: {e:?}")))
+    }
+
+    /// The leaves in batch order.
+    pub fn leaves(&self) -> &[Hash32] {
+        &self.leaves
+    }
+}
+
+/// A tree that holds only the key of `leaf`, aimed at it, so the SDK's batch
+/// producer accepts the leaf as a target. The value under the key is an inert
+/// placeholder that no output carries: `finish_batch_timestamp` only checks
+/// that the tree contains its target, and the minter takes from the result
+/// nothing but the timestamp revision the producer added.
+fn link_only_carrier(leaf: &Hash32) -> AquaTreeWrapper {
+    let link = RevisionLink::from_bytes(*leaf);
+    let placeholder = Object::<serde_json::Value>::new(
+        RevisionLink::from_bytes([0u8; 32]),
+        RevisionLink::from_bytes(TsaTimestampPayload::TEMPLATE_LINK),
+        Method::Scalar,
+        serde_json::Value::Null,
+    );
+    let tree = Tree {
+        revisions: [(link.clone(), AnyRevision::Typed(placeholder))]
+            .into_iter()
+            .collect(),
+        file_index: Default::default(),
+    };
+    AquaTreeWrapper::new(tree, None, Some(link))
+}
+
+/// Mint every witness revision of a sealed epoch.
 ///
 /// Inputs:
-/// * `snapshot` : the just-closed accumulator output. Provides the
-///   per-epoch leaf set with submitter DIDs.
-/// * `merkle_root` : the Merkle root of the (sorted) leaf set. The seal
-///   driver already computed this for the `EpochRecord`; we re-use it
-///   instead of recomputing.
-/// * `sorted_leaves` : the same leaf set the root was built from, in the
-///   canonical lexicographic order so each leaf's `inclusion_proof` lands
-///   at the right index.
+/// * `snapshot` : the just-closed accumulator output (leaves and submitter
+///   DIDs).
+/// * `batch` : the SDK batch prepared over the snapshot's leaves, whose
+///   [`EpochBatch::anchor_root`] the sealer anchored.
 /// * `method_outcomes` : per-method anchor result, in deterministic
-///   iteration order. Production calls this with `[(Evm, evm_outcome),
-///   (Qtsa, stub_qtsa())]`; tests can pass a single tuple. The same
-///   outcome is folded into every per-leaf witness for the matching
-///   method (one anchor tx per epoch, many per-leaf witnesses).
+///   iteration order. Each is handed to `finish_batch_timestamp` once, which
+///   builds one TimestampObject per leaf.
 /// * `signer` : the service's secp256k1 signer.
-/// * `epoch_timestamp` : the unix timestamp that closed the epoch; used
-///   as the witness `timestamp` field across both methods.
+/// * `epoch_timestamp` : the unix time that closed the epoch; the payload
+///   `timestamp` of a stub outcome only (a live outcome carries its own).
 ///
-/// Witnesses are produced in deterministic order: leaves iterate in the
-/// same (sorted) order as the Merkle build, methods iterate in the
-/// order given. Output ordering is documented because the storage layer
-/// writes the whole list through a single fjall batch.
+/// Witnesses are produced in deterministic order: leaves in batch order,
+/// methods in the order given. The storage layer writes the whole list
+/// through a single fjall batch.
 pub async fn mint_witnesses_for_epoch(
     snapshot: &SealedSnapshot,
-    merkle_root: &Hash32,
-    sorted_leaves: &[Hash32],
+    batch: &EpochBatch,
     method_outcomes: &[(AnchorMethod, MethodAnchorOutcome)],
     signer: Arc<Secp256k1Signer>,
     epoch_timestamp: u64,
 ) -> Result<Vec<MintedWitness>, WitnessError> {
-    if snapshot.leaves.is_empty() {
-        return Ok(Vec::new());
+    if snapshot.leaves.len() != batch.leaves.len()
+        || snapshot
+            .leaves
+            .iter()
+            .zip(batch.leaves.iter())
+            .any(|(entry, leaf)| &entry.leaf != leaf)
+    {
+        return Err(WitnessError::Batch(
+            "prepared batch does not hold the snapshot's leaves in order".into(),
+        ));
     }
 
-    // Map every leaf to its index in the sorted (Merkle) order so the
-    // inclusion proof we attach to each witness verifies against the
-    // persisted root. The accumulator hands leaves out in insertion
-    // order; the Merkle build operates on the lexicographic sort. We
-    // need the index in the *sort*, not the index of submission.
-    let leaves_vec: Vec<Vec<u8>> = sorted_leaves.iter().map(|h| h.to_vec()).collect();
-    let tree_size = sorted_leaves.len();
-
-    let merkle_root_hex = hex_lower_bytes(merkle_root);
+    // One finish per method: per method, one timestamp object per leaf.
+    let mut objects: Vec<Vec<(RevisionLink, AnyRevision)>> = Vec::new();
+    for (method, outcome) in method_outcomes {
+        let facts = outcome.facts(*method, batch.anchor_root(), epoch_timestamp);
+        let results = finish_batch_timestamp(
+            &batch.prepared,
+            &batch.carriers,
+            facts,
+            Method::Scalar,
+            None,
+        )
+        .map_err(|e| WitnessError::Batch(format!("finish_batch_timestamp: {e:?}")))?;
+        let per_leaf = results
+            .into_iter()
+            .zip(batch.leaves.iter())
+            .map(|(op, leaf)| added_timestamp(op.aqua_tree, leaf))
+            .collect::<Result<Vec<_>, _>>()?;
+        objects.push(per_leaf);
+    }
 
     let mut out = Vec::with_capacity(snapshot.leaves.len() * method_outcomes.len());
-
-    for entry in &snapshot.leaves {
-        let leaf = entry.leaf;
-        let leaf_index = sorted_leaves
-            .binary_search(&leaf)
-            .map_err(|_| WitnessError::Object("leaf missing from sorted leaf-set".into()))?;
-        let proof = inclusion_proof(&leaves_vec, leaf_index, &HashType::Sha3_256);
-        let proof_hex: Vec<String> = proof
-            .iter()
-            .map(|sib| format!("0x{}", hex::encode(sib)))
-            .collect();
-
-        for (method, outcome) in method_outcomes {
-            let witness = mint_single_witness(
-                &leaf,
-                &entry.submitter_did,
-                snapshot.epoch_id,
-                *method,
-                leaf_index,
-                tree_size,
-                &proof_hex,
-                &merkle_root_hex,
-                signer.as_ref(),
-                outcome,
-                epoch_timestamp,
-            )
-            .await?;
-            out.push(witness);
+    for (i, entry) in snapshot.leaves.iter().enumerate() {
+        for (m, (method, _)) in method_outcomes.iter().enumerate() {
+            let (object_link, object_revision) = objects[m][i].clone();
+            out.push(
+                sign_witness(
+                    &entry.leaf,
+                    &entry.submitter_did,
+                    snapshot.epoch_id,
+                    *method,
+                    object_link,
+                    object_revision,
+                    signer.as_ref(),
+                )
+                .await?,
+            );
         }
     }
-
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn mint_single_witness(
+/// The one revision `finish_batch_timestamp` added to a carrier: a typed
+/// timestamp object chained to `leaf`.
+fn added_timestamp(tree: Tree, leaf: &Hash32) -> Result<(RevisionLink, AnyRevision), WitnessError> {
+    let leaf_link = RevisionLink::from_bytes(*leaf);
+    let mut added = tree.revisions.into_iter().filter(|(k, _)| k != &leaf_link);
+    let (link, revision) = added
+        .next()
+        .ok_or_else(|| WitnessError::Object("batch producer added no revision".into()))?;
+    if added.next().is_some() {
+        return Err(WitnessError::Object(
+            "batch producer added more than one revision".into(),
+        ));
+    }
+    match &revision {
+        AnyRevision::Typed(obj) if obj.previous_revision() == Some(&leaf_link) => {}
+        _ => {
+            return Err(WitnessError::Object(
+                "batch producer's revision is not a timestamp object on the leaf".into(),
+            ))
+        }
+    }
+    Ok((link, revision))
+}
+
+async fn sign_witness(
     leaf: &Hash32,
     submitter_did: &str,
     epoch_id: u64,
     method: AnchorMethod,
-    leaf_index: usize,
-    tree_size: usize,
-    proof_hex: &[String],
-    merkle_root_hex: &str,
+    object_link: RevisionLink,
+    object_revision: AnyRevision,
     signer: &Secp256k1Signer,
-    outcome: &MethodAnchorOutcome,
-    epoch_timestamp: u64,
 ) -> Result<MintedWitness, WitnessError> {
-    // Build the typed payload via the SDK's template structs. Using the
-    // typed payload guarantees we satisfy the template's JSON-schema
-    // validator (the SDK's `create_object_util` invokes that validator).
-    //
-    // Anchor-derived fields (`transaction_hash`, `sender_account_address`,
-    // `smart_contract_address`, `network`, `tsa_provider`) come from
-    // `outcome`: at M4 the EVM `outcome` is the result of a live
-    // `CliEthTimestamper::create_timestamp` call against Sepolia (or a
-    // stub when the live call failed); the qTSA `outcome` is always a
-    // stub until M5.
-    let payload_value = match method {
-        AnchorMethod::Evm => {
-            let payload = EvmTimestampPayload {
-                timestamp_type: "timestamp".to_string(),
-                merkle_root: merkle_root_hex.to_string(),
-                timestamp: epoch_timestamp,
-                network: outcome.network.clone(),
-                smart_contract_address: outcome.smart_contract_address.clone(),
-                transaction_hash: outcome.transaction_hash.clone(),
-                sender_account_address: ensure_0x(&outcome.sender_account_address),
-                merkle_proof: proof_hex.to_vec(),
-                batch_tree_size: tree_size,
-                batch_leaf_index: leaf_index,
-                shielding_nonce: String::new(),
-            };
-            serde_json::to_value(&payload)?
-        }
-        AnchorMethod::Qtsa => {
-            let payload = TsaTimestampPayload {
-                timestamp_type: "timestamp".to_string(),
-                merkle_root: merkle_root_hex.to_string(),
-                timestamp: epoch_timestamp,
-                network: outcome.network.clone(),
-                transaction_hash: outcome.transaction_hash.clone(),
-                tsa_provider: outcome.tsa_provider.clone(),
-                merkle_proof: proof_hex.to_vec(),
-                batch_tree_size: tree_size,
-                batch_leaf_index: leaf_index,
-                shielding_nonce: String::new(),
-            };
-            serde_json::to_value(&payload)?
-        }
-    };
-
-    let template_link = match method {
-        AnchorMethod::Evm => RevisionLink::from_bytes(EvmTimestampPayload::TEMPLATE_LINK),
-        AnchorMethod::Qtsa => RevisionLink::from_bytes(TsaTimestampPayload::TEMPLATE_LINK),
-    };
-
-    // Construct the Object directly chained to the client leaf. We don't
-    // go through `create_object_util` here because that helper builds a
-    // fresh genesis anchor when no previous tree is supplied; the
-    // witness chain is rooted in the client's leaf (which the client
-    // already owns and signed in their own tree), not in an anchor we
-    // mint.
-    let leaf_link = RevisionLink::from_bytes(*leaf);
-    let mut object = Object::<serde_json::Value>::new(
-        leaf_link.clone(),
-        template_link,
-        Method::Scalar,
-        payload_value,
-    );
-    let object_link = object
-        .calculate_link(HashType::Sha3_256)
-        .map_err(|e| WitnessError::Object(format!("calculate_link: {e:?}")))?;
-    // Method::Scalar means `populate_leaves` is a no-op, but call it
-    // anyway so the object's serialised shape is identical to whatever
-    // `create_object_util` would have emitted.
-    object
-        .populate_leaves(HashType::Sha3_256)
-        .map_err(|e| WitnessError::Object(format!("populate_leaves: {e:?}")))?;
     let object_hash = revision_link_to_hash(&object_link)?;
 
     let signature_revision = signer
@@ -417,7 +483,7 @@ async fn mint_single_witness(
         submitter_did: submitter_did.to_string(),
         object_file_name: format!("witness_{}_{}", method.as_str(), leaf_short),
         signature_file_name: format!("witness_sig_{}_{}", method.as_str(), leaf_short),
-        object_revision: AnyRevision::Typed(object),
+        object_revision,
         signature_revision: AnyRevision::Signature(signature_revision),
     })
 }
@@ -459,9 +525,10 @@ pub fn revision_wire_hex(digest: &Hash32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accumulator::{Accumulator, LeafEntry};
-    use crate::merkle::merkle_root_for_leaves;
-    use aqua_rs_sdk::primitives::merkle::verify_inclusion;
+    use crate::accumulator::Accumulator;
+    use aqua_rs_sdk::primitives::merkle::{
+        parse_batch_digest, parse_batch_proof, shielded_leaf, verify_batch_inclusion,
+    };
 
     const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
@@ -494,74 +561,73 @@ mod tests {
         ]
     }
 
+    fn snapshot_of(id: u64, leaves: &[Hash32]) -> (SealedSnapshot, EpochBatch) {
+        let acc = Accumulator::new(id, 0, 60);
+        acc.append_batch(leaves, "did:pkh:eip155:1:0xAAAA");
+        let snap = acc.swap_and_open_next(60, 60, 60);
+        let batch_leaves: Vec<Hash32> = snap.leaves.iter().map(|e| e.leaf).collect();
+        let batch = EpochBatch::prepare(&batch_leaves)
+            .unwrap()
+            .expect("non-empty");
+        (snap, batch)
+    }
+
+    fn payloads(w: &MintedWitness) -> serde_json::Value {
+        match &w.object_revision {
+            AnyRevision::Typed(obj) => serde_json::to_value(obj).unwrap()["payloads"].clone(),
+            _ => panic!("expected Typed"),
+        }
+    }
+
+    #[test]
+    fn empty_epoch_prepares_no_batch() {
+        assert!(EpochBatch::prepare(&[]).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn mint_produces_two_revisions_per_leaf_per_method() {
-        let acc = Accumulator::new(7, 1000, 60);
         let leaves: Vec<Hash32> = (1u8..=3).map(|i| [i; 32]).collect();
-        acc.append_batch(&leaves, "did:pkh:eip155:1:0xAAAA");
-        let snapshot = acc.swap_and_open_next(1060, 1060, 60);
-
-        let mut sorted = leaves.clone();
-        sorted.sort();
-        let root = merkle_root_for_leaves(&sorted);
-
-        let signer = build_signer().await;
+        let (snap, batch) = snapshot_of(7, &leaves);
         let witnesses =
-            mint_witnesses_for_epoch(&snapshot, &root, &sorted, &stub_outcomes(), signer, 1060)
+            mint_witnesses_for_epoch(&snap, &batch, &stub_outcomes(), build_signer().await, 60)
                 .await
                 .unwrap();
         assert_eq!(witnesses.len(), 6);
 
-        // Pick the first witness and verify its inclusion proof.
-        let w = &witnesses[0];
-        let leaf_index = sorted.iter().position(|h| h == &w.leaf).unwrap();
-        let leaves_vec: Vec<Vec<u8>> = sorted.iter().map(|h| h.to_vec()).collect();
-        let proof = inclusion_proof(&leaves_vec, leaf_index, &HashType::Sha3_256);
-        assert!(verify_inclusion(
-            &w.leaf,
-            leaf_index,
-            sorted.len(),
-            &proof,
-            &root,
-            &HashType::Sha3_256
-        ));
-    }
-
-    #[tokio::test]
-    async fn empty_snapshot_mints_no_witnesses() {
-        let snap = SealedSnapshot {
-            epoch_id: 1,
-            opened_at: 0,
-            closed_at: 60,
-            leaves: vec![],
-        };
-        let root = crate::merkle::empty_merkle_root();
-        let signer = build_signer().await;
-        let witnesses = mint_witnesses_for_epoch(&snap, &root, &[], &stub_outcomes(), signer, 60)
-            .await
-            .unwrap();
-        assert!(witnesses.is_empty());
+        // Every witness proves its leaf into the anchored root, judged by the
+        // SDK's batch inclusion check (shielded leaf, RFC 9162 path).
+        let root = batch.root_digest().unwrap();
+        for w in &witnesses {
+            let p = payloads(w);
+            assert_eq!(p["merkle_root"].as_str().unwrap(), batch.anchor_root());
+            let nonce = parse_batch_digest(p["shielding_nonce"].as_str().unwrap()).unwrap();
+            let leaf = shielded_leaf(&RevisionLink::from_bytes(w.leaf), &nonce).unwrap();
+            let proof = parse_batch_proof(&p["merkle_proof"]).unwrap();
+            verify_batch_inclusion(
+                &leaf,
+                p["batch_leaf_index"].as_u64().unwrap(),
+                p["batch_tree_size"].as_u64().unwrap(),
+                &proof,
+                &root,
+            )
+            .expect("inclusion proof verifies against the anchored root");
+        }
     }
 
     #[tokio::test]
     async fn witness_chains_to_client_leaf() {
         let leaf: Hash32 = [0x99; 32];
-        let acc = Accumulator::new(2, 0, 60);
-        acc.append_batch(&[leaf], "did:pkh:eip155:1:0xCCCC");
-        let snap = acc.swap_and_open_next(60, 60, 60);
-        let sorted = vec![leaf];
-        let root = merkle_root_for_leaves(&sorted);
-        let signer = build_signer().await;
+        let (snap, batch) = snapshot_of(2, &[leaf]);
         let outcomes = vec![(
             AnchorMethod::Evm,
             MethodAnchorOutcome::stub_evm("0x0000000000000000000000000000000000000000", "sepolia"),
         )];
-        let witnesses = mint_witnesses_for_epoch(&snap, &root, &sorted, &outcomes, signer, 60)
-            .await
-            .unwrap();
+        let witnesses =
+            mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await, 60)
+                .await
+                .unwrap();
         assert_eq!(witnesses.len(), 1);
         let w = &witnesses[0];
-        // The object's previous_revision must be the client leaf.
         if let AnyRevision::Typed(obj) = &w.object_revision {
             let prev = obj
                 .previous_revision()
@@ -570,7 +636,6 @@ mod tests {
         } else {
             panic!("expected Typed object revision");
         }
-        // The signature's previous_revision must be the object hash.
         if let AnyRevision::Signature(sig) = &w.signature_revision {
             let prev = sig.previous_revision();
             assert_eq!(revision_link_to_hash(prev).unwrap(), w.object_hash);
@@ -580,17 +645,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evm_payload_folds_anchor_outcome_fields() {
-        // Real-anchor-shaped outcome: assert the witness payload mirrors
-        // the per-method outcome values byte for byte.
+    async fn payload_folds_anchor_outcome_fields() {
         let leaf: Hash32 = [0xAB; 32];
-        let acc = Accumulator::new(3, 0, 60);
-        acc.append_batch(&[leaf], "did:pkh:eip155:1:0xDDDD");
-        let snap = acc.swap_and_open_next(60, 60, 60);
-        let sorted = vec![leaf];
-        let root = merkle_root_for_leaves(&sorted);
-        let signer = build_signer().await;
-
+        let (snap, batch) = snapshot_of(3, &[leaf]);
         let canned = MethodAnchorOutcome {
             transaction_hash: "0xfeedface00000000000000000000000000000000000000000000000000000000"
                 .into(),
@@ -598,36 +655,51 @@ mod tests {
             smart_contract_address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             network: "sepolia".into(),
             tsa_provider: String::new(),
+            timestamp: Some(1234),
         };
-        let outcomes = vec![(AnchorMethod::Evm, canned.clone())];
-        let witnesses = mint_witnesses_for_epoch(&snap, &root, &sorted, &outcomes, signer, 60)
+        let tsa = MethodAnchorOutcome {
+            network: "operator-label".into(),
+            tsa_provider: "Some TSA".into(),
+            timestamp: Some(5678),
+            ..canned.clone()
+        };
+        let outcomes = vec![
+            (AnchorMethod::Evm, canned.clone()),
+            (AnchorMethod::Qtsa, tsa),
+        ];
+        let ws = mint_witnesses_for_epoch(&snap, &batch, &outcomes, build_signer().await, 60)
             .await
             .unwrap();
-        assert_eq!(witnesses.len(), 1);
-        let w = &witnesses[0];
-        if let AnyRevision::Typed(obj) = &w.object_revision {
-            let payload_value = serde_json::to_value(obj).unwrap();
-            let p = &payload_value["payloads"];
-            assert_eq!(
-                p["transaction_hash"].as_str().unwrap(),
-                canned.transaction_hash
-            );
-            assert_eq!(
-                p["sender_account_address"].as_str().unwrap(),
-                canned.sender_account_address
-            );
-            assert_eq!(
-                p["smart_contract_address"].as_str().unwrap(),
-                canned.smart_contract_address
-            );
-            assert_eq!(p["network"].as_str().unwrap(), "sepolia");
-        } else {
-            panic!("expected Typed");
-        }
+        let p = payloads(&ws[0]);
+        assert_eq!(p["transaction_hash"], canned.transaction_hash.as_str());
+        assert_eq!(
+            p["sender_account_address"],
+            canned.sender_account_address.as_str()
+        );
+        assert_eq!(
+            p["smart_contract_address"],
+            canned.smart_contract_address.as_str()
+        );
+        assert_eq!(p["network"], "sepolia");
+        assert_eq!(p["timestamp"], 1234);
+        let q = payloads(&ws[1]);
+        assert_eq!(q["network"], QTSA_NETWORK_LABEL);
+        assert_eq!(q["tsa_provider"], "Some TSA");
+        assert_eq!(
+            q["timestamp"], 5678,
+            "qTSA payload carries the anchor's time"
+        );
     }
 
-    // Suppress unused-import warnings under `cargo test` when the SDK
-    // helpers above are inlined.
-    #[allow(dead_code)]
-    fn _kept(_: LeafEntry) {}
+    #[tokio::test]
+    async fn stub_outcome_keeps_the_epoch_close_time() {
+        let (snap, batch) = snapshot_of(4, &[[0x11; 32]]);
+        let ws =
+            mint_witnesses_for_epoch(&snap, &batch, &stub_outcomes(), build_signer().await, 777)
+                .await
+                .unwrap();
+        for w in &ws {
+            assert_eq!(payloads(w)["timestamp"], 777);
+        }
+    }
 }

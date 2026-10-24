@@ -1,11 +1,10 @@
-//! Thin adapters around the SDK Merkle primitive.
+//! Leaf decoding and the empty-epoch root.
 //!
-//! All real Merkle work happens in [`aqua_rs_sdk::primitives::merkle`]; this
-//! module exists so the empty-tree convention and leaf-decoding rules are
-//! defined in one place rather than scattered through the route handlers
-//! and the sealer.
+//! No batch tree is built here: an epoch's batch (shielded leaves, root,
+//! inclusion proofs, nonces) comes from the SDK's batch producer, see
+//! [`crate::witness::EpochBatch`]. This module keeps the leaf-decoding rules
+//! and the root an empty (never anchored) epoch records.
 
-use aqua_rs_sdk::primitives::{merkle::merkle_root as sdk_merkle_root, HashType};
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
 
@@ -72,24 +71,6 @@ pub fn empty_merkle_root() -> Hash32 {
     out
 }
 
-/// Build the Merkle root over an already-sorted slice of pre-hashed
-/// 32-byte leaves. Delegates to the SDK for any non-empty input; falls
-/// back to [`empty_merkle_root`] for the zero-leaf case so callers never
-/// have to special-case it.
-pub fn merkle_root_for_leaves(leaves: &[Hash32]) -> Hash32 {
-    if leaves.is_empty() {
-        return empty_merkle_root();
-    }
-    let owned: Vec<Vec<u8>> = leaves.iter().map(|h| h.to_vec()).collect();
-    // Since aqua-rs-sdk#200 the SDK returns `None` only for an empty slice, which
-    // is handled above; for every non-empty input the root is byte-identical.
-    let root =
-        sdk_merkle_root(&owned, &HashType::Sha3_256).expect("non-empty leaf set always has a root");
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&root);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,27 +105,5 @@ mod tests {
         h.update(b"");
         let expected: [u8; 32] = h.finalize().into();
         assert_eq!(empty_merkle_root(), expected);
-    }
-
-    #[test]
-    fn single_leaf_root_is_the_leaf() {
-        let leaf = [0x42u8; 32];
-        let root = merkle_root_for_leaves(&[leaf]);
-        assert_eq!(root, leaf);
-    }
-
-    #[test]
-    fn inclusion_round_trip_five_leaves() {
-        use aqua_rs_sdk::primitives::merkle::{inclusion_proof, verify_inclusion};
-        let leaves: Vec<Hash32> = (1u8..=5).map(|i| [i; 32]).collect();
-        let leaves_vec: Vec<Vec<u8>> = leaves.iter().map(|h| h.to_vec()).collect();
-        let root = merkle_root_for_leaves(&leaves);
-        for (i, leaf) in leaves.iter().enumerate() {
-            let proof = inclusion_proof(&leaves_vec, i, &HashType::Sha3_256);
-            assert!(
-                verify_inclusion(leaf, i, leaves.len(), &proof, &root, &HashType::Sha3_256),
-                "inclusion proof must verify for leaf {i}"
-            );
-        }
     }
 }

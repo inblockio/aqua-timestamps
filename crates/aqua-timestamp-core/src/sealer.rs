@@ -1,4 +1,4 @@
-//! Epoch sealing task: closes the current epoch, builds its Merkle root,
+//! Epoch sealing task: closes the current epoch, prepares its SDK batch,
 //! and persists the `EpochRecord`, its leaf set, AND every per-leaf
 //! witness revision pair (M3).
 //!
@@ -19,11 +19,12 @@ use tracing::{error, info, warn};
 use crate::accumulator::{Accumulator, SealedSnapshot};
 use crate::anchors::AnchorProvider;
 use crate::epoch::{EpochRecord, HASH_TYPE_LABEL};
-use crate::merkle::{merkle_root_for_leaves, Hash32};
+use crate::merkle::{empty_merkle_root, Hash32};
 use crate::storage::{Store, StoreError};
 use crate::time::Clock;
 use crate::witness::{
-    mint_witnesses_for_epoch, AnchorMethod, MethodAnchorOutcome, MintedWitness, WitnessError,
+    mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome, MintedWitness,
+    WitnessError,
 };
 
 /// Per-process configuration the sealer needs in addition to its
@@ -110,7 +111,8 @@ pub struct SealTick {
 ///
 /// Live anchors are best-effort. Each per-method provider in
 /// `witness_ctx` is invoked exactly once per non-empty epoch with the
-/// final Merkle root; on success the returned [`TimestampValue`] is
+/// SDK batch root ([`EpochBatch::anchor_root`], `0x1620` + digest, PCA-0015
+/// section 3.8; an EVM provider sends it as selector + root); on success the returned [`TimestampValue`] is
 /// folded into every per-leaf witness for that method, on failure the
 /// sealer logs a `warn!` and falls back to stub data for that method's
 /// witnesses this epoch. Sealing never fails because an anchor failed;
@@ -128,15 +130,16 @@ pub async fn seal_once(
     witness_ctx: Option<&WitnessContext>,
 ) -> Result<(EpochRecord, Vec<MintedWitness>), SealError> {
     let snapshot = accumulator.swap_and_open_next(closed_at, closed_at, duration_secs);
-    let (record, sorted_leaves) = build_record_and_sorted_leaves(&snapshot);
+    let leaves: Vec<Hash32> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+    let batch = EpochBatch::prepare(&leaves)?;
+    let record = build_record(&snapshot, batch.as_ref())?;
 
-    let witnesses = if let Some(ctx) = witness_ctx {
-        let merkle_root_hex = format!("0x{}", hex::encode(record.merkle_root));
-        let outcomes = resolve_method_outcomes(ctx, record.id, &merkle_root_hex, &snapshot).await;
+    let witnesses = if let (Some(ctx), Some(batch)) = (witness_ctx, batch.as_ref()) {
+        let outcomes =
+            resolve_method_outcomes(ctx, record.id, batch.anchor_root(), &snapshot).await;
         let minted = mint_witnesses_for_epoch(
             &snapshot,
-            &record.merkle_root,
-            &sorted_leaves,
+            batch,
             &outcomes,
             Arc::clone(&ctx.signer),
             closed_at,
@@ -284,24 +287,25 @@ async fn resolve_evm_outcome(
 }
 
 /// Pure helper: convert an in-memory [`SealedSnapshot`] into the on-disk
-/// [`EpochRecord`] and the sorted leaf list used both for the Merkle root
-/// and the per-leaf inclusion proofs. Leaves are sorted lexicographically
-/// by raw bytes before being fed to the SDK Merkle builder, so the root
-/// is independent of submission order (the property the test suite
-/// asserts).
-fn build_record_and_sorted_leaves(snapshot: &SealedSnapshot) -> (EpochRecord, Vec<Hash32>) {
-    let mut sorted: Vec<Hash32> = snapshot.leaves.iter().map(|e| e.leaf).collect();
-    sorted.sort_unstable();
-    let root = merkle_root_for_leaves(&sorted);
-    let record = EpochRecord {
+/// [`EpochRecord`]. The record's root is the digest of the SDK batch root
+/// the epoch's anchors carry; an empty epoch prepares no batch and records
+/// [`empty_merkle_root`].
+fn build_record(
+    snapshot: &SealedSnapshot,
+    batch: Option<&EpochBatch>,
+) -> Result<EpochRecord, WitnessError> {
+    let root = match batch {
+        Some(batch) => batch.root_digest()?,
+        None => empty_merkle_root(),
+    };
+    Ok(EpochRecord {
         id: snapshot.epoch_id,
         opened_at: snapshot.opened_at,
         closed_at: snapshot.closed_at,
         merkle_root: root,
         leaf_count: snapshot.leaves.len() as u64,
         hash_type: HASH_TYPE_LABEL.to_string(),
-    };
-    (record, sorted)
+    })
 }
 
 /// Spawn the production seal loop on the current tokio runtime. Returns
@@ -559,10 +563,15 @@ mod tests {
             value: canned_evm_value(),
         });
         let ctx = base_ctx(signer).with_evm_anchor(Arc::clone(&mock));
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         let evm_payloads = extract_evm_payloads(&witnesses);
         assert_eq!(evm_payloads.len(), 1);
         let p = &evm_payloads[0];
+        // The record stores the digest of the SDK batch root the payload carries.
+        assert_eq!(
+            p["merkle_root"].as_str().unwrap(),
+            aqua_rs_sdk::primitives::merkle::batch_root_wire(&rec.merkle_root)
+        );
         assert_eq!(
             p["transaction_hash"].as_str().unwrap(),
             "0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
@@ -802,10 +811,11 @@ mod tests {
         assert_eq!(rec.leaf_count, 2);
         assert!(witnesses.is_empty(), "no witness ctx → no witnesses");
 
-        let mut leaves_sorted = vec![l1, l2];
-        leaves_sorted.sort_unstable();
-        let expected_root = merkle_root_for_leaves(&leaves_sorted);
-        assert_eq!(rec.merkle_root, expected_root);
+        assert_ne!(
+            rec.merkle_root,
+            crate::merkle::empty_merkle_root(),
+            "a non-empty epoch records its SDK batch root"
+        );
 
         // Next epoch is open.
         let view = acc.current_view();

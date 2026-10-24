@@ -21,7 +21,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use aqua_rs_sdk::{
-    primitives::{merkle::verify_inclusion, HashType},
+    primitives::{
+        merkle::{
+            parse_batch_digest, parse_batch_proof, parse_batch_root, shielded_leaf,
+            verify_batch_inclusion,
+        },
+        HashType, RevisionLink,
+    },
     schema::{tree::Tree, AnyRevision},
     Secp256k1Signer,
 };
@@ -693,47 +699,16 @@ pub async fn run_full_flow(
     let payloads = object_value
         .get("payloads")
         .ok_or_else(|| anyhow!("TimestampObject.payloads missing"))?;
-    let merkle_root_hex = payloads
-        .get("merkle_root")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("payloads.merkle_root missing"))?
-        .to_string();
-    let merkle_root = parse_hex32(&merkle_root_hex)?;
-    let tree_size = payloads
-        .get("batch_tree_size")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("payloads.batch_tree_size missing"))? as usize;
+    let merkle_root_hex = batch_inclusion(payloads, &leaf_hex)
+        .map_err(|e| anyhow!("L2: inclusion proof failed to verify: {e}"))?;
     let leaf_index = payloads
         .get("batch_leaf_index")
         .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("payloads.batch_leaf_index missing"))? as usize;
-    let proof_arr = payloads
-        .get("merkle_proof")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("payloads.merkle_proof missing"))?;
-    let proof: Result<Vec<Vec<u8>>> = proof_arr
-        .iter()
-        .map(|v| {
-            let s = v
-                .as_str()
-                .ok_or_else(|| anyhow!("merkle_proof entry not a string"))?;
-            Ok(parse_hex32(s)?.to_vec())
-        })
-        .collect();
-    let proof = proof?;
-
-    let leaf_bytes = parse_hex32(&leaf_hex)?;
-    let ok = verify_inclusion(
-        &leaf_bytes,
-        leaf_index,
-        tree_size,
-        &proof,
-        &merkle_root,
-        &HashType::Sha3_256,
-    );
-    if !ok {
-        bail!("L2: inclusion proof failed to verify against merkle_root {merkle_root_hex}");
-    }
+        .unwrap_or_default();
+    let tree_size = payloads
+        .get("batch_tree_size")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
 
     // Sanity: TimestampObject.previous_revision must be the client leaf.
     let prev = object_value
@@ -781,7 +756,7 @@ pub async fn run_full_flow(
     // Same shape as the EVM path: fetch `/trees/by-leaf/{leaf}?method=qtsa`,
     // assert L1 (revision rehash), L2 (Merkle proof against the same root),
     // L3 (signature recovers to the same server address). Only the
-    // TimestampObject payload differs (network = sectigo-qualified-tsa,
+    // TimestampObject payload differs (network = "tsa", the SDK TSA label,
     // tsa_provider = the TSA publisher, transaction_hash = the RFC 3161
     // TimeStampResp base64). A 404 here doesn't fail the run (qTSA may be
     // disabled in a given deployment); the fields are checked only when
@@ -852,46 +827,16 @@ pub async fn run_full_flow(
         let q_payloads = q_obj
             .get("payloads")
             .ok_or_else(|| anyhow!("qtsa payloads missing"))?;
-        let q_root_hex = q_payloads
-            .get("merkle_root")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("qtsa merkle_root missing"))?
-            .to_string();
-        let q_root = parse_hex32(&q_root_hex)?;
-        let q_size = q_payloads
-            .get("batch_tree_size")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow!("qtsa batch_tree_size missing"))? as usize;
+        let q_root_hex = batch_inclusion(q_payloads, &leaf_hex)
+            .map_err(|e| anyhow!("qtsa L2: inclusion proof failed: {e}"))?;
         let q_idx = q_payloads
             .get("batch_leaf_index")
             .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow!("qtsa batch_leaf_index missing"))? as usize;
-        let q_proof_arr = q_payloads
-            .get("merkle_proof")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("qtsa merkle_proof missing"))?;
-        let q_proof: Result<Vec<Vec<u8>>> = q_proof_arr
-            .iter()
-            .map(|v| {
-                Ok(parse_hex32(
-                    v.as_str()
-                        .ok_or_else(|| anyhow!("non-string proof entry"))?,
-                )?
-                .to_vec())
-            })
-            .collect();
-        let q_proof = q_proof?;
-        let q_ok = verify_inclusion(
-            &leaf_bytes,
-            q_idx,
-            q_size,
-            &q_proof,
-            &q_root,
-            &HashType::Sha3_256,
-        );
-        if !q_ok {
-            bail!("qtsa L2: inclusion proof failed against {q_root_hex}");
-        }
+            .unwrap_or_default();
+        let q_size = q_payloads
+            .get("batch_tree_size")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
         let q_prev = q_obj
             .get("previous_revision")
             .and_then(Value::as_str)
@@ -995,4 +940,40 @@ pub async fn run_full_flow(
         signature_hash_hex: signature_hash,
         recovered_signer_address: recovered,
     })
+}
+
+/// L2 for one witness payload, judged by the SDK's batch inclusion primitives
+/// (PCA-0015 section 3.8): the shielded leaf of the submitted leaf under the
+/// payload's `shielding_nonce` sits at `batch_leaf_index` of the tree whose
+/// root is `merkle_root`. Returns the root as the payload states it.
+fn batch_inclusion(payloads: &Value, leaf_hex: &str) -> Result<String> {
+    let field = |name: &str| {
+        payloads
+            .get(name)
+            .ok_or_else(|| anyhow!("payloads.{name} missing"))
+    };
+    let root_hex = field("merkle_root")?
+        .as_str()
+        .ok_or_else(|| anyhow!("payloads.merkle_root not a string"))?
+        .to_string();
+    let root = parse_batch_root(&root_hex).map_err(|e| anyhow!("merkle_root: {e:?}"))?;
+    let nonce = parse_batch_digest(
+        field("shielding_nonce")?
+            .as_str()
+            .ok_or_else(|| anyhow!("payloads.shielding_nonce not a string"))?,
+    )
+    .map_err(|e| anyhow!("shielding_nonce: {e:?}"))?;
+    let proof =
+        parse_batch_proof(field("merkle_proof")?).map_err(|e| anyhow!("merkle_proof: {e:?}"))?;
+    let index = field("batch_leaf_index")?
+        .as_u64()
+        .ok_or_else(|| anyhow!("payloads.batch_leaf_index not a number"))?;
+    let size = field("batch_tree_size")?
+        .as_u64()
+        .ok_or_else(|| anyhow!("payloads.batch_tree_size not a number"))?;
+    let target = RevisionLink::from_bytes(parse_hex32(leaf_hex)?);
+    let leaf = shielded_leaf(&target, &nonce).map_err(|e| anyhow!("leaf: {e:?}"))?;
+    verify_batch_inclusion(&leaf, index, size, &proof, &root)
+        .map_err(|e| anyhow!("against {root_hex}: {e:?}"))?;
+    Ok(root_hex)
 }

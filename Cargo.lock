@@ -843,7 +843,6 @@ dependencies = [
  "hex",
  "p256 0.14.0",
  "postcard",
- "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
