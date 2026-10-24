@@ -17,8 +17,11 @@ use aqua_rs_sdk::{
     },
     schema::AnyRevision,
 };
+use std::sync::Arc;
+
+use aqua_rs_sdk::schema::timestamp::TimestampValue;
 use aqua_timestamp::{
-    build_app,
+    build_app_with_anchors, AnchorOverrides,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
         EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
@@ -27,6 +30,7 @@ use aqua_timestamp::{
     identity::{IdentityClaimOverrides, ServiceIdentity},
     SealDriver,
 };
+use aqua_timestamp_core::anchors::{AnchorProvider, FailingProvider, MockProvider};
 use aqua_timestamp_core::sealer::SealTick;
 use axum::{
     body::{to_bytes, Body},
@@ -38,6 +42,53 @@ use sha3::{Digest, Keccak256};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+/// Offline anchor providers for route tests: fixed anchor facts (these
+/// witnesses are not meant to verify against a chain or a TSA; the SDK
+/// verification of minted witnesses lives in aqua-timestamp-core's
+/// `witness_sdk_verify` suite).
+fn canned_evm() -> Arc<dyn AnchorProvider> {
+    Arc::new(MockProvider {
+        value: TimestampValue::new(
+            vec![],
+            "0xCAFE000000000000000000000000000000000000".into(),
+            String::new(),
+            format!("0x{}", "ab".repeat(32)),
+            "0xDEAD000000000000000000000000000000000000".into(),
+            "sepolia".into(),
+            String::new(),
+            1000,
+            1,
+            0,
+            String::new(),
+        ),
+    })
+}
+
+fn canned_qtsa() -> Arc<dyn AnchorProvider> {
+    Arc::new(MockProvider {
+        value: TimestampValue::new(
+            vec![],
+            String::new(),
+            "Canned Test TSA".into(),
+            "AAAA".into(),
+            "http://tsa.test/".into(),
+            "tsa".into(),
+            String::new(),
+            1000,
+            1,
+            0,
+            String::new(),
+        ),
+    })
+}
+
+fn canned_anchors() -> AnchorOverrides {
+    AnchorOverrides {
+        evm: Some(canned_evm()),
+        qtsa: Some(canned_qtsa()),
+    }
+}
 
 const SERVICE_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
@@ -72,18 +123,11 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
         anchor_legacy: AnchorConfig::default(),
         bonding_curve: BondingCurveConfig::default(),
         leaderboard: LeaderboardConfig::default(),
-        // M3 tests assert stub witness payloads byte for byte; keep the
-        // EVM live provider off here so the assertions remain stable
-        // (no Sepolia RPC dependency during unit/integration tests).
+        // Both methods enabled (the default); the providers are injected
+        // per harness (`canned_anchors`), so no RPC or TSA is contacted.
         anchors: AnchorsConfig {
-            evm: EvmAnchorConfig {
-                enabled: false,
-                ..EvmAnchorConfig::default()
-            },
-            qtsa: QtsaAnchorConfig {
-                enabled: false,
-                ..QtsaAnchorConfig::default()
-            },
+            evm: EvmAnchorConfig::default(),
+            qtsa: QtsaAnchorConfig::default(),
         },
     }
 }
@@ -105,11 +149,12 @@ async fn build_harness() -> Harness {
         .await
         .expect("identity");
     let (tx, rx) = mpsc::channel::<SealTick>(8);
-    let (router, _state) = build_app(
+    let (router, _state) = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx),
+ canned_anchors(),
     )
     .await
     .expect("build_app");
@@ -505,11 +550,12 @@ async fn witness_retrievable_across_keyspace_reopen() {
             .await
             .unwrap();
         let (tx, rx) = mpsc::channel::<SealTick>(8);
-        let (router, _state) = build_app(
+        let (router, _state) = build_app_with_anchors(
             cfg,
             identity,
             IdentityClaimOverrides::default(),
             SealDriver::Channel(rx),
+ canned_anchors(),
         )
         .await
         .unwrap();
@@ -534,11 +580,12 @@ async fn witness_retrievable_across_keyspace_reopen() {
         .await
         .unwrap();
     let (_tx2, rx2) = mpsc::channel::<SealTick>(8);
-    let (router2, _state2) = build_app(
+    let (router2, _state2) = build_app_with_anchors(
         cfg2,
         identity2,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx2),
+ canned_anchors(),
     )
     .await
     .unwrap();
@@ -575,4 +622,60 @@ async fn tip_response_shape_matches_aqua_node() {
     assert_eq!(status, StatusCode::OK);
     let _tree: aqua_rs_sdk::schema::tree::Tree =
         serde_json::from_value(body.clone()).expect("response deserialises to Tree");
+}
+
+/// D51: a leaf whose method anchor failed is pending. `GET /trees/by-leaf`
+/// answers 202 with a pending body for that method (never a placeholder
+/// witness) and 200 with the witness for the method that was minted.
+#[tokio::test]
+async fn by_leaf_answers_202_pending_for_a_pending_method() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg(vec![CLIENT_A_DID.to_string()], tmp.path().to_path_buf(), 10_000);
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        AnchorOverrides {
+            evm: Some(Arc::new(FailingProvider {
+                message: "synthetic outage".into(),
+            })),
+            qtsa: Some(canned_qtsa()),
+        },
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let leaf = leaf_hex(0x77);
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+    tx.send(SealTick { now: 1000 }).await.unwrap();
+    for _ in 0..40 {
+        tokio::task::yield_now().await;
+    }
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{leaf}?method=evm"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "pending", "{body}");
+    assert_eq!(body["method"], "evm", "{body}");
+    assert_eq!(body["epoch"], 1, "{body}");
+    assert_eq!(body["leaf"], leaf.to_lowercase(), "{body}");
+    assert!(body.get("revisions").is_none(), "no placeholder witness: {body}");
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{leaf}?method=qtsa"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revisions"].as_object().unwrap().len(), 2);
 }

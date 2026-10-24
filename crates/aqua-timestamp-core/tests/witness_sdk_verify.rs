@@ -548,3 +548,152 @@ async fn seal_lenient(clients: &[&ClientTree], ctx: &WitnessContext) -> Vec<Mint
         Err(_) => Vec::new(),
     }
 }
+
+// ---- D51: a failed anchor stays pending and retries the same root ---------------------------
+
+fn failing() -> Arc<dyn AnchorProvider> {
+    Arc::new(FailingProvider {
+        message: "synthetic outage".into(),
+    })
+}
+
+/// Seal one epoch with `clients` into `store` (epoch 1), through the real sealer.
+async fn seal_into(
+    store: &Store,
+    clients: &[&ClientTree],
+    ctx: &WitnessContext,
+) -> Vec<MintedWitness> {
+    let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
+    for (i, c) in clients.iter().enumerate() {
+        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B });
+    }
+    let (_record, ws) = seal_once(&acc, store, EPOCH_CLOSE, EPOCH_SECS, Some(ctx))
+        .await
+        .expect("seal_once");
+    ws
+}
+
+/// The next epoch tick on `store` (epoch 2, no new leaves).
+async fn next_tick(store: &Store, ctx: &WitnessContext) -> Vec<MintedWitness> {
+    let acc = Accumulator::new(2, EPOCH_CLOSE, EPOCH_SECS);
+    let (_record, ws) = seal_once(&acc, store, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS, Some(ctx))
+        .await
+        .expect("seal_once (retry tick)");
+    ws
+}
+
+fn pending_methods(store: &Store) -> Vec<(u64, Vec<AnchorMethod>)> {
+    store
+        .list_pending_epochs()
+        .expect("list_pending_epochs")
+        .into_iter()
+        .map(|p| (p.epoch_id, p.methods.clone()))
+        .collect()
+}
+
+/// D51: an enabled method without a provider refuses to start (the context does not validate,
+/// and the sealer refuses before it closes the epoch).
+#[tokio::test]
+async fn d51_missing_provider_refuses_to_start() {
+    let no_evm = ctx(None, Some(Arc::new(TestTsa))).await;
+    let err = no_evm.validate().expect_err("EVM enabled without provider");
+    assert!(err.to_string().contains("evm"), "message names the method: {err}");
+    let no_qtsa = ctx(Some(Arc::new(ChainAnchor)), None).await;
+    let err = no_qtsa.validate().expect_err("qTSA enabled without provider");
+    assert!(err.to_string().contains("qtsa"), "message names the method: {err}");
+    ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa)))
+        .await
+        .validate()
+        .expect("both providers wired");
+}
+
+/// D51: the EVM call fails, qTSA succeeds. qTSA is minted (and verifies), EVM stays pending.
+#[tokio::test]
+async fn d51_failed_evm_stays_pending_qtsa_minted() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("d51_evm_down_a");
+    let b = client_tree("d51_evm_down_b");
+    let ctx = ctx(Some(failing()), Some(Arc::new(TestTsa))).await;
+    let ws = seal_into(&store, &[&a, &b], &ctx).await;
+    assert_eq!(ws.len(), 2, "only the qTSA witnesses are minted");
+    assert!(ws.iter().all(|w| w.method == AnchorMethod::Qtsa));
+    assert!(stub_witnesses(&ws).is_empty());
+    assert_witness_verifies(&verify(&a, &[witness_for(&ws, &a.leaf, AnchorMethod::Qtsa)]), witness_for(&ws, &a.leaf, AnchorMethod::Qtsa));
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Evm])]);
+    assert_eq!(
+        store.get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Evm).expect("store"),
+        Some(1)
+    );
+    assert_eq!(
+        store.get_pending_epoch_for_leaf(&a.leaf, AnchorMethod::Qtsa).expect("store"),
+        None
+    );
+}
+
+/// D51, the other way round: qTSA fails, EVM is minted (and verifies), qTSA stays pending.
+#[tokio::test]
+async fn d51_failed_qtsa_stays_pending_evm_minted() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("d51_tsa_down_a");
+    let ctx = ctx(Some(Arc::new(ChainAnchor)), Some(failing())).await;
+    let ws = seal_into(&store, &[&a], &ctx).await;
+    assert_eq!(ws.len(), 1, "only the EVM witness is minted");
+    let w = witness_for(&ws, &a.leaf, AnchorMethod::Evm);
+    assert_witness_verifies(&verify(&a, &[w]), w);
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Qtsa])]);
+}
+
+/// D51: a later tick with a working provider mints the pending method for the SAME root, and
+/// the late witness verifies in the SDK next to the one minted on time.
+#[tokio::test]
+async fn d51_later_tick_mints_pending_for_same_root() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("d51_retry_a");
+    let b = client_tree("d51_retry_b");
+    let down = ctx(Some(failing()), Some(Arc::new(TestTsa))).await;
+    let on_time = seal_into(&store, &[&a, &b], &down).await;
+    // Still down on the next tick: nothing minted, still pending.
+    assert!(next_tick(&store, &down).await.is_empty());
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Evm])]);
+    // Provider back: the tick mints the epoch-1 EVM witnesses.
+    let up = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
+    let late = next_tick(&store, &up).await;
+    assert_eq!(late.len(), 2, "both leaves of epoch 1 get their EVM witness");
+    assert!(late.iter().all(|w| w.method == AnchorMethod::Evm && w.epoch_id == 1));
+    assert!(pending_methods(&store).is_empty(), "nothing left pending");
+    for c in [&a, &b] {
+        let q = witness_for(&on_time, &c.leaf, AnchorMethod::Qtsa);
+        let e = witness_for(&late, &c.leaf, AnchorMethod::Evm);
+        assert_eq!(
+            payloads(e)["merkle_root"],
+            payloads(q)["merkle_root"],
+            "the late EVM anchor carries the same epoch root"
+        );
+        assert_witness_verifies(&verify(c, &[e]), e);
+        let both = verify(c, &[q, e]);
+        assert!(both.is_verified(), "dual anchor tree: {:#?}", error_logs(&both));
+        assert!(store.get_tip_for_leaf(&c.leaf, AnchorMethod::Evm).expect("store").is_some());
+    }
+}
+
+/// D51: a pending method survives a restart (store reopen) and is minted after it.
+#[tokio::test]
+async fn d51_pending_survives_store_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let a = client_tree("d51_restart_a");
+    {
+        let store = Store::open(dir.path()).expect("store");
+        let down = ctx(Some(Arc::new(ChainAnchor)), Some(failing())).await;
+        seal_into(&store, &[&a], &down).await;
+    }
+    let store = Store::open(dir.path()).expect("reopen");
+    assert_eq!(pending_methods(&store), vec![(1, vec![AnchorMethod::Qtsa])]);
+    let up = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
+    let late = next_tick(&store, &up).await;
+    let w = witness_for(&late, &a.leaf, AnchorMethod::Qtsa);
+    assert_witness_verifies(&verify(&a, &[w]), w);
+    assert!(pending_methods(&store).is_empty());
+}

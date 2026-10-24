@@ -541,4 +541,30 @@ mod tests {
         // default chain is "sepolia"
         assert_eq!(cfg.leaderboard_chain_id(), 11155111);
     }
+
+    /// D51: an enabled method without a provider is a startup error that
+    /// names the method and the missing setting; an explicit opt-out
+    /// (`enabled = false`) still starts.
+    #[test]
+    fn enabled_anchor_without_provider_refuses_to_start() {
+        let mut cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        cfg.check_enabled_anchors("mnemonic words")
+            .expect("defaults configure both providers");
+
+        let err = cfg.check_enabled_anchors("").expect_err("EVM without mnemonic");
+        assert!(err.to_string().contains("anchors.evm"), "{err}");
+        assert!(err.to_string().contains("mnemonic"), "{err}");
+
+        cfg.anchors.evm.rpc_url = "  ".into();
+        let err = cfg.check_enabled_anchors("m").expect_err("EVM without RPC");
+        assert!(err.to_string().contains("anchors.evm.rpc_url"), "{err}");
+        cfg.anchors.evm.enabled = false;
+        cfg.check_enabled_anchors("m").expect("EVM explicitly disabled");
+
+        cfg.anchors.qtsa.url = String::new();
+        let err = cfg.check_enabled_anchors("m").expect_err("qTSA without URL");
+        assert!(err.to_string().contains("anchors.qtsa.url"), "{err}");
+        cfg.anchors.qtsa.enabled = false;
+        cfg.check_enabled_anchors("m").expect("both explicitly disabled");
+    }
 }
