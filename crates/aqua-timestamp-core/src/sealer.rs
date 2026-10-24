@@ -21,7 +21,7 @@ use crate::accumulator::{Accumulator, SealedSnapshot};
 use crate::anchors::AnchorProvider;
 use crate::epoch::{EpochRecord, HASH_TYPE_LABEL};
 use crate::merkle::{empty_merkle_root, Hash32};
-use crate::selfcheck::{verify_minted_witness, SelfCheckHosts, SelfCheckVerdict};
+use crate::selfcheck::{verify_minted_batch, SelfCheckHosts, SelfCheckVerdict};
 use crate::storage::{Store, StoreError};
 use crate::time::Clock;
 use crate::witness::{
@@ -316,7 +316,8 @@ async fn retry_pending(
 ///    (OW1.3 finding 1), a failed call marks the method down for the tick.
 /// 2. Mint from the anchor through the SDK batch producer. A failure keeps
 ///    the anchor; next tick mints again from it.
-/// 3. Self-check every witness ([`verify_minted_witness`]). Not yet final:
+/// 3. Self-check every witness ([`verify_minted_batch`]: the anchor is
+///    judged once per (epoch, method), OW1.6 H1). Not yet final:
 ///    anchor kept, re-checked next tick. A failure is logged as an error
 ///    with epoch, method, leaf and the SDK's reason; it discards the stored
 ///    anchor only when the anchor itself is at fault
@@ -461,28 +462,25 @@ async fn settle_method(
     Some(minted)
 }
 
-/// [`verify_minted_witness`] over every witness, on a blocking thread (the
-/// SDK hosts block). A panicked check counts as a failure, never as a pass.
+/// [`verify_minted_batch`] over the witnesses of one (epoch, method), on a
+/// blocking thread (the SDK hosts block): the anchor is judged once, not per
+/// witness (OW1.6 H1). A panicked check counts as a failure, never as a pass.
 async fn self_check(ctx: &WitnessContext, minted: &[MintedWitness]) -> Vec<SelfCheckVerdict> {
     let hosts = ctx.self_check.clone();
     let did = ctx.service_did.clone();
     let ws = minted.to_vec();
     let n = ws.len();
-    tokio::task::spawn_blocking(move || {
-        ws.iter()
-            .map(|w| verify_minted_witness(w, &did, &hosts))
-            .collect()
-    })
-    .await
-    .unwrap_or_else(|e| {
-        vec![
-            SelfCheckVerdict::Failed {
-                reason: format!("self-check task: {e}"),
-                anchor_at_fault: false,
-            };
-            n
-        ]
-    })
+    tokio::task::spawn_blocking(move || verify_minted_batch(&ws, &did, &hosts))
+        .await
+        .unwrap_or_else(|e| {
+            vec![
+                SelfCheckVerdict::Failed {
+                    reason: format!("self-check task: {e}"),
+                    anchor_at_fault: false,
+                };
+                n
+            ]
+        })
 }
 
 /// Anchor `root` (epoch `epoch_id`) through `method`'s provider. `None` when

@@ -1062,3 +1062,89 @@ async fn ow14_mint_failure_after_anchor_keeps_leaves_and_anchor() {
     );
     assert!(pending_methods(&store).is_empty());
 }
+
+// ---- OW1.6: review fixes ---------------------------------------------------------------------
+
+/// The honest chain host, counting its lookups (each one is several RPCs in production).
+#[derive(Default)]
+struct CountingChain(std::sync::atomic::AtomicUsize);
+
+impl CountingChain {
+    fn calls(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl aqua_rs_sdk::BlockchainHost for CountingChain {
+    fn transaction_facts(
+        &self,
+        chain_id: u64,
+        tx_hash: &str,
+    ) -> Result<Option<aqua_rs_sdk::EvmTransactionFacts>, aqua_rs_sdk::HostError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        evm_chain::HonestChain::facts(chain_id, tx_hash)
+    }
+}
+
+/// The reader's TSA host on the test PKI, counting its token checks.
+struct CountingTsaHost {
+    inner: TsaWebHost,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl WebHost for CountingTsaHost {
+    fn verify_tsa_token(
+        &self,
+        tsa_response: &str,
+        merkle_root: &str,
+        timestamp: u64,
+    ) -> Result<
+        (
+            QualifiedVerifyLevel,
+            String,
+            Option<aqua_rs_sdk::TsaTokenFacts>,
+        ),
+        aqua_rs_sdk::HostError,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .verify_tsa_token(tsa_response, merkle_root, timestamp)
+    }
+}
+
+/// OW1.6 H1: the anchor is judged once per (epoch, method), not once per witness. A 50-leaf
+/// epoch makes exactly one chain lookup and one TSA token check in its tick, and every witness
+/// is still served and verifies.
+#[tokio::test]
+async fn ow16_h1_anchor_judged_once_per_epoch_and_method() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_h1");
+    let chain = Arc::new(CountingChain::default());
+    let tsa = Arc::new(CountingTsaHost {
+        inner: tsa_host(),
+        calls: Default::default(),
+    });
+    let mut c = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
+    c.self_check.blockchain = Some(chain.clone());
+    c.self_check.tsa = Some(tsa.clone());
+
+    let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
+    acc.append_batch(&[a.leaf], DID_A);
+    let others: Vec<[u8; 32]> = (1..50u8).map(|i| [i; 32]).collect();
+    acc.append_batch(&others, DID_B);
+    let (_record, served) = seal_once(&acc, &store, EPOCH_CLOSE, EPOCH_SECS, Some(&c))
+        .await
+        .expect("seal_once");
+
+    assert_eq!(served.len(), 100, "50 leaves x 2 methods served");
+    assert_eq!(chain.calls(), 1, "one chain lookup per (epoch, EVM)");
+    assert_eq!(
+        tsa.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one token check per (epoch, qTSA)"
+    );
+    let evm = witness_for(&served, &a.leaf, AnchorMethod::Evm);
+    let qtsa = witness_for(&served, &a.leaf, AnchorMethod::Qtsa);
+    assert_witness_verifies(&verify(&a, &[evm, qtsa]), evm);
+}

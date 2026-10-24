@@ -65,7 +65,10 @@ impl Config {
         })?;
         let labels = [
             ("anchors.evm.network_label", evm.network_label.as_deref()),
-            ("anchor.evm_network", self.anchor_legacy.evm_network.as_deref()),
+            (
+                "anchor.evm_network",
+                self.anchor_legacy.evm_network.as_deref(),
+            ),
         ];
         for (setting, label) in labels {
             let Some(label) = label else { continue };

@@ -127,39 +127,129 @@ pub fn verify_minted_witness(
     service_did: &str,
     hosts: &SelfCheckHosts,
 ) -> SelfCheckVerdict {
+    let payloads = match content_and_inclusion(w) {
+        Ok(p) => p,
+        Err(v) => return v,
+    };
+    let anchor = judge_anchor(w.method, payloads, hosts);
+    if anchor != SelfCheckVerdict::Verified {
+        return anchor;
+    }
+    service_signature(w, service_did)
+}
+
+/// The payload fields a witness takes from its method's anchor and the
+/// batch root: equal in every witness of one (epoch, method).
+const ANCHOR_FIELDS: [&str; 7] = [
+    "network",
+    "transaction_hash",
+    "merkle_root",
+    "smart_contract_address",
+    "sender_account_address",
+    "tsa_provider",
+    "timestamp",
+];
+
+fn anchor_fields(payloads: &serde_json::Value) -> Vec<Option<&serde_json::Value>> {
+    ANCHOR_FIELDS.iter().map(|k| payloads.get(*k)).collect()
+}
+
+/// [`verify_minted_witness`] over every witness of one (epoch, method),
+/// judging the anchor once (OW1.6 H1): the anchor of the first witness is
+/// judged after its content hash and inclusion pass (one chain lookup or one
+/// token check per tick, never one per witness); every witness then gets
+/// checks 1 and 4, and its anchor fields must equal the judged witness's.
+/// An anchor that is not Verified settles the batch: every witness gets that
+/// verdict, without per-witness work. Always one verdict per witness.
+pub fn verify_minted_batch(
+    ws: &[MintedWitness],
+    service_did: &str,
+    hosts: &SelfCheckHosts,
+) -> Vec<SelfCheckVerdict> {
+    let Some(first) = ws.first() else {
+        return Vec::new();
+    };
+    let settled = |v: SelfCheckVerdict| vec![v; ws.len()];
+    let judged = match content_and_inclusion(first) {
+        Ok(p) => p,
+        Err(v) => return settled(v),
+    };
+    let anchor = judge_anchor(first.method, judged, hosts);
+    if anchor != SelfCheckVerdict::Verified {
+        return settled(anchor);
+    }
+    let judged = anchor_fields(judged);
+    ws.iter()
+        .map(|w| {
+            let payloads = match content_and_inclusion(w) {
+                Ok(p) => p,
+                Err(v) => return v,
+            };
+            if w.method != first.method || anchor_fields(payloads) != judged {
+                return SelfCheckVerdict::failed("anchor fields differ from the judged anchor");
+            }
+            service_signature(w, service_did)
+        })
+        .collect()
+}
+
+/// Checks 1 and 2 of [`verify_minted_witness`]; the payloads on success.
+fn content_and_inclusion(w: &MintedWitness) -> Result<&serde_json::Value, SelfCheckVerdict> {
     let leaf_link = RevisionLink::from_bytes(w.leaf);
     let object_link = RevisionLink::from_bytes(w.object_hash);
-    let signature_link = RevisionLink::from_bytes(w.signature_hash);
 
     // 1. Content hash and chain of the timestamp revision.
     let AnyRevision::Typed(object) = &w.object_revision else {
-        return SelfCheckVerdict::failed("timestamp revision is not a typed object");
+        return Err(SelfCheckVerdict::failed(
+            "timestamp revision is not a typed object",
+        ));
     };
     match object.calculate_link(HashType::Sha3_256) {
         Ok(link) if link == object_link => {}
-        Ok(_) => return SelfCheckVerdict::failed("timestamp revision does not hash to its key"),
-        Err(e) => return SelfCheckVerdict::failed(format!("timestamp revision hash: {e:?}")),
+        Ok(_) => {
+            return Err(SelfCheckVerdict::failed(
+                "timestamp revision does not hash to its key",
+            ))
+        }
+        Err(e) => {
+            return Err(SelfCheckVerdict::failed(format!(
+                "timestamp revision hash: {e:?}"
+            )))
+        }
     }
     if object.previous_revision() != Some(&leaf_link) {
-        return SelfCheckVerdict::failed("timestamp revision does not chain to the leaf");
+        return Err(SelfCheckVerdict::failed(
+            "timestamp revision does not chain to the leaf",
+        ));
     }
     let payloads = object.payloads();
 
     // 2. Shielded batch inclusion, as verify_common.rs:1827-1849.
     if let Err(reason) = batch_inclusion(payloads, &leaf_link) {
-        return SelfCheckVerdict::failed(format!("batch inclusion: {reason}"));
+        return Err(SelfCheckVerdict::failed(format!(
+            "batch inclusion: {reason}"
+        )));
     }
+    Ok(payloads)
+}
 
-    // 3. The anchor.
-    let anchor = match w.method {
+/// Check 3 of [`verify_minted_witness`]: the anchor.
+fn judge_anchor(
+    method: AnchorMethod,
+    payloads: &serde_json::Value,
+    hosts: &SelfCheckHosts,
+) -> SelfCheckVerdict {
+    match method {
         AnchorMethod::Qtsa => check_tsa(payloads, hosts),
         AnchorMethod::Evm => check_evm(payloads, hosts),
-    };
-    if anchor != SelfCheckVerdict::Verified {
-        return anchor;
     }
+}
 
-    // 4. The service signature over the timestamp revision.
+/// Check 4 of [`verify_minted_witness`]: the service signature over the
+/// timestamp revision.
+fn service_signature(w: &MintedWitness, service_did: &str) -> SelfCheckVerdict {
+    let object_link = RevisionLink::from_bytes(w.object_hash);
+    let signature_link = RevisionLink::from_bytes(w.signature_hash);
     let AnyRevision::Signature(sig) = &w.signature_revision else {
         return SelfCheckVerdict::failed("signature revision is not a signature");
     };
