@@ -1148,3 +1148,79 @@ async fn ow16_h1_anchor_judged_once_per_epoch_and_method() {
     let qtsa = witness_for(&served, &a.leaf, AnchorMethod::Qtsa);
     assert_witness_verifies(&verify(&a, &[evm, qtsa]), evm);
 }
+
+/// One empty epoch tick `epoch_id` at `now` on `store` (retries only).
+async fn tick_at(
+    store: &Store,
+    ctx: &WitnessContext,
+    epoch_id: u64,
+    now: u64,
+) -> Vec<MintedWitness> {
+    let acc = Accumulator::new(epoch_id, now - EPOCH_SECS, EPOCH_SECS);
+    let (_record, ws) = seal_once(&acc, store, now, EPOCH_SECS, Some(ctx))
+        .await
+        .expect("seal_once (tick)");
+    ws
+}
+
+/// OW1.6 H2: a dropped EVM transaction. While the transaction is not found and the anchor is
+/// younger than the not-found timeout, the method stays pending with its anchor kept and no
+/// second transaction. Past the timeout the anchor is discarded (the pending record saved
+/// without it), the next tick re-anchors, and the new anchor's witness is served.
+#[tokio::test]
+async fn ow16_h2_dropped_evm_tx_times_out_and_reanchors() {
+    use aqua_timestamp_core::selfcheck::doubles::SimChain;
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_h2");
+    let chain = Arc::new(SimChain::new(TimestampValue::new(
+        vec![],
+        "0xCAFE000000000000000000000000000000000000".into(),
+        String::new(),
+        format!("0x{}", "ab".repeat(32)),
+        "0xDEAD000000000000000000000000000000000000".into(),
+        "sepolia".into(),
+        String::new(),
+        BLOCK_TIME,
+        1,
+        0,
+        String::new(),
+    )));
+    chain.set_dropped(true);
+    let mut c = ctx(Some(chain.clone()), Some(Arc::new(TestTsa))).await;
+    c.self_check.blockchain = Some(chain.clone());
+    // The default not-found timeout (anchors.evm.not_found_timeout_secs): one hour.
+    let timeout = 3600;
+
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(served.iter().all(|w| w.method != AnchorMethod::Evm));
+    assert_eq!(chain.anchor_calls(), 1);
+    let first = pending_anchor(&store, AnchorMethod::Evm).expect("anchor stored");
+
+    // Before the timeout: pending, anchor kept, no second transaction.
+    let ws = tick_at(&store, &c, 2, EPOCH_CLOSE + timeout - 60).await;
+    assert!(ws.iter().all(|w| w.method != AnchorMethod::Evm));
+    assert_eq!(chain.anchor_calls(), 1, "no re-anchor before the timeout");
+    assert!(
+        pending_anchor(&store, AnchorMethod::Evm).is_some(),
+        "anchor kept"
+    );
+    assert_eq!(pending_methods(&store)[0], (1, vec![AnchorMethod::Evm]));
+
+    // Past the timeout: the abandoned anchor is discarded and saved so.
+    let ws = tick_at(&store, &c, 3, EPOCH_CLOSE + timeout + 60).await;
+    assert!(ws.iter().all(|w| w.method != AnchorMethod::Evm));
+    assert!(
+        pending_anchor(&store, AnchorMethod::Evm).is_none(),
+        "abandoned anchor {} discarded",
+        first.transaction_hash
+    );
+
+    // The next attempt re-anchors; the new transaction lands and is served.
+    chain.set_dropped(false);
+    let ws = tick_at(&store, &c, 4, EPOCH_CLOSE + timeout + 120).await;
+    assert_eq!(chain.anchor_calls(), 2, "one new anchor");
+    let w = witness_for(&ws, &a.leaf, AnchorMethod::Evm);
+    assert_eq!(w.epoch_id, 1);
+    assert!(pending_methods(&store).is_empty());
+}

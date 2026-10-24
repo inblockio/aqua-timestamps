@@ -49,6 +49,11 @@ chain         = "sepolia"
 # `[anchor] evm_network`) is set, it must name the same chain, otherwise
 # the service refuses to start.
 # network_label = "sepolia"
+# Seconds an anchor transaction may stay not found (or known but not in a
+# block) before it counts as dropped or reorged out: the stored anchor is
+# discarded (WARN with the abandoned tx hash) and the next attempt sends a
+# new transaction. Default 3600.
+not_found_timeout_secs = 3600
 
 [anchors.qtsa]
 # Live qTSA toggle. `true` constructs an `aqua-rs-sdk`

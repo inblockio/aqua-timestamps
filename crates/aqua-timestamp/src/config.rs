@@ -255,6 +255,18 @@ pub struct EvmAnchorConfig {
     /// without a second transaction.
     #[serde(default)]
     pub self_check_finality: aqua_rs_sdk::core::evm_anchor::EvmFinalityRequirement,
+
+    /// Seconds an anchor transaction may stay not found (or known but not
+    /// in a block) before it counts as dropped or reorged out (OW1.6 H2):
+    /// the stored anchor is discarded with a WARN naming the abandoned tx
+    /// hash, and the next attempt sends a new transaction. Default 3600
+    /// (one hour, well past finality on Sepolia and mainnet).
+    #[serde(default = "default_evm_not_found_timeout_secs")]
+    pub not_found_timeout_secs: u64,
+}
+
+fn default_evm_not_found_timeout_secs() -> u64 {
+    aqua_timestamp_core::sealer::DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS
 }
 
 fn default_evm_enabled() -> bool {
@@ -275,6 +287,7 @@ impl Default for EvmAnchorConfig {
             chain: default_evm_chain(),
             network_label: None,
             self_check_finality: Default::default(),
+            not_found_timeout_secs: default_evm_not_found_timeout_secs(),
         }
     }
 }

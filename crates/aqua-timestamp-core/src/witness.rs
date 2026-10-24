@@ -349,6 +349,12 @@ pub struct PendingEpoch {
 pub struct StoredAnchor {
     pub method: AnchorMethod,
     pub value: TimestampValue,
+    /// Seal-tick time (unix seconds) the anchor was stored, or first judged
+    /// for a record written before OW1.6 (missing field: treated as that
+    /// first judgement's time). An EVM anchor whose transaction stays not
+    /// found past the not-found timeout is discarded (OW1.6 H2).
+    #[serde(default)]
+    pub first_seen: Option<u64>,
 }
 
 /// A leaf of a [`PendingEpoch`]: `0x` + 64 hex, and its submitter.
@@ -387,10 +393,28 @@ impl PendingEpoch {
             .map(|a| &a.value)
     }
 
-    /// Store (or replace) `method`'s anchor.
-    pub fn set_anchor(&mut self, method: AnchorMethod, value: TimestampValue) {
+    /// Store (or replace) `method`'s anchor, first seen at `now`.
+    pub fn set_anchor(&mut self, method: AnchorMethod, value: TimestampValue, now: u64) {
         self.drop_anchor(method);
-        self.anchors.push(StoredAnchor { method, value });
+        self.anchors.push(StoredAnchor {
+            method,
+            value,
+            first_seen: Some(now),
+        });
+    }
+
+    /// When `method`'s stored anchor was first seen; a record written
+    /// before OW1.6 gets `now` (written into the record, `true` when it
+    /// changed and needs saving).
+    pub fn anchor_first_seen(&mut self, method: AnchorMethod, now: u64) -> Option<(u64, bool)> {
+        let a = self.anchors.iter_mut().find(|a| a.method == method)?;
+        match a.first_seen {
+            Some(t) => Some((t, false)),
+            None => {
+                a.first_seen = Some(now);
+                Some((now, true))
+            }
+        }
     }
 
     /// Discard `method`'s stored anchor.

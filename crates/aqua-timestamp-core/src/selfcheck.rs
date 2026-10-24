@@ -69,6 +69,12 @@ pub enum SelfCheckVerdict {
     /// found). Not an error: the method stays pending, the stored anchor is
     /// kept and re-checked next tick without re-anchoring.
     NotYet(String),
+    /// Like [`Self::NotYet`], but the EVM anchor's transaction is not on the
+    /// chain (not found, or known but not in a block). Kept like `NotYet`
+    /// until the anchor is older than the not-found timeout; then it is
+    /// treated as dropped or reorged out, discarded and re-anchored (OW1.6
+    /// H2).
+    Missing(String),
     /// A check failed. `anchor_at_fault` is true only when the anchor itself
     /// does not hold (the token does not verify, the transaction does not
     /// carry this root from this sender to this contract, or reverted): the
@@ -358,6 +364,7 @@ fn check_evm(payloads: &serde_json::Value, hosts: &SelfCheckHosts) -> SelfCheckV
                 // Configuration errors: nothing a later tick changes on its
                 // own, but the anchor is not at fault either.
                 R::UnsupportedNetwork | R::NetworkNotConfigured => SelfCheckVerdict::failed(text),
+                R::NotFound | R::NotIncluded => SelfCheckVerdict::Missing(text),
                 _ => SelfCheckVerdict::NotYet(text),
             }
         }
@@ -405,6 +412,7 @@ pub mod doubles {
         template: TimestampValue,
         txs: Mutex<HashMap<String, Vec<u8>>>,
         is_final: AtomicBool,
+        dropped: AtomicBool,
         calls: AtomicUsize,
     }
 
@@ -414,11 +422,21 @@ pub mod doubles {
                 template,
                 txs: Mutex::new(HashMap::new()),
                 is_final: AtomicBool::new(true),
+                dropped: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
             }
         }
         pub fn set_final(&self, is_final: bool) {
             self.is_final.store(is_final, Ordering::SeqCst);
+        }
+        /// While set, an anchor call still returns its anchor but the
+        /// transaction never reaches the chain (dropped from the mempool),
+        /// and the transactions already on the chain are dropped too.
+        pub fn set_dropped(&self, dropped: bool) {
+            self.dropped.store(dropped, Ordering::SeqCst);
+            if dropped {
+                self.txs.lock().expect("sim chain").clear();
+            }
         }
         /// Number of anchor calls (`create_timestamp`) so far.
         pub fn anchor_calls(&self) -> usize {
@@ -441,6 +459,11 @@ pub mod doubles {
             // `EVM_WITNESS_SELECTOR`), then the 34-byte root.
             let mut input = vec![0x11, 0x4e, 0xe1, 0x97];
             input.extend_from_slice(&root);
+            if self.dropped.load(Ordering::SeqCst) {
+                let mut value = self.template.clone();
+                value.merkle_root = merkle_root_hex.to_string();
+                return Ok(value);
+            }
             self.txs
                 .lock()
                 .expect("sim chain")

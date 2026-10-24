@@ -231,6 +231,7 @@ pub async fn build_app_with_anchors(
         format!("0x{}", identity.address_eip55.trim_start_matches("0x")),
         methods,
     );
+    witness_ctx.evm_not_found_timeout_secs = evm_anchor_cfg.not_found_timeout_secs;
     if let Some(anchor) = evm_anchor {
         witness_ctx = witness_ctx.with_evm_anchor(anchor);
     }

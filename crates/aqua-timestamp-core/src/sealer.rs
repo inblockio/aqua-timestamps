@@ -56,6 +56,10 @@ pub struct WitnessContext {
     /// verified with the SDK before it is written for serving. Each enabled
     /// method needs its host ([`Self::validate`]).
     pub self_check: SelfCheckHosts,
+    /// Seconds an EVM anchor may stay not found (or not included) before it
+    /// counts as dropped or reorged out: discarded, the next attempt
+    /// re-anchors (OW1.6 H2). Config `anchors.evm.not_found_timeout_secs`.
+    pub evm_not_found_timeout_secs: u64,
     /// The service DID every witness signature must name
     /// (`did:pkh:eip155:1:<EIP-55 address>`, derived from `signer`).
     pub service_did: String,
@@ -65,6 +69,10 @@ pub struct WitnessContext {
     #[cfg(feature = "test-doubles")]
     pub after_mint: Option<AfterMint>,
 }
+
+/// Default of [`WitnessContext::evm_not_found_timeout_secs`]: one hour,
+/// well past Sepolia and mainnet finality (about 13 minutes).
+pub const DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS: u64 = 3600;
 
 /// See [`WitnessContext::after_mint`].
 #[cfg(feature = "test-doubles")]
@@ -87,6 +95,7 @@ impl WitnessContext {
             evm_anchor: None,
             qtsa_anchor: None,
             self_check: SelfCheckHosts::default(),
+            evm_not_found_timeout_secs: DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS,
             service_did,
             #[cfg(feature = "test-doubles")]
             after_mint: None,
@@ -212,7 +221,7 @@ pub async fn seal_once(
         ctx.validate()?;
     }
     let (mut witnesses, mut down) = match witness_ctx {
-        Some(ctx) => retry_pending(store, ctx).await,
+        Some(ctx) => retry_pending(store, ctx, closed_at).await,
         None => (Vec::new(), HashSet::new()),
     };
 
@@ -236,7 +245,9 @@ pub async fn seal_once(
     let mut still_pending = Vec::new();
     if let (Some(ctx), Some(mut pending)) = (witness_ctx, pending) {
         for method in pending.methods.clone() {
-            if let Some(ws) = settle_method(store, ctx, &mut pending, method, &mut down).await {
+            if let Some(ws) =
+                settle_method(store, ctx, &mut pending, method, &mut down, closed_at).await
+            {
                 minted.extend(ws);
             }
         }
@@ -280,6 +291,7 @@ fn log_minted(minted: &[MintedWitness]) {
 async fn retry_pending(
     store: &Store,
     ctx: &WitnessContext,
+    now: u64,
 ) -> (Vec<MintedWitness>, HashSet<AnchorMethod>) {
     let mut down = HashSet::new();
     let mut out = Vec::new();
@@ -292,7 +304,9 @@ async fn retry_pending(
     };
     for mut pending in pendings {
         for method in pending.methods.clone() {
-            if let Some(minted) = settle_method(store, ctx, &mut pending, method, &mut down).await {
+            if let Some(minted) =
+                settle_method(store, ctx, &mut pending, method, &mut down, now).await
+            {
                 info!(
                     epoch_id = pending.epoch_id,
                     method = method.as_str(),
@@ -331,6 +345,7 @@ async fn settle_method(
     pending: &mut PendingEpoch,
     method: AnchorMethod,
     down: &mut HashSet<AnchorMethod>,
+    now: u64,
 ) -> Option<Vec<MintedWitness>> {
     let epoch_id = pending.epoch_id;
     if !ctx.methods.contains(&method) {
@@ -359,7 +374,7 @@ async fn settle_method(
                 down.insert(method);
                 return None;
             };
-            pending.set_anchor(method, value.clone());
+            pending.set_anchor(method, value.clone(), now);
             if let Err(e) = store.save_pending(pending) {
                 error!(
                     epoch_id,
@@ -420,6 +435,10 @@ async fn settle_method(
                 );
                 return None;
             }
+            SelfCheckVerdict::Missing(reason) => {
+                settle_missing(store, ctx, pending, method, now, &value, reason);
+                return None;
+            }
             SelfCheckVerdict::Failed {
                 reason,
                 anchor_at_fault,
@@ -460,6 +479,60 @@ async fn settle_method(
     *pending = remaining;
     log_minted(&minted);
     Some(minted)
+}
+
+/// The anchor's transaction is not on the chain ([`SelfCheckVerdict::Missing`]):
+/// kept while younger than [`WitnessContext::evm_not_found_timeout_secs`];
+/// past it the transaction counts as dropped or reorged out, the anchor is
+/// discarded and the record saved without it, so the next attempt
+/// re-anchors (OW1.6 H2). A record written before OW1.6 starts its clock at
+/// this first judgement.
+fn settle_missing(
+    store: &Store,
+    ctx: &WitnessContext,
+    pending: &mut PendingEpoch,
+    method: AnchorMethod,
+    now: u64,
+    value: &TimestampValue,
+    reason: &str,
+) {
+    let epoch_id = pending.epoch_id;
+    let Some((first_seen, changed)) = pending.anchor_first_seen(method, now) else {
+        return;
+    };
+    let age = now.saturating_sub(first_seen);
+    if age < ctx.evm_not_found_timeout_secs {
+        info!(
+            epoch_id,
+            method = method.as_str(),
+            tx_hash = %value.transaction_hash,
+            age_secs = age,
+            reason = %reason,
+            "anchor transaction not on the chain yet; anchor kept, re-checked next tick"
+        );
+        if changed {
+            if let Err(e) = store.save_pending(pending) {
+                warn!(epoch_id, method = method.as_str(), error = %e,
+                    "recording the anchor's first-seen time failed; retried next tick");
+            }
+        }
+        return;
+    }
+    warn!(
+        epoch_id,
+        method = method.as_str(),
+        tx_hash = %value.transaction_hash,
+        age_secs = age,
+        timeout_secs = ctx.evm_not_found_timeout_secs,
+        reason = %reason,
+        "anchor transaction not on the chain past the not-found timeout (dropped or reorged out); \
+         anchor abandoned, the next attempt re-anchors"
+    );
+    pending.drop_anchor(method);
+    if let Err(e) = store.save_pending(pending) {
+        error!(epoch_id, method = method.as_str(), error = %e,
+            "discarding the abandoned anchor failed; retried next tick");
+    }
 }
 
 /// [`verify_minted_batch`] over the witnesses of one (epoch, method), on a
