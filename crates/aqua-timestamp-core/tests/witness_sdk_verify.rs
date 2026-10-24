@@ -34,7 +34,7 @@ use aqua_timestamp_core::accumulator::Accumulator;
 use aqua_timestamp_core::anchors::{AnchorError, AnchorProvider, FailingProvider};
 use aqua_timestamp_core::sealer::{seal_once, WitnessContext};
 use aqua_timestamp_core::selfcheck::{
-    doubles::SimChain, verify_minted_witness, SelfCheckHosts, SelfCheckVerdict,
+    doubles::SimChain, verify_minted_batch, verify_minted_witness, SelfCheckHosts, SelfCheckVerdict,
 };
 use aqua_timestamp_core::storage::Store;
 use aqua_timestamp_core::witness::{revision_wire_hex, AnchorMethod, MintedWitness};
@@ -1378,4 +1378,108 @@ async fn ow16_m4_reanchor_at_fault_capped_and_method_down() {
         vec![(1, vec![AnchorMethod::Evm]), (2, vec![AnchorMethod::Evm])],
         "stopped is still pending, never served"
     );
+}
+
+/// `w` with `edit` applied to its timestamp payloads, consistently re-hashed and re-signed with
+/// `signer`, so the content-hash, inclusion and signature checks still pass.
+async fn resigned(
+    w: &MintedWitness,
+    signer: &Secp256k1Signer,
+    edit: impl FnOnce(&mut Value),
+) -> MintedWitness {
+    use aqua_rs_sdk::primitives::{HashType, RevisionLink};
+    use aqua_rs_sdk::verification::Linkable;
+    let mut obj = serde_json::to_value(&w.object_revision).expect("object");
+    edit(&mut obj["payloads"]);
+    let object: AnyRevision = serde_json::from_value(obj).expect("object parses");
+    let AnyRevision::Typed(typed) = &object else {
+        panic!("typed object")
+    };
+    let link = typed.calculate_link(HashType::Sha3_256).expect("link");
+    let sig = aqua_rs_sdk::Signer::sign_revision(signer, &link, Method::Scalar, HashType::Sha3_256)
+        .await
+        .expect("sign");
+    let sig_link = sig.calculate_link(HashType::Sha3_256).expect("sig link");
+    let digest =
+        |l: &RevisionLink| -> [u8; 32] { l.as_ref()[2..].try_into().expect("sha3 digest") };
+    let mut out = w.clone();
+    out.object_hash = digest(&link);
+    out.signature_hash = digest(&sig_link);
+    out.object_revision = object;
+    out.signature_revision = AnyRevision::Signature(sig);
+    out
+}
+
+/// OW1.6 N2 scenario: a two-leaf epoch whose `method` witness at `index` carries a different
+/// anchor `field`, re-hashed and re-signed between mint and self-check. The batch self-check
+/// fails the witness that differs from the judged (first) one with the anchor-field reason,
+/// nothing of that (epoch, method) is served, the method stays pending with its anchor kept
+/// (not the anchor's fault), and the other method is served.
+async fn odd_anchor_field_not_served(method: AnchorMethod, index: usize, field: &'static str) {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree(&format!("ow16_n2_{}_{index}_a", method.as_str()));
+    let b = client_tree(&format!("ow16_n2_{}_{index}_b", method.as_str()));
+    let mut c = ctx(Some(Arc::new(ChainAnchor)), Some(Arc::new(TestTsa))).await;
+    let signer = c.signer.clone();
+    let seen: Arc<std::sync::Mutex<Vec<MintedWitness>>> = Arc::default();
+    let keep = seen.clone();
+    c.after_mint = Some(Arc::new(move |ws: &mut Vec<MintedWitness>| {
+        if ws[0].method == method {
+            assert_eq!(ws.len(), 2, "one witness per leaf");
+            let odd = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(resigned(&ws[index], &signer, |p| {
+                    p[field] = Value::String(format!("0x{}", "ab".repeat(32)));
+                }))
+            });
+            ws[index] = odd;
+            *keep.lock().expect("lock") = ws.clone();
+        }
+        Ok(())
+    }));
+
+    let served = seal_into(&store, &[&a, &b], &c).await;
+    assert!(
+        served.iter().all(|w| w.method != method),
+        "nothing of the (epoch, method) served"
+    );
+    assert_eq!(
+        served.len(),
+        2,
+        "the other method is served for both leaves"
+    );
+    assert_eq!(pending_methods(&store), vec![(1, vec![method])]);
+    assert!(pending_anchor(&store, method).is_some(), "anchor kept");
+
+    let ws = seen.lock().expect("lock").clone();
+    let verdicts = verify_minted_batch(&ws, &c.service_did, &c.self_check);
+    assert_eq!(
+        verdicts[0],
+        SelfCheckVerdict::Verified,
+        "the judged witness passes on its own"
+    );
+    match &verdicts[1] {
+        SelfCheckVerdict::Failed {
+            reason,
+            anchor_at_fault,
+        } => {
+            assert!(reason.starts_with("anchor fields differ"), "{reason}");
+            assert!(!anchor_at_fault);
+        }
+        other => panic!("an odd anchor field must fail, got {other:?}"),
+    }
+}
+
+/// OW1.6 N2: a non-first EVM witness with another `transaction_hash` cannot ride on the anchor
+/// verdict judged on the first witness.
+#[tokio::test(flavor = "multi_thread")]
+async fn ow16_n2_non_first_witness_odd_anchor_field_not_served() {
+    odd_anchor_field_not_served(AnchorMethod::Evm, 1, "transaction_hash").await;
+}
+
+/// OW1.6 N2: the first (judged) qTSA witness carries an odd `tsa_provider`, a field the token
+/// check does not read, so its anchor verdict passes; the comparison still fails the others.
+#[tokio::test(flavor = "multi_thread")]
+async fn ow16_n2_first_witness_odd_anchor_field_not_served() {
+    odd_anchor_field_not_served(AnchorMethod::Qtsa, 0, "tsa_provider").await;
 }
