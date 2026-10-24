@@ -1335,6 +1335,22 @@ impl AnchorProvider for WrongSenderAnchor {
     }
 }
 
+/// Per pending epoch: (epoch, EVM anchors counted at fault, EVM anchor stored).
+fn evm_faults(store: &Store) -> Vec<(u64, u32, bool)> {
+    store
+        .list_pending_epochs()
+        .expect("pending")
+        .iter()
+        .map(|p| {
+            (
+                p.epoch_id,
+                p.anchor_fault_count(AnchorMethod::Evm),
+                p.anchor(AnchorMethod::Evm).is_some(),
+            )
+        })
+        .collect()
+}
+
 /// OW1.6 M4: an anchor-fault verdict puts the method down for the rest of the tick (no anchor
 /// call for another pending epoch in that tick), and after the default 3 anchors at fault an
 /// (epoch, method) is not re-anchored again.
@@ -1363,16 +1379,29 @@ async fn ow16_m4_reanchor_at_fault_capped_and_method_down() {
         "down after the fault: epoch 2 makes no call this tick"
     );
 
+    assert_eq!(evm_faults(&store), vec![(1, 2, false), (2, 0, false)]);
+
     tick_at(&store, &c, 3, EPOCH_CLOSE + 2 * EPOCH_SECS).await;
     assert_eq!(calls(), 3, "epoch 1: third anchor at fault");
+    assert_eq!(evm_faults(&store), vec![(1, 3, false), (2, 0, false)]);
     tick_at(&store, &c, 4, EPOCH_CLOSE + 3 * EPOCH_SECS).await;
     assert_eq!(
         calls(),
         4,
         "epoch 1 stopped after 3 faults; epoch 2 anchors"
     );
+    assert_eq!(
+        evm_faults(&store),
+        vec![(1, 3, false), (2, 1, false)],
+        "the call went to epoch 2; epoch 1 is not anchored again"
+    );
     tick_at(&store, &c, 5, EPOCH_CLOSE + 4 * EPOCH_SECS).await;
     assert_eq!(calls(), 5, "epoch 1 stays stopped");
+    assert_eq!(
+        evm_faults(&store),
+        vec![(1, 3, false), (2, 2, false)],
+        "epoch 1 capped at 3 anchors at fault"
+    );
     assert_eq!(
         pending_methods(&store),
         vec![(1, vec![AnchorMethod::Evm]), (2, vec![AnchorMethod::Evm])],
