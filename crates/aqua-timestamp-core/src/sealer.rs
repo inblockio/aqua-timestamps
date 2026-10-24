@@ -327,7 +327,9 @@ async fn retry_pending(
 ///
 /// 1. Anchor: the stored anchor if there is one, else one provider call; a
 ///    successful anchor is stored in the pending record before minting
-///    (OW1.3 finding 1), a failed call marks the method down for the tick.
+///    (OW1.3 finding 1; [`store_anchor`], OW1.6 F2: not minted when it
+///    cannot be stored), a failed call or store marks the method down for
+///    the tick.
 /// 2. Mint from the anchor through the SDK batch producer. A failure keeps
 ///    the anchor; next tick mints again from it.
 /// 3. Self-check every witness ([`verify_minted_batch`]: the anchor is
@@ -375,13 +377,9 @@ async fn settle_method(
                 return None;
             };
             pending.set_anchor(method, value.clone(), now);
-            if let Err(e) = store.save_pending(pending) {
-                error!(
-                    epoch_id,
-                    method = method.as_str(),
-                    error = %e,
-                    "storing the anchor before minting failed; minting continues from memory"
-                );
+            if !store_anchor(store, pending, method, &value) {
+                down.insert(method);
+                return None;
             }
             value
         }
@@ -479,6 +477,54 @@ async fn settle_method(
     *pending = remaining;
     log_minted(&minted);
     Some(minted)
+}
+
+/// Make a just-returned anchor durable before anything is minted from it
+/// (OW1.6 F2): the pending record is saved, once more on failure. When both
+/// saves fail the anchor is not minted from memory (an in-memory anchor is
+/// lost at the end of the tick and the next tick would broadcast again):
+/// `false`, the caller puts the method down for the rest of the tick, and
+/// the ERROR names the anchor so ops can recover it.
+///
+/// Remaining window: a crash between the provider's broadcast and this
+/// save loses the anchor too; the next tick then anchors the same root a
+/// second time (for EVM a second transaction, valid but extra gas).
+fn store_anchor(
+    store: &Store,
+    pending: &PendingEpoch,
+    method: AnchorMethod,
+    value: &TimestampValue,
+) -> bool {
+    let epoch_id = pending.epoch_id;
+    let first = match store.save_pending(pending) {
+        Ok(()) => return true,
+        Err(e) => e,
+    };
+    warn!(epoch_id, method = method.as_str(), error = %first,
+        "storing the anchor failed; retrying once");
+    let Err(e) = store.save_pending(pending) else {
+        return true;
+    };
+    // A qTSA token is long; its genTime and provider identify it for ops.
+    let anchor = match method {
+        AnchorMethod::Evm => value.transaction_hash.clone(),
+        AnchorMethod::Qtsa => format!(
+            "tsa token from {:?} at {} ({} base64 chars)",
+            value.tsa_provider,
+            value.timestamp,
+            value.transaction_hash.len()
+        ),
+    };
+    error!(
+        epoch_id,
+        method = method.as_str(),
+        anchor = %anchor,
+        root = %pending.anchor_root(),
+        error = %e,
+        "storing the anchor failed twice; not minted, method down for this tick; \
+         the next tick anchors again unless ops restores this anchor"
+    );
+    false
 }
 
 /// The anchor's transaction is not on the chain ([`SelfCheckVerdict::Missing`]):

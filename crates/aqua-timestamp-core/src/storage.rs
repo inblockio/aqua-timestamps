@@ -126,6 +126,10 @@ pub struct Store {
     pending_anchors: PartitionHandle,
     pending_leaves: PartitionHandle,
     self_checked_tips: PartitionHandle,
+    /// Test seam (feature `test-doubles`): while above zero, each
+    /// [`Self::save_pending`] call fails and decrements it.
+    #[cfg(feature = "test-doubles")]
+    pub save_pending_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -169,6 +173,8 @@ impl Store {
             pending_anchors,
             pending_leaves,
             self_checked_tips,
+            #[cfg(feature = "test-doubles")]
+            save_pending_faults: Default::default(),
             epochs,
             epoch_leaves,
             witness_revisions,
@@ -302,6 +308,17 @@ impl Store {
     /// Overwrite a pending record (its stored anchors changed, OW1.4). The
     /// per-leaf pending lookups are unchanged: the methods are the same.
     pub fn save_pending(&self, pending: &PendingEpoch) -> Result<(), StoreError> {
+        #[cfg(feature = "test-doubles")]
+        {
+            use std::sync::atomic::Ordering;
+            let faults = &self.save_pending_faults;
+            if faults
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(StoreError::Pending("injected save_pending fault".into()));
+            }
+        }
         self.pending_anchors
             .insert(pending.epoch_id.to_be_bytes(), serde_json::to_vec(pending)?)?;
         self.keyspace.persist(PersistMode::SyncAll)?;

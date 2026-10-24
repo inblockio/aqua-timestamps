@@ -1224,3 +1224,98 @@ async fn ow16_h2_dropped_evm_tx_times_out_and_reanchors() {
     assert_eq!(w.epoch_id, 1);
     assert!(pending_methods(&store).is_empty());
 }
+
+/// A context that mints only the EVM method, on `chain` (provider and self-check host), so no
+/// later qTSA save of the same pending record can store the EVM anchor by accident.
+async fn evm_only_ctx(
+    chain: Arc<aqua_timestamp_core::selfcheck::doubles::SimChain>,
+) -> WitnessContext {
+    let mut c = ctx(Some(chain.clone()), None).await;
+    c.methods = vec![AnchorMethod::Evm];
+    c.self_check.blockchain = Some(chain);
+    c
+}
+
+fn sim_chain() -> Arc<aqua_timestamp_core::selfcheck::doubles::SimChain> {
+    Arc::new(aqua_timestamp_core::selfcheck::doubles::SimChain::new(
+        TimestampValue::new(
+            vec![],
+            "0xCAFE000000000000000000000000000000000000".into(),
+            String::new(),
+            format!("0x{}", "cd".repeat(32)),
+            "0xDEAD000000000000000000000000000000000000".into(),
+            "sepolia".into(),
+            String::new(),
+            BLOCK_TIME,
+            1,
+            0,
+            String::new(),
+        ),
+    ))
+}
+
+/// OW1.6 F2: a just-broadcast anchor is durable before anything can drop it. One failed
+/// `save_pending` is retried: the anchor is stored, so a not-yet-final transaction is
+/// re-checked next tick without a second transaction.
+#[tokio::test]
+async fn ow16_f2_anchor_save_retried_once() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_f2_retry");
+    let chain = sim_chain();
+    chain.set_final(false);
+    let c = evm_only_ctx(chain.clone()).await;
+
+    store
+        .save_pending_faults
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(served.is_empty(), "not final yet");
+    assert_eq!(chain.anchor_calls(), 1);
+    assert!(
+        pending_anchor(&store, AnchorMethod::Evm).is_some(),
+        "the anchor survived the failed save"
+    );
+
+    chain.set_final(true);
+    let ws = tick_at(&store, &c, 2, EPOCH_CLOSE + EPOCH_SECS).await;
+    assert_eq!(chain.anchor_calls(), 1, "no second transaction");
+    witness_for(&ws, &a.leaf, AnchorMethod::Evm);
+}
+
+/// OW1.6 F2: when the anchor cannot be stored (the retry fails too), nothing is minted from
+/// memory, and the method is down for the rest of the tick: no second anchor call in the same
+/// tick, even for another pending epoch.
+#[tokio::test]
+async fn ow16_f2_unstored_anchor_not_minted_method_down() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_f2_down_a");
+    let b = client_tree("ow16_f2_down_b");
+    let chain = sim_chain();
+    let c = evm_only_ctx(chain.clone()).await;
+    let faults = store.save_pending_faults.clone();
+
+    faults.store(2, std::sync::atomic::Ordering::SeqCst);
+    let served = seal_into(&store, &[&a], &c).await;
+    assert!(served.is_empty(), "nothing minted from an unstored anchor");
+    assert_eq!(chain.anchor_calls(), 1);
+
+    // Tick 2: epoch 1 re-anchors and its save fails twice; epoch 2 makes no anchor call.
+    faults.store(2, std::sync::atomic::Ordering::SeqCst);
+    let acc = Accumulator::new(2, EPOCH_CLOSE, EPOCH_SECS);
+    acc.append_batch(&[b.leaf], DID_B);
+    let (_r, served) = seal_once(&acc, &store, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS, Some(&c))
+        .await
+        .expect("seal_once");
+    assert!(served.is_empty());
+    assert_eq!(
+        chain.anchor_calls(),
+        2,
+        "the method is down for the rest of the tick"
+    );
+
+    let ws = tick_at(&store, &c, 3, EPOCH_CLOSE + 2 * EPOCH_SECS).await;
+    witness_for(&ws, &a.leaf, AnchorMethod::Evm);
+    witness_for(&ws, &b.leaf, AnchorMethod::Evm);
+}
