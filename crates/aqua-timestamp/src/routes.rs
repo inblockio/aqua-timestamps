@@ -206,7 +206,21 @@ pub async fn submit_leaves(
         }
     }
 
-    let outcome = state.accumulator.append_batch(&decoded, &bearer.0);
+    let outcome = match state.accumulator.append_batch(&decoded, &bearer.0) {
+        Ok(outcome) => outcome,
+        Err(full) => {
+            warn!(
+                did = %bearer.0,
+                epoch_id = full.epoch_id,
+                "v1.leaves refused: epoch full"
+            );
+            return Err(AuthApiError::unavailable(format!(
+                "epoch {} is full ({} leaves, the timestamp template maximum); \
+                 nothing of this batch was accepted, resubmit after epoch_closes_at {}",
+                full.epoch_id, full.cap, full.epoch_closes_at
+            )));
+        }
+    };
     info!(
         did = %bearer.0,
         epoch_id = outcome.epoch_id,

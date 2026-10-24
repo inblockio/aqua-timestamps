@@ -966,7 +966,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[1u8; 32]], DID_A);
+        acc.append_batch(&[[1u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let ctx = base_ctx(signer);
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
@@ -998,7 +998,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[2u8; 32]], DID_A);
+        acc.append_batch(&[[2u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let failing: Arc<dyn AnchorProvider> = Arc::new(FailingProvider {
             message: "synthetic".into(),
@@ -1025,7 +1025,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[3u8; 32]], DID_A);
+        acc.append_batch(&[[3u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let mut ctx = base_ctx(signer);
         ctx.evm_anchor = None;
@@ -1107,7 +1107,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[1u8; 32]], DID_A);
+        acc.append_batch(&[[1u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let ctx = base_ctx(signer);
         let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
@@ -1126,7 +1126,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[2u8; 32]], DID_A);
+        acc.append_batch(&[[2u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let failing: Arc<dyn AnchorProvider> = Arc::new(FailingProvider {
             message: "tsa unreachable".into(),
@@ -1189,8 +1189,8 @@ mod tests {
         let acc = Accumulator::new(1, 0, 60);
         let l1 = [1u8; 32];
         let l2 = [2u8; 32];
-        acc.append_batch(&[l1], DID_A);
-        acc.append_batch(&[l2], DID_B);
+        acc.append_batch(&[l1], DID_A).unwrap();
+        acc.append_batch(&[l2], DID_B).unwrap();
 
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, None).await.expect("seal");
         assert_eq!(rec.id, 1);
@@ -1228,7 +1228,7 @@ mod tests {
         let _clock = FixedClock::new(0);
         let handle = run_sealer_with_channel(Arc::clone(&acc), store.clone(), rx, 60, None, None);
 
-        acc.append_batch(&[[7u8; 32]], DID_A);
+        acc.append_batch(&[[7u8; 32]], DID_A).unwrap();
         tx.send(SealTick { now: 60 }).await.unwrap();
 
         // Give the task one yield to process; close the channel to let it
@@ -1249,7 +1249,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[8u8; 32]], DID_A);
+        acc.append_batch(&[[8u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         // 10 ETH balance, 0.00135 ETH gas => ~7407 txs => rate ~0.643 => interval 2
@@ -1298,7 +1298,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[9u8; 32]], DID_A);
+        acc.append_batch(&[[9u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         // Balance < 2 * gas_cost: should not seal
@@ -1342,7 +1342,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[10u8; 32]], DID_A);
+        acc.append_batch(&[[10u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         let oracle = Arc::new(FailingOracle {

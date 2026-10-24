@@ -294,6 +294,12 @@ fn batch_inclusion(payloads: &serde_json::Value, target: &RevisionLink) -> Resul
     };
     let merkle_root = text("merkle_root")?;
     let size = integer("batch_tree_size")?;
+    if size > crate::accumulator::MAX_LEAVES_PER_EPOCH as u64 {
+        return Err(format!(
+            "batch_tree_size {size} exceeds the template maximum {}",
+            crate::accumulator::MAX_LEAVES_PER_EPOCH
+        ));
+    }
     let index = integer("batch_leaf_index")?;
     let proof = payloads
         .get("merkle_proof")
@@ -577,5 +583,27 @@ pub mod doubles {
                 )
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    /// OW2.2 M2: a witness whose `batch_tree_size` is over the template
+    /// maximum (2^20) fails the self-check, so it is never served.
+    #[test]
+    fn batch_tree_size_over_template_cap_fails() {
+        let payloads = serde_json::json!({
+            "merkle_root": "00",
+            "batch_tree_size": 1_048_577u64,
+            "batch_leaf_index": 0u64,
+            "merkle_proof": [],
+            "shielding_nonce": "00",
+        });
+        let target = RevisionLink::from_bytes([7u8; 32]);
+        let err = batch_inclusion(&payloads, &target).unwrap_err();
+        assert!(err.contains("batch_tree_size"), "{err}");
+        assert!(err.contains("1048576"), "{err}");
     }
 }

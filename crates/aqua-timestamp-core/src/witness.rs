@@ -743,7 +743,7 @@ mod tests {
 
     fn snapshot_of(id: u64, leaves: &[Hash32]) -> (SealedSnapshot, EpochBatch) {
         let acc = Accumulator::new(id, 0, 60);
-        acc.append_batch(leaves, "did:pkh:eip155:1:0xAAAA");
+        acc.append_batch(leaves, "did:pkh:eip155:1:0xAAAA").unwrap();
         let snap = acc.swap_and_open_next(60, 60, 60);
         let batch_leaves: Vec<Hash32> = snap.leaves.iter().map(|e| e.leaf).collect();
         let batch = EpochBatch::prepare(&batch_leaves)

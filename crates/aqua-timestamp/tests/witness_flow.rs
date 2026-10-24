@@ -787,7 +787,7 @@ async fn preload_legacy_witness(path: &std::path::Path, leaf: [u8; 32], did: &st
     };
     let store = Store::open(path).expect("store");
     let acc = Accumulator::new(1, 940, 60);
-    acc.append_batch(&[leaf], did);
+    acc.append_batch(&[leaf], did).unwrap();
     let snapshot = acc.swap_and_open_next(1000, 1000, 60);
     let leaves: Vec<[u8; 32]> = snapshot.leaves.iter().map(|e| e.leaf).collect();
     let batch = EpochBatch::prepare(&leaves).unwrap().expect("batch");

@@ -204,7 +204,8 @@ async fn seal(clients: &[&ClientTree], ctx: &WitnessContext) -> Vec<MintedWitnes
     let store = Store::open(dir.path()).expect("store");
     let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
     for (i, c) in clients.iter().enumerate() {
-        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B });
+        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B })
+            .unwrap();
     }
     let (_record, witnesses) = seal_once(&acc, &store, EPOCH_CLOSE, EPOCH_SECS, Some(ctx))
         .await
@@ -548,7 +549,8 @@ async fn seal_lenient(clients: &[&ClientTree], ctx: &WitnessContext) -> Vec<Mint
     let store = Store::open(dir.path()).expect("store");
     let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
     for (i, c) in clients.iter().enumerate() {
-        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B });
+        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B })
+            .unwrap();
     }
     match seal_once(&acc, &store, EPOCH_CLOSE, EPOCH_SECS, Some(ctx)).await {
         Ok((_record, ws)) => ws,
@@ -572,7 +574,8 @@ async fn seal_into(
 ) -> Vec<MintedWitness> {
     let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
     for (i, c) in clients.iter().enumerate() {
-        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B });
+        acc.append_batch(&[c.leaf], if i % 2 == 0 { DID_A } else { DID_B })
+            .unwrap();
     }
     let (_record, ws) = seal_once(&acc, store, EPOCH_CLOSE, EPOCH_SECS, Some(ctx))
         .await
@@ -1130,9 +1133,9 @@ async fn ow16_h1_anchor_judged_once_per_epoch_and_method() {
     c.self_check.tsa = Some(tsa.clone());
 
     let acc = Accumulator::new(1, EPOCH_CLOSE - EPOCH_SECS, EPOCH_SECS);
-    acc.append_batch(&[a.leaf], DID_A);
+    acc.append_batch(&[a.leaf], DID_A).unwrap();
     let others: Vec<[u8; 32]> = (1..50u8).map(|i| [i; 32]).collect();
-    acc.append_batch(&others, DID_B);
+    acc.append_batch(&others, DID_B).unwrap();
     let (_record, served) = seal_once(&acc, &store, EPOCH_CLOSE, EPOCH_SECS, Some(&c))
         .await
         .expect("seal_once");
@@ -1304,7 +1307,7 @@ async fn ow16_f2_unstored_anchor_not_minted_method_down() {
     // Tick 2: epoch 1 re-anchors and its save fails twice; epoch 2 makes no anchor call.
     faults.store(2, std::sync::atomic::Ordering::SeqCst);
     let acc = Accumulator::new(2, EPOCH_CLOSE, EPOCH_SECS);
-    acc.append_batch(&[b.leaf], DID_B);
+    acc.append_batch(&[b.leaf], DID_B).unwrap();
     let (_r, served) = seal_once(&acc, &store, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS, Some(&c))
         .await
         .expect("seal_once");
@@ -1369,7 +1372,7 @@ async fn ow16_m4_reanchor_at_fault_capped_and_method_down() {
     assert_eq!(calls(), 1);
 
     let acc = Accumulator::new(2, EPOCH_CLOSE, EPOCH_SECS);
-    acc.append_batch(&[b.leaf], DID_B);
+    acc.append_batch(&[b.leaf], DID_B).unwrap();
     seal_once(&acc, &store, EPOCH_CLOSE + EPOCH_SECS, EPOCH_SECS, Some(&c))
         .await
         .expect("seal_once");
