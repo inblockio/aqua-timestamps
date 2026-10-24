@@ -350,7 +350,8 @@ pub struct PendingEpoch {
     /// or discarded when the self-check finds the anchor itself at fault.
     #[serde(default)]
     pub anchors: Vec<StoredAnchor>,
-    /// Anchors the self-check found at fault, per method (OW1.6 M4). After
+    /// Anchors the self-check found at fault, or abandoned after the
+    /// not-found timeout (OW1.6b N3), per method (OW1.6 M4). After
     /// [`crate::sealer::WitnessContext::max_anchor_faults`] the method is not
     /// re-anchored for this epoch.
     #[serde(default)]

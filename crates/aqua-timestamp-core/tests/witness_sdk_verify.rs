@@ -1549,3 +1549,26 @@ async fn ow16_n5_known_unmined_tx_never_times_out() {
     assert_eq!(witness_for(&ws, &a.leaf, AnchorMethod::Evm).epoch_id, 1);
     assert!(pending_methods(&store).is_empty());
 }
+
+/// OW1.6b N3: anchors abandoned after the not-found timeout count toward the same
+/// per-(epoch, method) cap as anchors at fault, so a host that never sees the provider's
+/// transactions cannot make the sealer send one per timeout period forever: after the default
+/// 3 abandoned anchors the epoch is not re-anchored again and stays pending.
+#[tokio::test]
+async fn ow16_n3_not_found_timeouts_capped() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_n3");
+    let chain = sim_chain();
+    chain.set_dropped(true);
+    let mut c = evm_only_ctx(chain.clone()).await;
+    c.evm_not_found_timeout_secs = 100;
+
+    assert!(seal_into(&store, &[&a], &c).await.is_empty());
+    for epoch in 2..12u64 {
+        let now = EPOCH_CLOSE + (epoch - 1) * 200;
+        assert!(tick_at(&store, &c, epoch, now).await.is_empty());
+    }
+    assert_eq!(chain.anchor_calls(), 3, "capped at 3 abandoned anchors");
+    assert_eq!(evm_faults(&store), vec![(1, 3, false)]);
+}

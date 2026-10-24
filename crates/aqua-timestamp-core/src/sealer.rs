@@ -62,10 +62,11 @@ pub struct WitnessContext {
     /// but has not mined stays pending without a timeout (it holds its
     /// nonce). Config `anchors.evm.not_found_timeout_secs`.
     pub evm_not_found_timeout_secs: u64,
-    /// Anchors found at fault per (epoch, method) before the method is no
-    /// longer re-anchored for that epoch (OW1.6 M4: a systematic fault, such
-    /// as a sender or contract mismatch, would otherwise spend one
-    /// transaction per pending epoch per tick). Default
+    /// Anchors found at fault, or abandoned after the not-found timeout
+    /// (OW1.6b N3), per (epoch, method) before the method is no longer
+    /// re-anchored for that epoch (OW1.6 M4: a systematic fault, such as a
+    /// sender or contract mismatch, would otherwise spend one transaction
+    /// per pending epoch per tick). Default
     /// [`DEFAULT_MAX_ANCHOR_FAULTS`].
     pub max_anchor_faults: u32,
     /// The service DID every witness signature must name
@@ -389,7 +390,7 @@ async fn settle_method(
                     epoch_id,
                     method = method.as_str(),
                     faults,
-                    "anchor found at fault too often; not re-anchored for this epoch, \
+                    "anchor found at fault or abandoned too often; not re-anchored for this epoch, \
                      witnesses stay pending until ops intervenes"
                 );
                 return None;
@@ -598,12 +599,17 @@ fn settle_missing(
         }
         return;
     }
+    // OW1.6b N3: an abandoned anchor counts toward the same cap as an
+    // anchor at fault, so re-anchors after timeouts are bounded too.
+    let faults = pending.count_anchor_fault(method);
     warn!(
         epoch_id,
         method = method.as_str(),
         tx_hash = %value.transaction_hash,
         age_secs = age,
         timeout_secs = ctx.evm_not_found_timeout_secs,
+        faults,
+        max = ctx.max_anchor_faults,
         reason = %reason,
         "anchor transaction not on the chain past the not-found timeout (dropped or reorged out); \
          anchor abandoned, the next attempt re-anchors"
