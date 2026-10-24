@@ -1512,3 +1512,40 @@ async fn ow16_n2_non_first_witness_odd_anchor_field_not_served() {
 async fn ow16_n2_first_witness_odd_anchor_field_not_served() {
     odd_anchor_field_not_served(AnchorMethod::Qtsa, 0, "tsa_provider").await;
 }
+
+/// OW1.6b N5: a transaction the node knows but has not mined (facts without a block, the SDK's
+/// `NotIncluded`) holds its nonce, so it never times out: past the not-found timeout the anchor
+/// is kept and no second anchor call is made. Once mined, it is served from that anchor.
+#[tokio::test]
+async fn ow16_n5_known_unmined_tx_never_times_out() {
+    let dir = tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("store");
+    let a = client_tree("ow16_n5");
+    let chain = sim_chain();
+    chain.set_unmined(true);
+    let c = evm_only_ctx(chain.clone()).await;
+    let timeout = c.evm_not_found_timeout_secs;
+
+    assert!(seal_into(&store, &[&a], &c).await.is_empty());
+    assert_eq!(chain.anchor_calls(), 1);
+    let first = pending_anchor(&store, AnchorMethod::Evm).expect("anchor stored");
+
+    for (epoch, now) in [
+        (2, EPOCH_CLOSE + timeout + 60),
+        (3, EPOCH_CLOSE + 3 * timeout),
+    ] {
+        assert!(tick_at(&store, &c, epoch, now).await.is_empty());
+        assert_eq!(chain.anchor_calls(), 1, "no second anchor past the timeout");
+        assert_eq!(
+            pending_anchor(&store, AnchorMethod::Evm).map(|v| v.transaction_hash),
+            Some(first.transaction_hash.clone()),
+            "anchor kept"
+        );
+    }
+
+    chain.set_unmined(false);
+    let ws = tick_at(&store, &c, 4, EPOCH_CLOSE + 3 * timeout + 60).await;
+    assert_eq!(chain.anchor_calls(), 1, "served from the kept anchor");
+    assert_eq!(witness_for(&ws, &a.leaf, AnchorMethod::Evm).epoch_id, 1);
+    assert!(pending_methods(&store).is_empty());
+}

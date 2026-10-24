@@ -415,6 +415,7 @@ pub mod doubles {
         txs: Mutex<HashMap<String, Vec<u8>>>,
         is_final: AtomicBool,
         dropped: AtomicBool,
+        unmined: AtomicBool,
         calls: AtomicUsize,
     }
 
@@ -425,6 +426,7 @@ pub mod doubles {
                 txs: Mutex::new(HashMap::new()),
                 is_final: AtomicBool::new(true),
                 dropped: AtomicBool::new(false),
+                unmined: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
             }
         }
@@ -439,6 +441,11 @@ pub mod doubles {
             if dropped {
                 self.txs.lock().expect("sim chain").clear();
             }
+        }
+        /// While set, the node knows every transaction on the chain but none
+        /// is in a block (facts without inclusion: the SDK's `NotIncluded`).
+        pub fn set_unmined(&self, unmined: bool) {
+            self.unmined.store(unmined, Ordering::SeqCst);
         }
         /// Number of anchor calls (`create_timestamp`) so far.
         pub fn anchor_calls(&self) -> usize {
@@ -493,7 +500,7 @@ pub mod doubles {
                 from: bytes::<20>(&self.template.sender_account_address).unwrap_or([0; 20]),
                 to: bytes::<20>(&self.template.smart_contract_address),
                 input: input.clone(),
-                inclusion: Some(EvmInclusion {
+                inclusion: (!self.unmined.load(Ordering::SeqCst)).then_some(EvmInclusion {
                     block_number: if is_final { BLOCK } else { BLOCK + 60 },
                     block_hash: [0xee; 32],
                     block_time: self.template.timestamp,
