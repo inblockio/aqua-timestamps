@@ -13,6 +13,11 @@ updates:
       cargo-minor-patch:
         applies-to: version-updates
         update-types: [minor, patch]
+    ignore:
+      # Our own crates (git dependencies, aqua-rs-sdk is private) move with the aqua-ops pin train,
+      # not with Dependabot; in this public repository an update PR could also list the private
+      # repository's commit titles (Tim 2026-10-24).
+      - dependency-name: "aqua-*"
 
   - package-ecosystem: docker
     directory: /deploy
