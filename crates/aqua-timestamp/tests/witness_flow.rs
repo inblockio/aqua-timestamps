@@ -1064,3 +1064,74 @@ async fn evm_zero_not_found_timeout_refuses_to_start() {
     };
     assert!(err.contains("anchors.evm.not_found_timeout_secs"), "{err}");
 }
+
+/// OW2.2 N9: an (epoch, method) whose anchor reached the fault cap
+/// (`max_anchor_faults`, OW1.6 M4) is never re-anchored without ops, so the
+/// fetch routes must not answer it as an ordinary 202 pending (a client would
+/// poll forever): they answer 503 with `"status":"anchor_stalled"`.
+#[tokio::test]
+async fn fault_capped_method_answers_anchor_stalled() {
+    use aqua_timestamp_core::{
+        accumulator::Accumulator,
+        epoch::EpochRecord,
+        sealer::DEFAULT_MAX_ANCHOR_FAULTS,
+        storage::Store,
+        witness::{AnchorMethod, EpochBatch, PendingEpoch},
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = [0x4c; 32];
+    {
+        let store = Store::open(tmp.path()).expect("store");
+        let acc = Accumulator::new(1, 940, 60);
+        acc.append_batch(&[leaf], CLIENT_A_DID).unwrap();
+        let snapshot = acc.swap_and_open_next(1000, 1000, 60);
+        let leaves: Vec<[u8; 32]> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+        let batch = EpochBatch::prepare(&leaves).unwrap().expect("batch");
+        let mut pending = PendingEpoch::new(&snapshot, &batch, vec![AnchorMethod::Evm]);
+        for _ in 0..DEFAULT_MAX_ANCHOR_FAULTS {
+            pending.count_anchor_fault(AnchorMethod::Evm);
+        }
+        let record = EpochRecord {
+            id: 1,
+            opened_at: 940,
+            closed_at: 1000,
+            merkle_root: [0x11; 32],
+            leaf_count: 1,
+            hash_type: "FIPS_202-SHA3-256".into(),
+        };
+        store
+            .persist_sealed_epoch_with_pending(&record, &snapshot.leaves, &[], Some(&pending))
+            .expect("persist");
+    }
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let leaf_hex = format!("0x{}", hex::encode(leaf));
+
+    for uri in [
+        format!("/trees/by-leaf/{leaf_hex}?method=evm"),
+        "/trees?epoch=1&method=evm".to_string(),
+    ] {
+        let (status, body) = get_json(&router, &uri, Some(&token)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
+        assert_eq!(body["status"], "anchor_stalled", "{uri}: {body}");
+        assert_eq!(body["method"], "evm", "{uri}: {body}");
+        assert_eq!(body["epoch"], 1, "{uri}: {body}");
+    }
+}

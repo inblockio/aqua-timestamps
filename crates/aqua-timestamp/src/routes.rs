@@ -579,7 +579,7 @@ fn union_for_epoch(
         .is_epoch_pending(epoch_id, method)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?
     {
-        return Ok(pending_anchor_response(method, epoch_id, None));
+        return Ok(pending_anchor_response(state, method, epoch_id, None));
     }
     let entries = state
         .store
@@ -701,7 +701,7 @@ pub async fn get_tree_by_leaf(
                 .get_pending_epoch_for_leaf(&leaf, method)
                 .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
             return Ok(match pending {
-                Some(epoch_id) => pending_anchor_response(method, epoch_id, Some(&leaf)),
+                Some(epoch_id) => pending_anchor_response(&state, method, epoch_id, Some(&leaf)),
                 None => not_found_response("no witness for that leaf/method yet"),
             });
         }
@@ -723,7 +723,7 @@ pub async fn get_tree_by_leaf(
             .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
         return Ok(match pending {
             Some(epoch_id) if epoch_id > idx.epoch_id => {
-                pending_anchor_response(method, epoch_id, Some(&leaf))
+                pending_anchor_response(&state, method, epoch_id, Some(&leaf))
             }
             _ => not_verifiable_response(Some(method), idx.epoch_id, Some(&leaf)),
         });
@@ -803,10 +803,14 @@ fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
 /// complete) with `{"status":"pending","method","epoch","leaf"?,"detail"}`.
 /// Never a placeholder witness. 404 keeps meaning "unknown / not sealed".
 fn pending_anchor_response(
+    state: &AppState,
     method: AnchorMethod,
     epoch_id: u64,
     leaf: Option<&[u8; 32]>,
 ) -> Response {
+    if anchor_stalled(state, method, epoch_id) {
+        return anchor_stalled_response(method, epoch_id, leaf);
+    }
     let mut body = json!({
         "status": "pending",
         "method": method.as_str(),
@@ -820,6 +824,50 @@ fn pending_anchor_response(
         body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
     }
     (StatusCode::ACCEPTED, Json(body)).into_response()
+}
+
+/// OW2.2 N9: the (epoch, method) reached the anchor fault cap
+/// (`max_anchor_faults`, OW1.6 M4) with no anchor held, the state in which the
+/// sealer no longer re-anchors it until ops intervenes. A store read error
+/// answers false (the ordinary pending body), never a wrong 200.
+fn anchor_stalled(state: &AppState, method: AnchorMethod, epoch_id: u64) -> bool {
+    match state.store.list_pending_epochs() {
+        Ok(pending) => pending.iter().any(|p| {
+            p.epoch_id == epoch_id
+                && p.anchor(method).is_none()
+                && p.anchor_fault_count(method) >= state.witness_ctx.max_anchor_faults
+        }),
+        Err(e) => {
+            warn!(epoch_id, method = method.as_str(), error = %e, "reading pending anchors failed");
+            false
+        }
+    }
+}
+
+/// `503 Service Unavailable` with
+/// `{"status":"anchor_stalled","method","epoch","leaf"?,"detail"}`, the
+/// pending body's shape: the anchor was found at fault or abandoned too often
+/// and is not retried until the operator intervenes, so polling does not help.
+fn anchor_stalled_response(
+    method: AnchorMethod,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    let mut body = json!({
+        "status": "anchor_stalled",
+        "method": method.as_str(),
+        "epoch": epoch_id,
+        "detail": format!(
+            "epoch {epoch_id} is sealed; its {} anchor failed too often and is not retried \
+             until the operator intervenes; polling will not change this answer, the leaf \
+             may be resubmitted for a new epoch",
+            method.as_str()
+        ),
+    });
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
 }
 
 fn is_self_checked(state: &Arc<AppState>, tip: &[u8; 32]) -> Result<bool, AuthApiError> {

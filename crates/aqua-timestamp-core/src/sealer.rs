@@ -15,7 +15,7 @@ use std::time::Duration;
 use aqua_rs_sdk::Secp256k1Signer;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::accumulator::{Accumulator, SealedSnapshot};
 use crate::anchors::AnchorProvider;
@@ -191,6 +191,21 @@ pub enum SealError {
 #[derive(Debug, Clone, Copy)]
 pub struct SealTick {
     pub now: u64,
+}
+
+/// OW2.2 N9: log the moment an (epoch, method) reaches the anchor fault cap,
+/// once, at ERROR. The per-tick check that skips it afterwards logs at debug,
+/// so a stalled method does not repeat an ERROR every tick.
+fn log_fault_cap_reached(ctx: &WitnessContext, epoch_id: u64, method: AnchorMethod, faults: u32) {
+    if faults == ctx.max_anchor_faults {
+        error!(
+            epoch_id,
+            method = method.as_str(),
+            faults,
+            "anchor found at fault or abandoned too often; not re-anchored for this epoch, \
+             witnesses stay stalled (503 anchor_stalled) until ops intervenes"
+        );
+    }
 }
 
 /// Run a single seal cycle and return the persisted record together with
@@ -386,12 +401,13 @@ async fn settle_method(
             }
             let faults = pending.anchor_fault_count(method);
             if faults >= ctx.max_anchor_faults {
-                error!(
+                // OW2.2 N9: the ERROR is logged once, when the cap is reached
+                // (log_fault_cap_reached); every later tick only at debug.
+                debug!(
                     epoch_id,
                     method = method.as_str(),
                     faults,
-                    "anchor found at fault or abandoned too often; not re-anchored for this epoch, \
-                     witnesses stay pending until ops intervenes"
+                    "anchor fault cap reached earlier; not re-anchored, witnesses stay stalled"
                 );
                 return None;
             }
@@ -477,6 +493,7 @@ async fn settle_method(
                     // OW1.6 M4: counted, and no further anchor call for this
                     // method in this tick.
                     let faults = pending.count_anchor_fault(method);
+                    log_fault_cap_reached(ctx, epoch_id, method, faults);
                     warn!(
                         epoch_id,
                         method = method.as_str(),
@@ -602,6 +619,7 @@ fn settle_missing(
     // OW1.6b N3: an abandoned anchor counts toward the same cap as an
     // anchor at fault, so re-anchors after timeouts are bounded too.
     let faults = pending.count_anchor_fault(method);
+    log_fault_cap_reached(ctx, epoch_id, method, faults);
     warn!(
         epoch_id,
         method = method.as_str(),
