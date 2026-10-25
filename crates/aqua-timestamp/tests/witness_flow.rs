@@ -854,7 +854,7 @@ async fn legacy_witness_answers_not_verifiable() {
         .await
         .unwrap();
     let (tx, rx) = mpsc::channel::<SealTick>(8);
-    let (router, _state) = build_app_with_anchors(
+    let (router, state) = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
@@ -888,8 +888,13 @@ async fn legacy_witness_answers_not_verifiable() {
     assert_eq!(body["status"], "not_verifiable", "{body}");
     assert!(body.get("revisions").is_none(), "{body}");
 
-    let (_, tips) = get_json(&router, "/trees", Some(&token)).await;
-    let old_tip = tips.as_array().unwrap()[0].as_str().unwrap().to_string();
+    // OW2.2 N7: the tip list names only tips the fetch routes serve, so a
+    // legacy tip (410 on every fetch route) is not listed.
+    let (status, tips) = get_json(&router, "/trees", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{tips}");
+    assert_eq!(tips, serde_json::json!([]), "legacy tip is not listed");
+    let stored = state.store.list_witness_tips_for_did(CLIENT_A_DID).unwrap();
+    let old_tip = aqua_timestamp_core::witness::revision_wire_hex(&stored[0].1);
     let (status, body) = get_json(&router, &format!("/trees/{old_tip}"), Some(&token)).await;
     assert_eq!(status, StatusCode::GONE, "{body}");
     assert_eq!(body["status"], "not_verifiable", "{body}");
@@ -913,6 +918,13 @@ async fn legacy_witness_answers_not_verifiable() {
         }
     }
     assert!(served, "a self-checked witness is served");
+    let (_, tips) = get_json(&router, "/trees", Some(&token)).await;
+    let tips = tips.as_array().unwrap();
+    assert!(!tips.is_empty(), "the self-checked witness is listed");
+    assert!(
+        tips.iter().all(|t| t.as_str() != Some(old_tip.as_str())),
+        "the legacy tip stays unlisted: {tips:?}"
+    );
 }
 
 /// OW1.6b F1 (N6): a holder follows the 410 advice and resubmits the leaf of

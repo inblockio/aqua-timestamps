@@ -538,16 +538,21 @@ pub async fn list_or_query_trees(
 }
 
 /// `GET /trees` shape: a JSON array of hex tip hashes belonging to the
-/// caller's DID, sorted descending by epoch.
+/// caller's DID, sorted descending by epoch. Only tips the fetch routes
+/// serve are listed: a legacy tip (minted before the pre-serve self-check,
+/// no self-checked marker, D61) answers 410 there, so it is left out here
+/// (OW2.2 N7).
 fn list_tips_for_did(state: &Arc<AppState>, did: &str) -> Result<Response, AuthApiError> {
     let tips = state
         .store
         .list_witness_tips_for_did(did)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
-    let body: Vec<String> = tips
-        .into_iter()
-        .map(|(_, tip)| revision_wire_hex(&tip))
-        .collect();
+    let mut body: Vec<String> = Vec::with_capacity(tips.len());
+    for (_, tip) in tips {
+        if is_self_checked(state, &tip)? {
+            body.push(revision_wire_hex(&tip));
+        }
+    }
     info!(did, count = body.len(), "trees.list");
     Ok((StatusCode::OK, Json(body)).into_response())
 }
