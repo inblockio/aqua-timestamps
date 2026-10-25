@@ -142,6 +142,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
 struct Harness {
     router: Router,
     seal_tx: mpsc::Sender<SealTick>,
+    state: std::sync::Arc<aqua_timestamp::state::AppState>,
     _tmp: TempDir,
 }
 
@@ -156,7 +157,7 @@ async fn build_harness() -> Harness {
         .await
         .expect("identity");
     let (tx, rx) = mpsc::channel::<SealTick>(8);
-    let (router, _state) = build_app_with_anchors(
+    let (router, state) = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
@@ -168,6 +169,7 @@ async fn build_harness() -> Harness {
     Harness {
         router,
         seal_tx: tx,
+        state,
         _tmp: tmp,
     }
 }
@@ -261,17 +263,32 @@ fn leaf_hex(prefix: u8) -> String {
 }
 
 async fn drain_seal(harness: &Harness, now: u64) {
+    let before = harness.state.store.last_sealed_epoch_id().unwrap();
     harness.seal_tx.send(SealTick { now }).await.unwrap();
-    // Yield enough times for the seal task to drain the queue without
-    // closing the channel (other tests in the same harness may seal too).
-    for _ in 0..40 {
-        tokio::task::yield_now().await;
-    }
-    // The pre-serve self-check (OW1.4) runs on a blocking thread: give the
-    // seal task real time to finish it before the test reads the routes.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    for _ in 0..40 {
-        tokio::task::yield_now().await;
+    wait_for_seal(&harness.state, before).await;
+}
+
+/// Wait (bounded) until the seal task has sealed a new epoch past `before`
+/// and no (epoch, method) is pending any more. The pre-serve self-check
+/// (OW1.4) runs on a blocking thread, so a fixed sleep raced it under load
+/// (OW2.2 flaky test); this waits on the store instead. The sealed record
+/// and its pending entry are written in one batch, so a new last sealed id
+/// with an empty pending list means every witness of that tick is served.
+async fn wait_for_seal(state: &aqua_timestamp::state::AppState, before: Option<u64>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let sealed = state.store.last_sealed_epoch_id().unwrap();
+        let pending = state.store.list_pending_epochs().unwrap();
+        if sealed != before && pending.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "seal did not finish in 20 s: last sealed {sealed:?} (before {before:?}), \
+             {} epoch(s) pending",
+            pending.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
@@ -563,7 +580,7 @@ async fn witness_retrievable_across_keyspace_reopen() {
             .await
             .unwrap();
         let (tx, rx) = mpsc::channel::<SealTick>(8);
-        let (router, _state) = build_app_with_anchors(
+        let (router, state) = build_app_with_anchors(
             cfg,
             identity,
             IdentityClaimOverrides::default(),
@@ -574,10 +591,9 @@ async fn witness_retrievable_across_keyspace_reopen() {
         .unwrap();
         let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
         let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+        let before = state.store.last_sealed_epoch_id().unwrap();
         tx.send(SealTick { now: 7777 }).await.unwrap();
-        for _ in 0..40 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_seal(&state, before).await;
         let (_, body) = get_json(&router, "/trees", Some(&token)).await;
         let tips = body.as_array().unwrap().clone();
         // Drop tx so the seal task can exit, but use std::mem::drop to
