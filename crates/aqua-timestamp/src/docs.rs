@@ -168,41 +168,56 @@ curl -sS -H 'authorization: Bearer &lt;token&gt;' ...
   '{BASE_URL}/trees/by-leaf/0x&lt;leaf&gt;?method=evm'
 curl -sS -H 'authorization: Bearer &lt;token&gt;' \
   '{BASE_URL}/trees/by-leaf/0x&lt;leaf&gt;?method=qtsa'</code></pre>
-  <p>Each response is an aqua-node-compatible <code>Tree</code>:
-  <code>{ revisions: BTreeMap, file_index: BTreeMap }</code>.
-  Deserialise directly into
-  <code>aqua_rs_sdk::schema::tree::Tree</code>. <code>404</code> means
-  the leaf is unknown; <code>403</code> means the leaf exists but
-  another DID submitted it.</p>
+  <p>Each <code>200</code> response is an aqua-node-compatible
+  <code>Tree</code>: <code>{ revisions: BTreeMap, file_index: BTreeMap }</code>
+  holding one witness pair (a TimestampObject revision chained to your
+  leaf and the service's Signature revision). Deserialise directly into
+  <code>aqua_rs_sdk::schema::tree::Tree</code>. A witness is served only
+  after it passed the service's own pre-serve self-check, so the anchor
+  it carries is final when you receive it. Other answers:</p>
+  <ul>
+    <li><code>202</code> <code>{"status":"pending"}</code>: the epoch is
+    sealed and the method's anchor is still outstanding; poll again.</li>
+    <li><code>503</code> <code>{"status":"anchor_stalled"}</code>: the
+    method's anchor failed too often and is not retried until the
+    operator intervenes; polling does not change it, resubmit the leaf
+    for a new epoch.</li>
+    <li><code>410</code> <code>{"status":"not_verifiable"}</code>: the
+    witness was minted before the self-check and is not served;
+    resubmit the leaf.</li>
+    <li><code>404</code>: the leaf is unknown; <code>403</code>: the leaf
+    exists but another DID submitted it.</li>
+  </ul>
+  <p><code>POST /v1/leaves</code> answers <code>503</code> when the open
+  epoch already holds 1 048 576 leaves (the timestamp template maximum
+  of <code>batch_tree_size</code>); nothing of that batch was accepted,
+  resubmit it after <code>epoch_closes_at</code>.</p>
 
   <h2>6. Verify offline</h2>
-  <p>Run three checks against every witness before trusting it:</p>
+  <p>Do not re-implement any check. Merge the witness pairs into your own
+  Aqua tree and run the SDK verifier,
+  <code>aqua_rs_sdk::Aquafier::verify_tree_sync</code>, with a
+  <code>BlockchainHost</code> (EVM) and a <code>WebHost</code> (TSA
+  token facts). It judges every part of the witness:</p>
   <ul>
-    <li><strong>L1 (revision integrity):</strong> hash each revision's
-    JSON with the SDK's <code>Linkable::calculate_link</code>; assert
-    the result equals the map key.</li>
-    <li><strong>L2 (Merkle inclusion):</strong> call
-    <code>verify_inclusion(leaf, idx, size, &amp;proof, &amp;root,
-    HashType::Sha3_256)</code> from
-    <code>aqua_rs_sdk::primitives::merkle</code>. The
-    <code>payloads.merkle_root</code> / <code>merkle_proof</code> /
-    <code>batch_tree_size</code> / <code>batch_leaf_index</code> fields
-    of the TimestampObject revision feed in directly.</li>
-    <li><strong>L3 (server signature):</strong> ecrecover the Signature
-    revision's <code>signature</code> blob against
-    <code>signature.pre_signature_canonical_json()</code>; assert the
-    recovered EIP-55 address equals the address baked into the pinned
-    <code>server_did</code>. This is the trust-load-bearing check.</li>
+    <li><strong>Revision integrity:</strong> each revision hashes to its
+    map key and the TimestampObject chains to your leaf.</li>
+    <li><strong>Shielded batch inclusion:</strong> the leaf of the epoch's
+    batch tree is your revision shielded with
+    <code>payloads.shielding_nonce</code>, never the raw leaf. The SDK
+    checks it against <code>merkle_root</code>, <code>merkle_proof</code>,
+    <code>batch_tree_size</code> (at most 1 048 576) and
+    <code>batch_leaf_index</code>.</li>
+    <li><strong>Anchor:</strong> for <code>evm</code>, the transaction
+    and its finality on the chain the payload names; for
+    <code>qtsa</code>, the RFC 3161 token over the batch root.</li>
+    <li><strong>Server signature:</strong> the Signature revision is
+    verified by the SDK; then assert its signer equals the pinned
+    <code>server_did</code>. This is the trust-load-bearing check: a
+    forged witness needs the server's private key.</li>
   </ul>
-  <p>EVM extras: the on-chain <code>transaction_hash</code> can be
-  cross-checked against the Sepolia RPC; the call data is
-  <code>0x114ee197</code> (function selector
-  <code>witness(bytes32)</code>) followed by the Merkle root.</p>
-  <p>qTSA extras: the <code>transaction_hash</code> field is the
-  base64-encoded RFC 3161 TimeStampResp DER. Verify it under the
-  Sectigo Qualified Time Stamping Root R45; the certificatePolicies OID
-  <code>1.3.6.1.4.1.6449.1.2.1.9.1</code> confirms eIDAS-qualified
-  status.</p>
+  <p>The reference client <code>aqua-timestamp-e2e</code> does exactly
+  this; its <code>verify_with_sdk</code> is a worked example.</p>
 
   <h2>Endpoint catalogue</h2>
   <table>
@@ -262,4 +277,45 @@ fn substitute(template: &str, identity: &ServiceIdentity) -> String {
         .replace("{SERVER_DID}", &identity.server_did)
         .replace("{DNS}", &identity.dns)
         .replace("{IP}", &identity.ip)
+}
+
+#[cfg(test)]
+mod verification_text_tests {
+    use super::{HTML_TEMPLATE, SKILL_TEMPLATE};
+
+    /// OW2.2 M5: both public guides describe the witness the service now
+    /// serves (SDK batch: shielded leaf, inclusion and anchors judged by the
+    /// SDK verifier), not the pre-OW1 raw tree checked by hand.
+    #[test]
+    fn verification_guides_match_the_served_witness() {
+        for (name, text) in [
+            ("docs html", HTML_TEMPLATE),
+            ("aqua-skill.md", SKILL_TEMPLATE),
+        ] {
+            assert!(
+                text.contains("verify_tree_sync"),
+                "{name}: names the SDK verifier"
+            );
+            assert!(
+                text.contains("shielding_nonce"),
+                "{name}: names the shielded leaf"
+            );
+            assert!(
+                text.contains("anchor_stalled"),
+                "{name}: names the stalled status"
+            );
+            assert!(
+                text.contains("not_verifiable"),
+                "{name}: names the legacy status"
+            );
+            assert!(text.contains("1 048 576"), "{name}: names the epoch cap");
+            for stale in [
+                "verify_inclusion(",
+                "recover_wallet_address",
+                "even if the Sepolia tx is still pending",
+            ] {
+                assert!(!text.contains(stale), "{name}: stale text {stale:?}");
+            }
+        }
+    }
 }
