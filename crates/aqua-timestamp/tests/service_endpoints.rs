@@ -312,3 +312,27 @@ async fn landing_page_no_longer_polls_health() {
     assert!(html.contains("/v1/schedule"));
     assert!(html.contains("stat-uptime"));
 }
+
+/// D77 (key a): every wallet row that names the service sending key shows
+/// the live identity's address, never the stale literal of an idle wallet.
+#[tokio::test]
+async fn landing_page_shows_the_live_service_address() {
+    const TEST_ADDRESS_EIP55: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let h = harness().await;
+    let a = call(&h, Method::GET, "/").await;
+    assert_eq!(a.status, StatusCode::OK);
+    let html = a.body_str();
+    assert_eq!(
+        html.matches(TEST_ADDRESS_EIP55).count(),
+        3,
+        "the ETH Fuel, Goal 0 ETH wallet and Goal 1 Fuel wallet rows name the service address"
+    );
+    assert!(
+        !html.contains("0x55Fcf9F8"),
+        "the landing page must not name the idle 0x55Fc wallet"
+    );
+    assert!(
+        !html.contains("{SERVICE_ADDRESS}"),
+        "placeholder left unrendered"
+    );
+}

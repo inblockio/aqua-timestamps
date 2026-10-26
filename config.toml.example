@@ -43,10 +43,18 @@ enabled       = true
 rpc_url       = "https://ethereum-sepolia-rpc.publicnode.com"
 # One of `mainnet`, `sepolia`, `holesky`, or `custom:<chain_id>`.
 chain         = "sepolia"
-# `network` field embedded in the EVM witness payload. Usually matches
-# `chain`. Kept separate so `custom:<id>` setups can still surface a
-# human-readable name in witnesses.
-network_label = "sepolia"
+# Deprecated (OW1.6): the witness payload `network` and the self-check
+# chain both come from `chain` (`mainnet`, `sepolia`, `holesky`,
+# `evm:<chain_id>`). If `network_label` (or the legacy
+# `[anchor] evm_network`) is set, it must name the same chain, otherwise
+# the service refuses to start.
+# network_label = "sepolia"
+# Seconds an anchor transaction may stay unknown to the node before it
+# counts as dropped or reorged out (a known tx not yet in a block stays
+# pending, it holds its nonce): the stored anchor is
+# discarded (WARN with the abandoned tx hash) and the next attempt sends a
+# new transaction. Default 3600.
+not_found_timeout_secs = 3600
 
 [anchors.qtsa]
 # Live qTSA toggle. `true` constructs an `aqua-rs-sdk`
@@ -92,5 +100,7 @@ min_balance_multiplier = 2
 # rpc_url             = "https://ethereum-sepolia-rpc.publicnode.com"
 # # Maximum number of wallets tracked in the contributor pool.
 # max_pool_size       = 500
-# # The wallet address whose balance is monitored.
-# wallet_address      = "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f"
+# # The wallet address whose incoming transfers are watched. Default: the
+# # service identity's own address (derived from the mnemonic), the key that
+# # sends the anchors. Set it only to watch a different wallet.
+# wallet_address      = "0x..."

@@ -74,6 +74,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
 struct Harness {
     router: Router,
     seal_tx: mpsc::Sender<SealTick>,
+    state: std::sync::Arc<aqua_timestamp::state::AppState>,
     _tmp: TempDir,
 }
 
@@ -88,7 +89,7 @@ async fn build_harness(max_leaves: usize) -> Harness {
         .await
         .expect("identity");
     let (tx, rx) = mpsc::channel::<SealTick>(8);
-    let (router, _state) = build_app(
+    let (router, state) = build_app(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
@@ -99,6 +100,7 @@ async fn build_harness(max_leaves: usize) -> Harness {
     Harness {
         router,
         seal_tx: tx,
+        state,
         _tmp: tmp,
     }
 }
@@ -222,15 +224,17 @@ async fn submit_seal_and_fetch_epoch() {
     assert_eq!(rec["leaf_count"].as_u64().unwrap(), 4);
     assert_eq!(rec["hash_type"].as_str().unwrap(), "FIPS_202-SHA3-256");
 
-    // Expected root: decode the four leaves, sort them, feed the SDK.
+    // The record holds the digest of the SDK batch root (shielded leaves, PCA-0015
+    // section 3.8), never the legacy root over the raw leaves.
     let mut sorted: Vec<Vec<u8>> = leaves
         .iter()
         .map(|s| hex::decode(s.trim_start_matches("0x")).unwrap())
         .collect();
     sorted.sort();
-    let expected = merkle_root(&sorted, &HashType::Sha3_256);
-    let expected_hex = format!("0x{}", hex::encode(expected));
-    assert_eq!(rec["merkle_root"].as_str().unwrap(), expected_hex);
+    let legacy = merkle_root(&sorted, &HashType::Sha3_256).expect("non-empty leaf set");
+    let root_hex = rec["merkle_root"].as_str().unwrap();
+    assert_eq!(root_hex.len(), 2 + 64, "0x + 32-byte digest");
+    assert_ne!(root_hex, format!("0x{}", hex::encode(legacy)));
 }
 
 #[tokio::test]
@@ -253,8 +257,8 @@ async fn duplicate_within_one_request_is_deduped() {
     let (_, body) = get_json(&h.router, "/v1/epochs?limit=10", Some(&token)).await;
     let epochs = body["epochs"].as_array().unwrap();
     assert_eq!(epochs[0]["leaf_count"].as_u64().unwrap(), 1);
-    // Single-leaf Merkle root equals the leaf bytes themselves.
-    assert_eq!(
+    // A one-leaf batch's root is its shielded leaf, never the raw leaf.
+    assert_ne!(
         epochs[0]["merkle_root"].as_str().unwrap(),
         leaf.to_lowercase()
     );
@@ -376,7 +380,13 @@ async fn persistence_survives_keyspace_reopen() {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        (leaf.to_lowercase(), leaf)
+        // The root is the SDK batch root (fresh nonces each seal): read it back.
+        let (_, body) = get_json(&router, "/v1/epochs?limit=10", Some(&token)).await;
+        let root = body["epochs"][0]["merkle_root"]
+            .as_str()
+            .expect("sealed epoch listed")
+            .to_string();
+        (root, leaf)
     };
 
     // Second boot at the same path.
@@ -409,4 +419,45 @@ async fn persistence_survives_keyspace_reopen() {
 
     // Sanity: the leaf we submitted ended up keyed under epoch 1.
     let _ = sealed_leaf;
+}
+
+/// OW2.2 M2: the timestamp templates cap `batch_tree_size` at 2^20
+/// (1 048 576), so an epoch must never hold more leaves than that. The open
+/// epoch is filled to the production cap through the accumulator (the HTTP
+/// route would need 1 048 576 hex strings), then one new leaf through the
+/// route must be refused with 503, while a duplicate of an accepted leaf
+/// (which adds nothing) still answers 202.
+#[tokio::test]
+async fn full_epoch_refuses_new_leaves_with_503() {
+    let h = build_harness(10_000).await;
+    let token = mint_bearer(&h.router).await;
+
+    let cap: u32 = 1 << 20;
+    let mut batch = Vec::with_capacity(4096);
+    for i in 0..cap {
+        let mut leaf = [0u8; 32];
+        leaf[..4].copy_from_slice(&i.to_be_bytes());
+        leaf[31] = 0x5A;
+        batch.push(leaf);
+        if batch.len() == 4096 {
+            h.state
+                .accumulator
+                .append_batch(&batch, CLIENT_DID)
+                .expect("fits under the cap");
+            batch.clear();
+        }
+    }
+
+    let mut first = [0u8; 32];
+    first[31] = 0x5A;
+    let (status, body) = post_leaves(&h.router, &token, &[hex::encode(first)]).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "duplicate: {body}");
+    assert_eq!(body["duplicates"].as_u64().unwrap(), 1);
+
+    let (status, body) = post_leaves(&h.router, &token, &[leaf_hex(0xEE)]).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "over cap: {body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("1048576"),
+        "names the cap: {body}"
+    );
 }

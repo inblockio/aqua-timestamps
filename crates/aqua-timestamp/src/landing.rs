@@ -1,4 +1,19 @@
-pub const HTML: &str = r##"<!doctype html>
+//! Public landing page served at `GET /`.
+//!
+//! [`TEMPLATE`] carries one placeholder, `{SERVICE_ADDRESS}`, in the wallet
+//! rows that name the service sending key (D77, key a). [`render`] fills it
+//! once at boot from the loaded [`ServiceIdentity`], so the page always names
+//! the address derived from the mnemonic, never a literal that can go stale.
+
+use crate::identity::ServiceIdentity;
+
+/// Render the landing page for the loaded service identity. The only
+/// substituted value is the identity's own EIP-55 address (hex, no markup).
+pub fn render(identity: &ServiceIdentity) -> String {
+    TEMPLATE.replace("{SERVICE_ADDRESS}", &identity.address_eip55)
+}
+
+const TEMPLATE: &str = r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -1404,7 +1419,7 @@ section + section {
         </div>
         <div class="wallet-row">
           <span class="wallet-label">Fuel</span>
-          <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f<span class="copied-tooltip">Copied</span></span>
+          <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">{SERVICE_ADDRESS}<span class="copied-tooltip">Copied</span></span>
         </div>
         <div class="wallet-row">
           <span class="wallet-label">Ops</span>
@@ -1489,7 +1504,7 @@ section + section {
       </p>
       <div class="wallet-row">
         <span class="wallet-label">ETH wallet</span>
-        <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f<span class="copied-tooltip">Copied</span></span>
+        <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">{SERVICE_ADDRESS}<span class="copied-tooltip">Copied</span></span>
       </div>
       <div class="wallet-row">
         <span class="wallet-label">BTC wallet</span>
@@ -1519,7 +1534,7 @@ section + section {
       </div>
       <div class="wallet-row">
         <span class="wallet-label">Fuel wallet</span>
-        <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f<span class="copied-tooltip">Copied</span></span>
+        <span class="wallet-addr mono" onclick="copyAddr(this)" title="Click to copy">{SERVICE_ADDRESS}<span class="copied-tooltip">Copied</span></span>
       </div>
       <div class="wallet-row">
         <span class="wallet-label">Ops wallet</span>

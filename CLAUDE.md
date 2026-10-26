@@ -46,9 +46,11 @@ authoritative for OpenWitness brand choices.
 - **One secp256k1 key** is the service identity, EIP-191 signer, and
   Sepolia anchor key. Mnemonic lives in gnome-keyring under
   `service=aqua-timestamp-evm-anchor user=clawi kind=mnemonic`.
-  Address: `0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f` (verify against
-  keyring before trusting; this address is informational, the keyring
-  is source of truth).
+  Address: `0x01651f5417f76D2Cf6343b31550b911140e8910e`, derived from
+  the mnemonic (`identity.rs`, `address_eip55`); the service renders it
+  on the landing page and watches it for the leaderboard. Informational
+  only: the keyring is source of truth. `0x55Fc...634f` is an old, idle
+  wallet, not the service key (D77, key a).
 - **SDK is authoritative over spec.** Where `aqua-rs-sdk` (Rust ref impl)
   disagrees with `aqua-spec`, the SDK wins. The aquafire identity tree
   at `https://aquafire.inblock.io/.well-known/aqua-identity` is the
@@ -556,7 +558,8 @@ in `~/.claude/skills/contributors-leaderboard/SKILL.md` to reflect the
 new state. This keeps the skill current across sessions.
 
 **v0.1 target:** Sepolia ETH sent to the server wallet
-(`0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f`) appears on the ETH
+(`0x01651f5417f76D2Cf6343b31550b911140e8910e`, the service identity
+derived from the mnemonic; the keyring is source of truth) appears on the ETH
 leaderboard. No SIWE auth required for passive fuel contributors.
 
 **Implementation gaps (v0.1):**

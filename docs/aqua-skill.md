@@ -199,40 +199,35 @@ Other retrieval endpoints:
   leaves for that anchor method).
 - `GET /v1/epochs?from=<id>&limit=<n>` — paginated epoch history.
 
-## Verifying a witness offline (L1 / L2 / L3)
+## Verifying a witness offline
 
-The minimum verification an agent should run after retrieval:
+Do not re-implement any check. Merge the witness pairs into your own
+Aqua tree and run the SDK verifier, `aqua_rs_sdk::Aquafier::verify_tree_sync`,
+with a `BlockchainHost` (EVM) and a `WebHost` (TSA token facts). A
+witness is served only after it passed the service's own pre-serve
+self-check, so its anchor is final when you receive it. The verifier
+judges every part of it:
 
-- **L1 — revision content integrity.** Hash each revision's JSON
-  using `aqua_rs_sdk::verification::Linkable::calculate_link` and
-  assert the result equals the map key it lives under. Either revision
-  failing this check means the witness was tampered with in transit.
+- **Revision integrity.** Each revision hashes to its map key and the
+  TimestampObject chains to your leaf.
 
-- **L2 — Merkle inclusion.** Read `payloads.merkle_root`,
-  `payloads.merkle_proof`, `payloads.batch_tree_size`,
-  `payloads.batch_leaf_index` from the TimestampObject revision. Run
-  `aqua_rs_sdk::primitives::merkle::verify_inclusion(leaf_bytes,
-  leaf_index, tree_size, &proof_bytes, &root_bytes,
-  &HashType::Sha3_256)`. Must return true. The same check applies for
-  both `evm` and `qtsa` witnesses because they share the same per-epoch
-  root.
+- **Shielded batch inclusion.** The leaf of the epoch's batch tree is
+  your revision shielded with `payloads.shielding_nonce`, never the raw
+  leaf. The SDK checks it against `merkle_root`, `merkle_proof`,
+  `batch_tree_size` (at most 1 048 576, the template maximum) and
+  `batch_leaf_index`. Both `evm` and `qtsa` witnesses share the epoch's
+  batch root.
 
-- **L3 — server signature.** Reconstruct the pre-signature canonical
-  JSON of the Signature revision (the SDK exposes
-  `signature.pre_signature_canonical_json()`), run
-  `aqua_rs_sdk::core::signature::recover_wallet_address(canonical,
-  &sig_bytes_65)`, and assert the recovered EIP-55 address equals the
-  address in the pinned `server_did`. Anyone forging a witness needs
-  the server's private key, so this check is the load-bearing one
-  for trust.
+- **Anchor.** For `evm`, the transaction and its finality on the chain
+  the payload names. For `qtsa`, the RFC 3161 token over the batch root.
 
-For evm witnesses, you can additionally verify the on-chain
-`transaction_hash` against the Sepolia RPC (selector `0x114ee197` is
-`witness(bytes32)`; the call data after the selector is the Merkle
-root). For qtsa witnesses, the `transaction_hash` is the base64-
-encoded RFC 3161 TimeStampResp DER; verify the response under the
-Sectigo Qualified Time Stamping Root R45 to confirm eIDAS-qualified
-status (`certificatePolicies` OID `1.3.6.1.4.1.6449.1.2.1.9.1`).
+- **Server signature.** The SDK verifies the Signature revision; then
+  assert its signer equals the pinned `server_did`. Anyone forging a
+  witness needs the server's private key, so this check is the
+  load-bearing one for trust.
+
+The reference client (`aqua-timestamp-e2e`, `verify_with_sdk`) is a
+worked example.
 
 ## Failure modes the agent should handle
 
@@ -243,13 +238,24 @@ status (`certificatePolicies` OID `1.3.6.1.4.1.6449.1.2.1.9.1`).
   different DID. Don't retry blindly; the data isn't yours.
 - `400` on `/v1/leaves`: malformed hash or over-cap batch. Inspect
   body for the field-level error message.
+- `503` on `/v1/leaves`: the open epoch already holds 1 048 576 leaves
+  (the template maximum). Nothing of the batch was accepted; resubmit
+  it after `epoch_closes_at`.
+- `202` `{"status":"pending"}` on `/trees/...`: the epoch is sealed and
+  that method's anchor is outstanding. Poll again.
+- `503` `{"status":"anchor_stalled"}` on `/trees/...`: that method's
+  anchor failed too often and is not retried until the operator
+  intervenes. Polling does not change it; resubmit the leaf.
+- `410` `{"status":"not_verifiable"}` on `/trees/...`: the witness was
+  minted before the pre-serve self-check and is not served. Resubmit
+  the leaf.
 - `404` on `/trees/by-leaf/...` after the epoch is sealed: the leaf is
   truly unknown (very likely a typo in the hex). On the same call
   before the epoch is sealed, the leaf is still in the open
   accumulator and not yet retrievable.
-- Mempool inclusion delay on the EVM tx: the witness lands as soon as
-  the epoch is sealed even if the Sepolia tx is still pending. Poll
-  the Sepolia RPC separately if a confirmed inclusion is required.
+- Anchor finality: a witness is served only once its anchor passed
+  the self-check (EVM transaction final), so the `202` pending answer
+  can last several block times after the seal.
 
 ## Reference flow (Rust)
 

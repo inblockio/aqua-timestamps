@@ -22,11 +22,10 @@ pub struct Config {
     #[serde(default)]
     pub epoch: EpochConfig,
     /// Legacy M3 `[anchor]` block. Retained so an M3 config still loads
-    /// after the M4 upgrade without manual editing; the only field here
-    /// is `evm_network`, which the resolver below promotes into the new
-    /// `[anchors.evm]` shape if `[anchors.evm].network_label` is absent.
-    /// Operators should migrate to `[anchors.evm]` at their next config
-    /// edit; the legacy block will be removed at M6.
+    /// after the M4 upgrade without manual editing; its only field,
+    /// `evm_network`, is deprecated: the chain comes from
+    /// `[anchors.evm].chain` alone ([`Config::check_evm_chain_source`]).
+    /// The legacy block will be removed at M6.
     #[serde(default, alias = "anchor")]
     pub anchor_legacy: AnchorConfig,
     /// M4+ anchors block. Defaults pick up Sepolia / live provider on,
@@ -48,24 +47,103 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolve the effective `[anchors.evm]` for this config.
-    ///
-    /// Currently the only legacy-promotion rule is: if the deprecated
-    /// `[anchor].evm_network` is present and `[anchors.evm].network_label`
-    /// is still at its default, use the legacy value as the network
-    /// label. This keeps existing M3 configs that say
-    /// `[anchor]\nevm_network = "sepolia"` semantically equivalent to
-    /// the new shape without an explicit edit.
-    pub fn effective_evm_anchor(&self) -> EvmAnchorConfig {
-        let mut evm = self.anchors.evm.clone();
-        // Only inherit when the legacy value diverges from the modern
-        // default; this avoids "promoting" the implicit default Sepolia.
-        if self.anchor_legacy.evm_network != default_evm_network()
-            && evm.network_label == default_evm_network()
-        {
-            evm.network_label = self.anchor_legacy.evm_network.clone();
+    /// OW1.6 F1/M1: the EVM chain has one source, `[anchors.evm].chain`.
+    /// The provider writes the payload `network` from it
+    /// (`EvmChain::network_claim`) and the self-check host is keyed by its
+    /// chain id. The deprecated labels `[anchors.evm].network_label` and
+    /// `[anchor].evm_network` choose nothing; when one is set it must name
+    /// the same chain, otherwise the service refuses to start with a message
+    /// that names both settings (a split would leave every EVM witness
+    /// pending while each epoch still spends a transaction).
+    pub fn check_evm_chain_source(&self) -> Result<()> {
+        let evm = &self.anchors.evm;
+        if !evm.enabled {
+            return Ok(());
         }
-        evm
+        let chain = evm.evm_chain().map_err(|e| {
+            anyhow::anyhow!("anchors.evm is enabled but anchors.evm.chain is invalid: {e}")
+        })?;
+        // OW1.6b F2: the payload `network` must name this chain for the SDK,
+        // or the self-check answers every EVM witness "unsupported network"
+        // (not the anchor's fault, so no cap) while each epoch still spends
+        // a transaction.
+        // OW1.6b N8: with 0, an anchor a lagging node answers "not found" in
+        // the tick it was sent is abandoned at once and re-anchored.
+        if evm.not_found_timeout_secs == 0 {
+            anyhow::bail!(
+                "anchors.evm.not_found_timeout_secs = 0 would abandon every anchor the node \
+                 has not seen yet in the tick it was sent and re-anchor it: set it above \
+                 propagation and finality time (default 3600)"
+            );
+        }
+        let claim = chain.network_claim();
+        if aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(&claim) != Some(chain.chain_id())
+        {
+            anyhow::bail!(
+                "anchors.evm.chain = {:?} gives the payload network {claim:?}, which the SDK \
+                 does not read back as chain id {}; no EVM witness could pass the self-check \
+                 while every epoch spends a transaction: use a chain id from 1 to 2^53-1",
+                evm.chain,
+                chain.chain_id()
+            );
+        }
+        let labels = [
+            ("anchors.evm.network_label", evm.network_label.as_deref()),
+            (
+                "anchor.evm_network",
+                self.anchor_legacy.evm_network.as_deref(),
+            ),
+        ];
+        for (setting, label) in labels {
+            let Some(label) = label else { continue };
+            let label_chain = aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(label);
+            if label_chain != Some(chain.chain_id()) {
+                anyhow::bail!(
+                    "{setting} = {label:?} does not name the chain of anchors.evm.chain = {:?} \
+                     (chain id {}, payload network {:?}); the chain comes from anchors.evm.chain \
+                     alone: remove {setting} or set it to {:?}",
+                    evm.chain,
+                    chain.chain_id(),
+                    chain.network_claim(),
+                    chain.network_claim()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Decision D51: an enabled anchor method must have its provider
+    /// configured; otherwise the service refuses to start with a message
+    /// that names the method and the missing setting. There is no silent
+    /// disable and no placeholder witness. Opting a method out stays
+    /// explicit: `[anchors.evm].enabled = false` / `[anchors.qtsa].enabled =
+    /// false`. `mnemonic` is the service mnemonic the EVM provider signs with.
+    pub fn check_enabled_anchors(&self, mnemonic: &str) -> Result<()> {
+        let evm = &self.anchors.evm;
+        if evm.enabled {
+            if mnemonic.trim().is_empty() {
+                anyhow::bail!(
+                    "anchors.evm is enabled but the service mnemonic is empty: set the mnemonic \
+                     or set [anchors.evm].enabled = false"
+                );
+            }
+            if evm.rpc_url.trim().is_empty() {
+                anyhow::bail!(
+                    "anchors.evm is enabled but anchors.evm.rpc_url is empty: set an RPC URL \
+                     or set [anchors.evm].enabled = false"
+                );
+            }
+            evm.evm_chain().map_err(|e| {
+                anyhow::anyhow!("anchors.evm is enabled but anchors.evm.chain is invalid: {e}")
+            })?;
+        }
+        if self.anchors.qtsa.enabled && self.anchors.qtsa.url.trim().is_empty() {
+            anyhow::bail!(
+                "anchors.qtsa is enabled but anchors.qtsa.url is empty: set a TSA URL \
+                 or set [anchors.qtsa].enabled = false"
+            );
+        }
+        Ok(())
     }
 
     /// Derive a numeric chain id from the `[anchors.evm].chain` string.
@@ -145,24 +223,13 @@ pub struct StorageConfig {
 
 /// Legacy M3 `[anchor]` block. Replaced by `[anchors.evm]` at M4 but kept
 /// for one milestone so existing deploys load without manual editing.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct AnchorConfig {
-    /// The `network` field embedded in EVM timestamp witness payloads.
-    /// Defaults to `"sepolia"` so the M3 stub matches the M4 target chain.
-    #[serde(default = "default_evm_network")]
-    pub evm_network: String,
-}
-
-fn default_evm_network() -> String {
-    "sepolia".to_string()
-}
-
-impl Default for AnchorConfig {
-    fn default() -> Self {
-        Self {
-            evm_network: default_evm_network(),
-        }
-    }
+    /// Deprecated (OW1.6 F1/M1). The payload `network` comes from
+    /// `[anchors.evm].chain`; when set, this must name the same chain or the
+    /// service refuses to start ([`Config::check_evm_chain_source`]).
+    #[serde(default)]
+    pub evm_network: Option<String>,
 }
 
 /// New-shape anchors block. One sub-table per method.
@@ -180,8 +247,8 @@ pub struct AnchorsConfig {
 pub struct EvmAnchorConfig {
     /// Live anchor toggle. `true` (default) constructs a
     /// `CliEthTimestamper` at boot and submits one tx per non-empty
-    /// epoch. `false` keeps the M3 stub behaviour: witnesses are minted
-    /// with zero `transaction_hash` / zero contract address.
+    /// epoch. `false` opts the EVM method out: no EVM witnesses are minted.
+    /// Enabled without a usable provider setting is a startup error (D51).
     #[serde(default = "default_evm_enabled")]
     pub enabled: bool,
 
@@ -196,12 +263,36 @@ pub struct EvmAnchorConfig {
     #[serde(default = "default_evm_chain")]
     pub chain: String,
 
-    /// Free-form network label the witness payload's `network` field
-    /// carries. Usually the same string as `chain`. Kept separate so a
-    /// custom chain id (`chain = "custom:12345"`) can still surface a
-    /// human-readable network name in witnesses.
-    #[serde(default = "default_evm_network")]
-    pub network_label: String,
+    /// Deprecated (OW1.6 F1/M1). The payload `network` is derived from
+    /// `chain` by the SDK (`mainnet`, `sepolia`, `holesky`, `evm:<id>`), and
+    /// the self-check host uses the same chain id. When set, this must name
+    /// the same chain or the service refuses to start
+    /// ([`Config::check_evm_chain_source`]).
+    #[serde(default)]
+    pub network_label: Option<String>,
+
+    /// EVM finality a witness needs before the pre-serve self-check (OW1.4)
+    /// lets it be served: `"finalized"` (default), `"safe"` or
+    /// `{ confirmations = N }`. The default is the SDK reader's own default;
+    /// a witness served below it would not verify for a default reader.
+    /// Until then the witness stays pending and is re-checked every tick,
+    /// without a second transaction.
+    #[serde(default)]
+    pub self_check_finality: aqua_rs_sdk::core::evm_anchor::EvmFinalityRequirement,
+
+    /// Seconds an anchor transaction may stay unknown to the node (not
+    /// found) before it counts as dropped or reorged out (OW1.6 H2): the
+    /// stored anchor is discarded with a WARN naming the abandoned tx hash,
+    /// and the next attempt sends a new transaction. A transaction the node
+    /// knows but has not mined stays pending without a timeout (it holds
+    /// its nonce). Default 3600 (one hour, well past finality on Sepolia
+    /// and mainnet).
+    #[serde(default = "default_evm_not_found_timeout_secs")]
+    pub not_found_timeout_secs: u64,
+}
+
+fn default_evm_not_found_timeout_secs() -> u64 {
+    aqua_timestamp_core::sealer::DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS
 }
 
 fn default_evm_enabled() -> bool {
@@ -220,7 +311,9 @@ impl Default for EvmAnchorConfig {
             enabled: default_evm_enabled(),
             rpc_url: default_evm_rpc_url(),
             chain: default_evm_chain(),
-            network_label: default_evm_network(),
+            network_label: None,
+            self_check_finality: Default::default(),
+            not_found_timeout_secs: default_evm_not_found_timeout_secs(),
         }
     }
 }
@@ -233,8 +326,8 @@ impl Default for EvmAnchorConfig {
 pub struct QtsaAnchorConfig {
     /// Live anchor toggle. `true` (default) constructs an
     /// [`aqua_rs_sdk::web::tsa::TsaTimestamper`] at boot. `false` keeps
-    /// the M3/M4 stub: qTSA witnesses are minted with zero
-    /// `transaction_hash` and `tsa_provider = "stub"`.
+    /// an explicit opt-out: no qTSA witnesses are minted. Enabled without a
+    /// URL is a startup error (D51).
     #[serde(default = "default_qtsa_enabled")]
     pub enabled: bool,
 
@@ -250,12 +343,9 @@ pub struct QtsaAnchorConfig {
     /// throttle entirely (suitable for free standard TSAs like DigiCert).
     #[serde(default = "default_qtsa_min_request_interval_secs")]
     pub min_request_interval_secs: u64,
-
-    /// Free-form network label the witness payload's `network` field
-    /// carries. Sectigo-qualified deployments use
-    /// `"sectigo-qualified-tsa"`; a free standard TSA might pick `"tsa"`.
-    #[serde(default = "default_qtsa_network_label")]
-    pub network_label: String,
+    // No `network_label`: every qTSA payload carries the SDK TSA template's
+    // fixed label (`aqua_timestamp_core::witness::QTSA_NETWORK_LABEL`,
+    // audit G). A stale `network_label` key in an old config is ignored.
 }
 
 fn default_qtsa_enabled() -> bool {
@@ -267,9 +357,6 @@ fn default_qtsa_url() -> String {
 fn default_qtsa_min_request_interval_secs() -> u64 {
     16
 }
-fn default_qtsa_network_label() -> String {
-    "sectigo-qualified-tsa".to_string()
-}
 
 impl Default for QtsaAnchorConfig {
     fn default() -> Self {
@@ -277,7 +364,6 @@ impl Default for QtsaAnchorConfig {
             enabled: default_qtsa_enabled(),
             url: default_qtsa_url(),
             min_request_interval_secs: default_qtsa_min_request_interval_secs(),
-            network_label: default_qtsa_network_label(),
         }
     }
 }
@@ -363,9 +449,19 @@ pub struct LeaderboardConfig {
     #[serde(default = "default_leaderboard_max_pool_size")]
     pub max_pool_size: usize,
 
-    /// The wallet address whose balance is monitored.
-    #[serde(default = "default_leaderboard_wallet_address")]
-    pub wallet_address: String,
+    /// The wallet address whose incoming transfers are watched. `None`
+    /// (the default) means the service identity's own address, the key
+    /// that sends the anchors (D77, key a). An explicit value wins.
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+}
+
+impl LeaderboardConfig {
+    /// The address the watcher follows: the configured one, else the
+    /// service identity's address.
+    pub fn watched_address<'a>(&'a self, service_address: &'a str) -> &'a str {
+        self.wallet_address.as_deref().unwrap_or(service_address)
+    }
 }
 
 fn default_leaderboard_enabled() -> bool {
@@ -380,9 +476,6 @@ fn default_leaderboard_rpc_url() -> String {
 fn default_leaderboard_max_pool_size() -> usize {
     500
 }
-fn default_leaderboard_wallet_address() -> String {
-    "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f".to_string()
-}
 
 impl Default for LeaderboardConfig {
     fn default() -> Self {
@@ -391,7 +484,7 @@ impl Default for LeaderboardConfig {
             poll_interval_secs: default_leaderboard_poll_interval_secs(),
             rpc_url: default_leaderboard_rpc_url(),
             max_pool_size: default_leaderboard_max_pool_size(),
-            wallet_address: default_leaderboard_wallet_address(),
+            wallet_address: None,
         }
     }
 }
@@ -542,10 +635,68 @@ mod tests {
         assert_eq!(cfg.leaderboard.max_pool_size, 100);
     }
 
+    /// D77 (key a): an unconfigured host watches the live service sending
+    /// key; an explicitly configured address still wins.
+    #[test]
+    fn leaderboard_watches_the_service_address_unless_configured() {
+        const SERVICE: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        assert_eq!(cfg.leaderboard.wallet_address, None);
+        assert_eq!(cfg.leaderboard.watched_address(SERVICE), SERVICE);
+        assert_eq!(
+            LeaderboardConfig::default().watched_address(SERVICE),
+            SERVICE
+        );
+
+        let toml_str = r#"
+            [server]
+            listen = "0.0.0.0:3000"
+            [leaderboard]
+            wallet_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.leaderboard.watched_address(SERVICE),
+            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        );
+    }
+
     #[test]
     fn leaderboard_chain_id_derived() {
         let cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
         // default chain is "sepolia"
         assert_eq!(cfg.leaderboard_chain_id(), 11155111);
+    }
+
+    /// D51: an enabled method without a provider is a startup error that
+    /// names the method and the missing setting; an explicit opt-out
+    /// (`enabled = false`) still starts.
+    #[test]
+    fn enabled_anchor_without_provider_refuses_to_start() {
+        let mut cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        cfg.check_enabled_anchors("mnemonic words")
+            .expect("defaults configure both providers");
+
+        let err = cfg
+            .check_enabled_anchors("")
+            .expect_err("EVM without mnemonic");
+        assert!(err.to_string().contains("anchors.evm"), "{err}");
+        assert!(err.to_string().contains("mnemonic"), "{err}");
+
+        cfg.anchors.evm.rpc_url = "  ".into();
+        let err = cfg.check_enabled_anchors("m").expect_err("EVM without RPC");
+        assert!(err.to_string().contains("anchors.evm.rpc_url"), "{err}");
+        cfg.anchors.evm.enabled = false;
+        cfg.check_enabled_anchors("m")
+            .expect("EVM explicitly disabled");
+
+        cfg.anchors.qtsa.url = String::new();
+        let err = cfg
+            .check_enabled_anchors("m")
+            .expect_err("qTSA without URL");
+        assert!(err.to_string().contains("anchors.qtsa.url"), "{err}");
+        cfg.anchors.qtsa.enabled = false;
+        cfg.check_enabled_anchors("m")
+            .expect("both explicitly disabled");
     }
 }

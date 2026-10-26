@@ -23,13 +23,12 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{AuthApiError, BearerDid},
-    blueprint, landing,
+    blueprint,
     state::AppState,
 };
 
-/// Anchor methods advertised at M2. The providers themselves are stubbed
-/// until M4 (EVM) and M5 (qTSA); the labels are stable across milestones
-/// so clients can hard-code the strings now.
+/// Anchor methods the aggregator knows. The labels are stable across
+/// milestones so clients can hard-code the strings.
 const ANCHOR_METHODS: &[&str] = &["evm", "qtsa"];
 
 /// Hard cap on `GET /v1/epochs?limit=N`.
@@ -90,11 +89,11 @@ pub async fn version() -> impl IntoResponse {
     )
 }
 
-pub async fn landing_page() -> Response {
+pub async fn landing_page(State(state): State<Arc<AppState>>) -> Response {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        Html(landing::HTML),
+        Html(state.landing_html.clone()),
     )
         .into_response()
 }
@@ -207,7 +206,21 @@ pub async fn submit_leaves(
         }
     }
 
-    let outcome = state.accumulator.append_batch(&decoded, &bearer.0);
+    let outcome = match state.accumulator.append_batch(&decoded, &bearer.0) {
+        Ok(outcome) => outcome,
+        Err(full) => {
+            warn!(
+                did = %bearer.0,
+                epoch_id = full.epoch_id,
+                "v1.leaves refused: epoch full"
+            );
+            return Err(AuthApiError::unavailable(format!(
+                "epoch {} is full ({} leaves, the timestamp template maximum); \
+                 nothing of this batch was accepted, resubmit after epoch_closes_at {}",
+                full.epoch_id, full.cap, full.epoch_closes_at
+            )));
+        }
+    };
     info!(
         did = %bearer.0,
         epoch_id = outcome.epoch_id,
@@ -525,16 +538,21 @@ pub async fn list_or_query_trees(
 }
 
 /// `GET /trees` shape: a JSON array of hex tip hashes belonging to the
-/// caller's DID, sorted descending by epoch.
+/// caller's DID, sorted descending by epoch. Only tips the fetch routes
+/// serve are listed: a legacy tip (minted before the pre-serve self-check,
+/// no self-checked marker, D61) answers 410 there, so it is left out here
+/// (OW2.2 N7).
 fn list_tips_for_did(state: &Arc<AppState>, did: &str) -> Result<Response, AuthApiError> {
     let tips = state
         .store
         .list_witness_tips_for_did(did)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
-    let body: Vec<String> = tips
-        .into_iter()
-        .map(|(_, tip)| revision_wire_hex(&tip))
-        .collect();
+    let mut body: Vec<String> = Vec::with_capacity(tips.len());
+    for (_, tip) in tips {
+        if is_self_checked(state, &tip)? {
+            body.push(revision_wire_hex(&tip));
+        }
+    }
     info!(did, count = body.len(), "trees.list");
     Ok((StatusCode::OK, Json(body)).into_response())
 }
@@ -556,10 +574,24 @@ fn union_for_epoch(
     if epoch.is_none() {
         return Ok(not_found_response("epoch not sealed yet"));
     }
+    if state
+        .store
+        .is_epoch_pending(epoch_id, method)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?
+    {
+        return Ok(pending_anchor_response(state, method, epoch_id, None));
+    }
     let entries = state
         .store
         .list_witnesses_for_did_in_epoch(did, epoch_id, method)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+    // OW1.6 H3: an epoch's witnesses are minted together, so one witness
+    // without the self-check marker makes the epoch a pre-OW1 one.
+    for idx in &entries {
+        if !is_self_checked(state, &idx.signature_hash)? {
+            return Ok(not_verifiable_response(Some(method), epoch_id, None));
+        }
+    }
 
     let mut revisions: Map<String, Value> = Map::new();
     let mut file_index: Map<String, Value> = Map::new();
@@ -610,6 +642,14 @@ pub async fn get_tree_by_tip(
         );
         return Err(AuthApiError::forbidden("witness owned by a different DID"));
     }
+    if !is_self_checked(&state, &tip)? {
+        let method = AnchorMethod::from_method_byte(idx.method_byte);
+        return Ok(not_verifiable_response(
+            method,
+            idx.epoch_id,
+            Some(&idx.leaf),
+        ));
+    }
     let body = build_pair_body(&state.store, &idx)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     info!(did = %bearer.0, tip = %format!("0x{}", hex::encode(tip)), "trees.tip");
@@ -655,7 +695,16 @@ pub async fn get_tree_by_leaf(
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     let tip = match tip {
         Some(t) => t,
-        None => return Ok(not_found_response("no witness for that leaf/method yet")),
+        None => {
+            let pending = state
+                .store
+                .get_pending_epoch_for_leaf(&leaf, method)
+                .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+            return Ok(match pending {
+                Some(epoch_id) => pending_anchor_response(&state, method, epoch_id, Some(&leaf)),
+                None => not_found_response("no witness for that leaf/method yet"),
+            });
+        }
     };
     let idx = state
         .store
@@ -664,6 +713,21 @@ pub async fn get_tree_by_leaf(
         .ok_or_else(|| {
             AuthApiError::bad_request("internal: tip_to_pair index missing for known tip")
         })?;
+    if !is_self_checked(&state, &tip)? {
+        // A resubmitted leaf (the 410 advice) keeps its legacy tip until a
+        // self-checked witness replaces it; while its newer epoch is pending,
+        // answer that (202), not 410 (OW1.6b F1).
+        let pending = state
+            .store
+            .get_pending_epoch_for_leaf(&leaf, method)
+            .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
+        return Ok(match pending {
+            Some(epoch_id) if epoch_id > idx.epoch_id => {
+                pending_anchor_response(&state, method, epoch_id, Some(&leaf))
+            }
+            _ => not_verifiable_response(Some(method), idx.epoch_id, Some(&leaf)),
+        });
+    }
     let body = build_pair_body(&state.store, &idx)
         .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))?;
     info!(
@@ -730,6 +794,118 @@ fn load_pair_into_maps(
 
 fn parse_hash32(input: &str) -> Result<[u8; 32], String> {
     parse_leaf_hex(input).map_err(|e| e.to_string())
+}
+
+/// Decision D51: the leaf's epoch is sealed and its batch root fixed, but
+/// the `method` anchor is outstanding (the provider call failed); the
+/// aggregator retries the same root every epoch tick and mints then.
+/// `202 Accepted` (RFC 9110 section 15.3.3: accepted, processing not
+/// complete) with `{"status":"pending","method","epoch","leaf"?,"detail"}`.
+/// Never a placeholder witness. 404 keeps meaning "unknown / not sealed".
+fn pending_anchor_response(
+    state: &AppState,
+    method: AnchorMethod,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    if anchor_stalled(state, method, epoch_id) {
+        return anchor_stalled_response(method, epoch_id, leaf);
+    }
+    let mut body = json!({
+        "status": "pending",
+        "method": method.as_str(),
+        "epoch": epoch_id,
+        "detail": format!(
+            "epoch {epoch_id} is sealed; its {} anchor is outstanding and retried every epoch tick",
+            method.as_str()
+        ),
+    });
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::ACCEPTED, Json(body)).into_response()
+}
+
+/// OW2.2 N9: the (epoch, method) reached the anchor fault cap
+/// (`max_anchor_faults`, OW1.6 M4) with no anchor held, the state in which the
+/// sealer no longer re-anchors it until ops intervenes. A store read error
+/// answers false (the ordinary pending body), never a wrong 200.
+fn anchor_stalled(state: &AppState, method: AnchorMethod, epoch_id: u64) -> bool {
+    match state.store.list_pending_epochs() {
+        Ok(pending) => pending.iter().any(|p| {
+            p.epoch_id == epoch_id
+                && p.anchor(method).is_none()
+                && p.anchor_fault_count(method) >= state.witness_ctx.max_anchor_faults
+        }),
+        Err(e) => {
+            warn!(epoch_id, method = method.as_str(), error = %e, "reading pending anchors failed");
+            false
+        }
+    }
+}
+
+/// `503 Service Unavailable` with
+/// `{"status":"anchor_stalled","method","epoch","leaf"?,"detail"}`, the
+/// pending body's shape: the anchor was found at fault or abandoned too often
+/// and is not retried until the operator intervenes, so polling does not help.
+fn anchor_stalled_response(
+    method: AnchorMethod,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    let mut body = json!({
+        "status": "anchor_stalled",
+        "method": method.as_str(),
+        "epoch": epoch_id,
+        "detail": format!(
+            "epoch {epoch_id} is sealed; its {} anchor failed too often and is not retried \
+             until the operator intervenes; polling will not change this answer, the leaf \
+             may be resubmitted for a new epoch",
+            method.as_str()
+        ),
+    });
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+}
+
+fn is_self_checked(state: &Arc<AppState>, tip: &[u8; 32]) -> Result<bool, AuthApiError> {
+    state
+        .store
+        .is_self_checked(tip)
+        .map_err(|e| AuthApiError::bad_request(format!("store: {e}")))
+}
+
+/// OW1.6 H3: the witness was minted by the pre-OW1 code (stub anchor, raw
+/// unshielded tree or operator qTSA label) and never passed the pre-serve
+/// self-check, so it is not served: a default reader would reject it.
+/// `410 Gone` (RFC 9110 section 15.5.11: no longer available here, likely
+/// permanent) with
+/// `{"status":"not_verifiable","reason","method","epoch","leaf"?,"detail"}`,
+/// the pending body's shape. It is not re-minted; the client resubmits the
+/// leaf.
+fn not_verifiable_response(
+    method: Option<AnchorMethod>,
+    epoch_id: u64,
+    leaf: Option<&[u8; 32]>,
+) -> Response {
+    let mut body = json!({
+        "status": "not_verifiable",
+        "reason": "minted before self-check; resubmit the leaf",
+        "epoch": epoch_id,
+        "detail": format!(
+            "the witness of epoch {epoch_id} was minted before the pre-serve self-check \
+             and is not served; submit the leaf again for a new witness"
+        ),
+    });
+    if let Some(method) = method {
+        body["method"] = Value::String(method.as_str().to_string());
+    }
+    if let Some(leaf) = leaf {
+        body["leaf"] = Value::String(format!("0x{}", hex::encode(leaf)));
+    }
+    (StatusCode::GONE, Json(body)).into_response()
 }
 
 fn not_found_response(msg: &str) -> Response {

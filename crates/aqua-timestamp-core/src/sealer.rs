@@ -1,4 +1,4 @@
-//! Epoch sealing task: closes the current epoch, builds its Merkle root,
+//! Epoch sealing task: closes the current epoch, prepares its SDK batch,
 //! and persists the `EpochRecord`, its leaf set, AND every per-leaf
 //! witness revision pair (M3).
 //!
@@ -8,23 +8,27 @@
 //! supplied [`SealTick`] channel; this keeps tests deterministic without
 //! needing `tokio::time::advance`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use aqua_rs_sdk::Secp256k1Signer;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::accumulator::{Accumulator, SealedSnapshot};
 use crate::anchors::AnchorProvider;
 use crate::epoch::{EpochRecord, HASH_TYPE_LABEL};
-use crate::merkle::{merkle_root_for_leaves, Hash32};
+use crate::merkle::{empty_merkle_root, Hash32};
+use crate::selfcheck::{verify_minted_batch, SelfCheckHosts, SelfCheckVerdict};
 use crate::storage::{Store, StoreError};
 use crate::time::Clock;
 use crate::witness::{
-    mint_witnesses_for_epoch, AnchorMethod, MethodAnchorOutcome, MintedWitness, WitnessError,
+    mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome, MintedWitness,
+    PendingEpoch, WitnessError,
 };
+use aqua_rs_sdk::schema::timestamp::TimestampValue;
 
 /// Per-process configuration the sealer needs in addition to its
 /// already-required `(accumulator, store, clock, duration)` quad: which
@@ -37,37 +41,84 @@ pub struct WitnessContext {
     pub signer: Arc<Secp256k1Signer>,
     /// EIP-55 ethereum address of the service key, prefixed with `0x`.
     pub service_eth_address: String,
-    /// Network name written into the EVM witness payload (e.g. `"sepolia"`).
-    pub evm_network: String,
     /// Methods to mint per leaf. Production uses both; tests can mint one.
     pub methods: Vec<AnchorMethod>,
-    /// Live EVM anchor provider. When `Some`, the sealer submits the
-    /// per-epoch Merkle root to Sepolia (or whatever chain the provider
-    /// was constructed for) and folds the resulting `transaction_hash`,
-    /// `sender`, `smart_contract_address`, `network` into every leaf's
-    /// EVM witness payload. When `None`, EVM witnesses carry stub anchor
-    /// data and look identical to what M3 emitted.
+    /// Live EVM anchor provider. The sealer submits the per-epoch batch
+    /// root through it and folds the resulting `transaction_hash`,
+    /// `sender`, `smart_contract_address`, `network` into every leaf's EVM
+    /// witness payload. Required when `methods` holds [`AnchorMethod::Evm`]
+    /// ([`Self::validate`]); there is no placeholder witness (D51).
     pub evm_anchor: Option<Arc<dyn AnchorProvider>>,
-    /// Live qTSA anchor provider. Always `None` until M5; included so the
-    /// shape is stable across milestones.
+    /// Live qTSA anchor provider. Required when `methods` holds
+    /// [`AnchorMethod::Qtsa`].
     pub qtsa_anchor: Option<Arc<dyn AnchorProvider>>,
+    /// Hosts of the pre-serve self-check (OW1.4): every minted witness is
+    /// verified with the SDK before it is written for serving. Each enabled
+    /// method needs its host ([`Self::validate`]).
+    pub self_check: SelfCheckHosts,
+    /// Seconds an EVM anchor's transaction may stay unknown to the node
+    /// (not found) before it counts as dropped or reorged out: discarded,
+    /// the next attempt re-anchors (OW1.6 H2). A transaction the node knows
+    /// but has not mined stays pending without a timeout (it holds its
+    /// nonce). Config `anchors.evm.not_found_timeout_secs`.
+    pub evm_not_found_timeout_secs: u64,
+    /// Anchors found at fault, or abandoned after the not-found timeout
+    /// (OW1.6b N3), per (epoch, method) before the method is no longer
+    /// re-anchored for that epoch (OW1.6 M4: a systematic fault, such as a
+    /// sender or contract mismatch, would otherwise spend one transaction
+    /// per pending epoch per tick). Default
+    /// [`DEFAULT_MAX_ANCHOR_FAULTS`].
+    pub max_anchor_faults: u32,
+    /// The service DID every witness signature must name
+    /// (`did:pkh:eip155:1:<EIP-55 address>`, derived from `signer`).
+    pub service_did: String,
+    /// Test seam (feature `test-doubles`): runs on every freshly minted batch
+    /// of witnesses before the self-check; an `Err` stands for a mint
+    /// failure, a mutation for corruption between mint and serve.
+    #[cfg(feature = "test-doubles")]
+    pub after_mint: Option<AfterMint>,
 }
+
+/// Default of [`WitnessContext::evm_not_found_timeout_secs`]: one hour,
+/// well past Sepolia and mainnet finality (about 13 minutes).
+pub const DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS: u64 = 3600;
+
+/// Default of [`WitnessContext::max_anchor_faults`].
+pub const DEFAULT_MAX_ANCHOR_FAULTS: u32 = 3;
+
+/// See [`WitnessContext::after_mint`].
+#[cfg(feature = "test-doubles")]
+pub type AfterMint = Arc<dyn Fn(&mut Vec<MintedWitness>) -> Result<(), WitnessError> + Send + Sync>;
 
 impl WitnessContext {
     pub fn new(
         signer: Arc<Secp256k1Signer>,
         service_eth_address: String,
-        evm_network: String,
         methods: Vec<AnchorMethod>,
     ) -> Self {
+        let service_did = signer
+            .derive_did_pkh()
+            .map(|(did, _)| did)
+            .unwrap_or_default();
         Self {
             signer,
             service_eth_address,
-            evm_network,
             methods,
             evm_anchor: None,
             qtsa_anchor: None,
+            self_check: SelfCheckHosts::default(),
+            evm_not_found_timeout_secs: DEFAULT_EVM_NOT_FOUND_TIMEOUT_SECS,
+            max_anchor_faults: DEFAULT_MAX_ANCHOR_FAULTS,
+            service_did,
+            #[cfg(feature = "test-doubles")]
+            after_mint: None,
         }
+    }
+
+    /// Builder-style: the self-check hosts.
+    pub fn with_self_check(mut self, hosts: SelfCheckHosts) -> Self {
+        self.self_check = hosts;
+        self
     }
 
     /// Builder-style: attach a live EVM anchor provider.
@@ -76,10 +127,41 @@ impl WitnessContext {
         self
     }
 
-    /// Builder-style: attach a live qTSA anchor provider. M5+ only.
+    /// Builder-style: attach a live qTSA anchor provider.
     pub fn with_qtsa_anchor(mut self, anchor: Arc<dyn AnchorProvider>) -> Self {
         self.qtsa_anchor = Some(anchor);
         self
+    }
+
+    /// The provider wired for `method`, if any.
+    pub fn provider(&self, method: AnchorMethod) -> Option<&Arc<dyn AnchorProvider>> {
+        match method {
+            AnchorMethod::Evm => self.evm_anchor.as_ref(),
+            AnchorMethod::Qtsa => self.qtsa_anchor.as_ref(),
+        }
+    }
+
+    /// Decision D51: every enabled method has a provider. A context that
+    /// fails this must not start a sealer ([`seal_once`] refuses it before
+    /// it closes the epoch).
+    ///
+    /// OW1.4: every enabled method also has its self-check host, and the
+    /// service DID is known; without them no witness could be served.
+    pub fn validate(&self) -> Result<(), SealError> {
+        if let Some(m) = self.methods.iter().find(|m| self.provider(**m).is_none()) {
+            return Err(SealError::MissingProvider(*m));
+        }
+        let host_missing = |m: &AnchorMethod| match m {
+            AnchorMethod::Evm => self.self_check.blockchain.is_none(),
+            AnchorMethod::Qtsa => self.self_check.tsa.is_none(),
+        };
+        if let Some(m) = self.methods.iter().find(|m| host_missing(m)) {
+            return Err(SealError::MissingSelfCheckHost(*m));
+        }
+        if self.service_did.is_empty() {
+            return Err(SealError::NoServiceDid);
+        }
+        Ok(())
     }
 }
 
@@ -89,6 +171,18 @@ pub enum SealError {
     Store(#[from] StoreError),
     #[error("witness: {0}")]
     Witness(#[from] WitnessError),
+    #[error(
+        "anchor method {} is enabled but has no anchor provider; configure it or disable the method",
+        .0.as_str()
+    )]
+    MissingProvider(AnchorMethod),
+    #[error(
+        "anchor method {} is enabled but has no self-check host; witnesses could never be served",
+        .0.as_str()
+    )]
+    MissingSelfCheckHost(AnchorMethod),
+    #[error("the service DID could not be derived from the signer")]
+    NoServiceDid,
 }
 
 /// A test-driven seal request. The contained `now` value is used as the
@@ -99,8 +193,23 @@ pub struct SealTick {
     pub now: u64,
 }
 
+/// OW2.2 N9: log the moment an (epoch, method) reaches the anchor fault cap,
+/// once, at ERROR. The per-tick check that skips it afterwards logs at debug,
+/// so a stalled method does not repeat an ERROR every tick.
+fn log_fault_cap_reached(ctx: &WitnessContext, epoch_id: u64, method: AnchorMethod, faults: u32) {
+    if faults == ctx.max_anchor_faults {
+        error!(
+            epoch_id,
+            method = method.as_str(),
+            faults,
+            "anchor found at fault or abandoned too often; not re-anchored for this epoch, \
+             witnesses stay stalled (503 anchor_stalled) until ops intervenes"
+        );
+    }
+}
+
 /// Run a single seal cycle and return the persisted record together with
-/// every witness minted during the cycle.
+/// every witness minted and served during the cycle.
 ///
 /// `closed_at` is the moment the seal observed; the next epoch opens at
 /// `closed_at` and closes `duration_secs` later. When `witness_ctx` is
@@ -108,18 +217,27 @@ pub struct SealTick {
 /// minting (used by accumulator-only tests and by the M2-shape callers
 /// that have not yet plumbed in a signer).
 ///
-/// Live anchors are best-effort. Each per-method provider in
-/// `witness_ctx` is invoked exactly once per non-empty epoch with the
-/// final Merkle root; on success the returned [`TimestampValue`] is
-/// folded into every per-leaf witness for that method, on failure the
-/// sealer logs a `warn!` and falls back to stub data for that method's
-/// witnesses this epoch. Sealing never fails because an anchor failed;
-/// the next epoch retries.
+/// Anchoring follows decision D51 and the pre-serve self-check (OW1.4). Each
+/// tick first settles every outstanding epoch ([`retry_pending`]), then
+/// closes the epoch: one SDK batch, its root ([`EpochBatch::anchor_root`],
+/// `0x1620` + digest, PCA-0015 section 3.8). The closed epoch is persisted
+/// with every enabled method pending ([`PendingEpoch`]) BEFORE anything is
+/// anchored, so no later failure loses its leaves; it is then settled like
+/// any pending epoch ([`settle_method`]): anchor once per method (the anchor
+/// is stored in the pending record before minting), mint from the stored
+/// anchor, self-check every witness with the SDK
+/// ([`crate::selfcheck::verify_minted_witness`]) and only then write the
+/// witnesses to the serving partitions. Whatever fails leaves the method
+/// pending; every later tick retries until it succeeds (no backoff). The
+/// methods are independent. A context with an enabled method and no
+/// provider or self-check host is refused before the epoch is closed
+/// ([`WitnessContext::validate`]).
 ///
-/// Empty epochs are never anchored: when `snapshot.leaves.is_empty()` the
-/// live provider is not called (no gas / RPC traffic for a degenerate
-/// root) and no witnesses are minted, matching the M3 behaviour for
-/// empty epochs.
+/// The returned witnesses are every witness served during the cycle: late
+/// ones of earlier epochs (retries) first, then the closed epoch's.
+///
+/// Empty epochs are never anchored and mint nothing: no batch, no provider
+/// call, no pending record.
 pub async fn seal_once(
     accumulator: &Accumulator,
     store: &Store,
@@ -127,181 +245,477 @@ pub async fn seal_once(
     duration_secs: u64,
     witness_ctx: Option<&WitnessContext>,
 ) -> Result<(EpochRecord, Vec<MintedWitness>), SealError> {
-    let snapshot = accumulator.swap_and_open_next(closed_at, closed_at, duration_secs);
-    let (record, sorted_leaves) = build_record_and_sorted_leaves(&snapshot);
-
-    let witnesses = if let Some(ctx) = witness_ctx {
-        let merkle_root_hex = format!("0x{}", hex::encode(record.merkle_root));
-        let outcomes = resolve_method_outcomes(ctx, record.id, &merkle_root_hex, &snapshot).await;
-        let minted = mint_witnesses_for_epoch(
-            &snapshot,
-            &record.merkle_root,
-            &sorted_leaves,
-            &outcomes,
-            Arc::clone(&ctx.signer),
-            closed_at,
-        )
-        .await?;
-        for w in &minted {
-            info!(
-                leaf = %format!("0x{}", hex::encode(w.leaf)),
-                method = %w.method.as_str(),
-                tip = %format!("0x{}", hex::encode(w.signature_hash)),
-                epoch = w.epoch_id,
-                "witness minted"
-            );
-        }
-        minted
-    } else {
-        Vec::new()
+    if let Some(ctx) = witness_ctx {
+        ctx.validate()?;
+    }
+    let (mut witnesses, mut down) = match witness_ctx {
+        Some(ctx) => retry_pending(store, ctx, closed_at).await,
+        None => (Vec::new(), HashSet::new()),
     };
 
-    store.persist_sealed_epoch(&record, &snapshot.leaves, &witnesses)?;
+    let snapshot = accumulator.swap_and_open_next(closed_at, closed_at, duration_secs);
+    let leaves: Vec<Hash32> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+    let batch = EpochBatch::prepare(&leaves)?;
+    let record = build_record(&snapshot, batch.as_ref())?;
+
+    // OW1.3 finding 2: the epoch and its leaves are durable, every method
+    // pending, before the first anchor call; a later anchor, mint, save or
+    // self-check failure leaves the method pending, never loses the leaves.
+    let pending = match (witness_ctx, batch.as_ref()) {
+        (Some(ctx), Some(batch)) if !ctx.methods.is_empty() => {
+            Some(PendingEpoch::new(&snapshot, batch, ctx.methods.clone()))
+        }
+        _ => None,
+    };
+    store.persist_sealed_epoch_with_pending(&record, &snapshot.leaves, &[], pending.as_ref())?;
+
+    let mut minted = Vec::new();
+    let mut still_pending = Vec::new();
+    if let (Some(ctx), Some(mut pending)) = (witness_ctx, pending) {
+        for method in pending.methods.clone() {
+            if let Some(ws) =
+                settle_method(store, ctx, &mut pending, method, &mut down, closed_at).await
+            {
+                minted.extend(ws);
+            }
+        }
+        still_pending = pending.methods.clone();
+    }
 
     info!(
         id = record.id,
         root = %record.merkle_root_hex(),
         leaves = record.leaf_count,
-        witnesses = witnesses.len(),
+        witnesses = minted.len(),
+        pending = ?still_pending.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
         "epoch sealed"
     );
+    witnesses.extend(minted);
     Ok((record, witnesses))
 }
 
-/// Resolve the per-method anchor outcomes for one seal cycle.
-///
-/// Walks `ctx.methods` in order and produces a `(method, outcome)` tuple
-/// for each: if a live provider for the method is wired AND the snapshot
-/// has leaves, call the provider and translate the result; otherwise
-/// build a stub outcome with the same shape so the witness minter sees
-/// uniform inputs.
-///
-/// All anchor errors are caught here and logged via `warn!`; never
-/// surfaced upward. The fall-back outcome carries the configured
-/// `network` / EIP-55 address so a stub-fallback witness is
-/// indistinguishable from a real witness except for the all-zero
-/// `transaction_hash` and contract address.
-async fn resolve_method_outcomes(
-    ctx: &WitnessContext,
-    epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> Vec<(AnchorMethod, MethodAnchorOutcome)> {
-    let mut out: Vec<(AnchorMethod, MethodAnchorOutcome)> = Vec::with_capacity(ctx.methods.len());
-    for method in &ctx.methods {
-        let outcome = match method {
-            AnchorMethod::Evm => {
-                resolve_evm_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
-            }
-            AnchorMethod::Qtsa => {
-                resolve_qtsa_outcome(ctx, epoch_id, merkle_root_hex, snapshot).await
-            }
-        };
-        out.push((*method, outcome));
+fn log_minted(minted: &[MintedWitness]) {
+    for w in minted {
+        info!(
+            leaf = %format!("0x{}", hex::encode(w.leaf)),
+            method = %w.method.as_str(),
+            tip = %format!("0x{}", hex::encode(w.signature_hash)),
+            epoch = w.epoch_id,
+            "witness minted"
+        );
     }
-    out
 }
 
-async fn resolve_qtsa_outcome(
+/// Settle every outstanding epoch, oldest first (decision D51).
+///
+/// Each pending `(epoch, method)` goes through [`settle_method`]. Per-tick
+/// cost: at most one failing provider call per method; a method whose call
+/// failed is skipped for the rest of the tick (returned in the second tuple
+/// element, so the new epoch does not call it again). A stored anchor is
+/// re-minted and re-checked without a provider call. The qTSA provider's own
+/// request throttle applies to every call. A pending method that is no
+/// longer enabled stays pending and is logged. Nothing here fails the seal:
+/// errors are logged and retried next tick.
+async fn retry_pending(
+    store: &Store,
     ctx: &WitnessContext,
-    epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> MethodAnchorOutcome {
-    let stub = MethodAnchorOutcome::stub_qtsa;
-    let Some(anchor) = ctx.qtsa_anchor.as_ref() else {
-        return stub();
-    };
-    // Same guard as EVM: empty epoch never triggers a live RFC 3161
-    // request even if a provider is attached.
-    if snapshot.leaves.is_empty() {
-        return stub();
-    }
-    match anchor.create_timestamp(merkle_root_hex).await {
-        Ok(value) => {
-            info!(
-                epoch_id,
-                merkle_root_hex,
-                tx_hash = %value.transaction_hash,
-                tsa_provider = %value.tsa_provider,
-                tsa_url = %value.smart_contract_address,
-                gen_time = value.timestamp,
-                "qtsa anchor submitted"
-            );
-            MethodAnchorOutcome::from_tsa_timestamp_value(&value)
-        }
+    now: u64,
+) -> (Vec<MintedWitness>, HashSet<AnchorMethod>) {
+    let mut down = HashSet::new();
+    let mut out = Vec::new();
+    let pendings = match store.list_pending_epochs() {
+        Ok(p) => p,
         Err(e) => {
-            warn!(
-                epoch_id,
-                merkle_root_hex,
-                error = %e,
-                "qtsa anchor failed, falling back to stub"
-            );
-            stub()
+            error!(error = %e, "reading pending anchors failed; retried next tick");
+            return (out, down);
         }
+    };
+    for mut pending in pendings {
+        for method in pending.methods.clone() {
+            if let Some(minted) =
+                settle_method(store, ctx, &mut pending, method, &mut down, now).await
+            {
+                info!(
+                    epoch_id = pending.epoch_id,
+                    method = method.as_str(),
+                    witnesses = minted.len(),
+                    "pending anchor minted"
+                );
+                out.extend(minted);
+            }
+        }
+    }
+    (out, down)
+}
+
+/// Take one pending `(epoch, method)` as far as it goes this tick; `Some`
+/// with the witnesses when they were self-checked and written for serving
+/// (and `pending` no longer lists `method`), `None` when the method stays
+/// pending.
+///
+/// 1. Anchor: the stored anchor if there is one, else one provider call; a
+///    successful anchor is stored in the pending record before minting
+///    (OW1.3 finding 1; [`store_anchor`], OW1.6 F2: not minted when it
+///    cannot be stored), a failed call or store marks the method down for
+///    the tick.
+/// 2. Mint from the anchor through the SDK batch producer. A failure keeps
+///    the anchor; next tick mints again from it.
+/// 3. Self-check every witness ([`verify_minted_batch`]: the anchor is
+///    judged once per (epoch, method), OW1.6 H1). Not yet final:
+///    anchor kept, re-checked next tick. A failure is logged as an error
+///    with epoch, method, leaf and the SDK's reason; it discards the stored
+///    anchor only when the anchor itself is at fault
+///    ([`SelfCheckVerdict::Failed`]), so the next tick re-anchors.
+/// 4. Write the witnesses for serving and drop the method (and its anchor)
+///    from the pending record in one atomic batch. A failure keeps the
+///    anchor.
+async fn settle_method(
+    store: &Store,
+    ctx: &WitnessContext,
+    pending: &mut PendingEpoch,
+    method: AnchorMethod,
+    down: &mut HashSet<AnchorMethod>,
+    now: u64,
+) -> Option<Vec<MintedWitness>> {
+    let epoch_id = pending.epoch_id;
+    if !ctx.methods.contains(&method) {
+        warn!(
+            epoch_id,
+            method = method.as_str(),
+            "pending anchor for a disabled method; left pending"
+        );
+        return None;
+    }
+
+    // 1. The anchor.
+    let value = match pending.anchor(method) {
+        Some(value) => value.clone(),
+        None => {
+            if down.contains(&method) {
+                warn!(
+                    epoch_id,
+                    method = method.as_str(),
+                    "anchor provider failed earlier this tick; witnesses stay pending, retried next tick"
+                );
+                return None;
+            }
+            let faults = pending.anchor_fault_count(method);
+            if faults >= ctx.max_anchor_faults {
+                // OW2.2 N9: the ERROR is logged once, when the cap is reached
+                // (log_fault_cap_reached); every later tick only at debug.
+                debug!(
+                    epoch_id,
+                    method = method.as_str(),
+                    faults,
+                    "anchor fault cap reached earlier; not re-anchored, witnesses stay stalled"
+                );
+                return None;
+            }
+            let Some(value) = anchor_root(ctx, method, epoch_id, pending.anchor_root()).await
+            else {
+                down.insert(method);
+                return None;
+            };
+            pending.set_anchor(method, value.clone(), now);
+            if !store_anchor(store, pending, method, &value) {
+                down.insert(method);
+                return None;
+            }
+            value
+        }
+    };
+
+    // 2. Mint from the anchor.
+    let outcome = MethodAnchorOutcome::from_value(method, &value);
+    let minted = match pending.restore() {
+        Ok((snapshot, batch)) => {
+            mint_witnesses_for_epoch(
+                &snapshot,
+                &batch,
+                &[(method, outcome)],
+                Arc::clone(&ctx.signer),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    #[cfg(feature = "test-doubles")]
+    let minted = minted.and_then(|mut ws| match &ctx.after_mint {
+        Some(hook) => hook(&mut ws).map(|()| ws),
+        None => Ok(ws),
+    });
+    let minted = match minted {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                epoch_id,
+                method = method.as_str(),
+                error = %e,
+                "minting from the stored anchor failed; anchor kept, retried next tick"
+            );
+            return None;
+        }
+    };
+
+    // 3. Self-check every witness with the SDK before it is served.
+    let verdicts = self_check(ctx, &minted).await;
+    for (w, verdict) in minted.iter().zip(verdicts.iter()) {
+        let leaf = format!("0x{}", hex::encode(w.leaf));
+        match verdict {
+            SelfCheckVerdict::Verified => {}
+            SelfCheckVerdict::NotYet(reason) => {
+                info!(
+                    epoch_id,
+                    method = method.as_str(),
+                    leaf = %leaf,
+                    reason = %reason,
+                    "witness not verifiable yet; not served, anchor kept, re-checked next tick"
+                );
+                return None;
+            }
+            SelfCheckVerdict::Missing(reason) => {
+                settle_missing(store, ctx, pending, method, now, &value, reason);
+                return None;
+            }
+            SelfCheckVerdict::Failed {
+                reason,
+                anchor_at_fault,
+            } => {
+                error!(
+                    epoch_id,
+                    method = method.as_str(),
+                    leaf = %leaf,
+                    reason = %reason,
+                    anchor_discarded = *anchor_at_fault,
+                    "witness self-check failed; not served, method stays pending"
+                );
+                if *anchor_at_fault {
+                    // OW1.6 M4: counted, and no further anchor call for this
+                    // method in this tick.
+                    let faults = pending.count_anchor_fault(method);
+                    log_fault_cap_reached(ctx, epoch_id, method, faults);
+                    warn!(
+                        epoch_id,
+                        method = method.as_str(),
+                        faults,
+                        max = ctx.max_anchor_faults,
+                        "anchor at fault; method down for this tick"
+                    );
+                    down.insert(method);
+                    pending.drop_anchor(method);
+                    if let Err(e) = store.save_pending(pending) {
+                        error!(epoch_id, method = method.as_str(), error = %e,
+                            "discarding the failed anchor failed; retried next tick");
+                    }
+                }
+                return None;
+            }
+        }
+    }
+
+    // 4. Serve.
+    let mut remaining = pending.clone();
+    remaining.methods.retain(|m| *m != method);
+    remaining.drop_anchor(method);
+    if let Err(e) = store.persist_pending_minted(&remaining, method, &minted) {
+        error!(
+            epoch_id,
+            method = method.as_str(),
+            error = %e,
+            "persisting self-checked witnesses failed; anchor kept, retried next tick"
+        );
+        return None;
+    }
+    *pending = remaining;
+    log_minted(&minted);
+    Some(minted)
+}
+
+/// Make a just-returned anchor durable before anything is minted from it
+/// (OW1.6 F2): the pending record is saved, once more on failure. When both
+/// saves fail the anchor is not minted from memory (an in-memory anchor is
+/// lost at the end of the tick and the next tick would broadcast again):
+/// `false`, the caller puts the method down for the rest of the tick, and
+/// the ERROR names the anchor so ops can recover it.
+///
+/// Remaining window: a crash between the provider's broadcast and this
+/// save loses the anchor too; the next tick then anchors the same root a
+/// second time (for EVM a second transaction, valid but extra gas).
+fn store_anchor(
+    store: &Store,
+    pending: &PendingEpoch,
+    method: AnchorMethod,
+    value: &TimestampValue,
+) -> bool {
+    let epoch_id = pending.epoch_id;
+    let first = match store.save_pending(pending) {
+        Ok(()) => return true,
+        Err(e) => e,
+    };
+    warn!(epoch_id, method = method.as_str(), error = %first,
+        "storing the anchor failed; retrying once");
+    let Err(e) = store.save_pending(pending) else {
+        return true;
+    };
+    // A qTSA token is long; its genTime and provider identify it for ops.
+    let anchor = match method {
+        AnchorMethod::Evm => value.transaction_hash.clone(),
+        AnchorMethod::Qtsa => format!(
+            "tsa token from {:?} at {} ({} base64 chars)",
+            value.tsa_provider,
+            value.timestamp,
+            value.transaction_hash.len()
+        ),
+    };
+    error!(
+        epoch_id,
+        method = method.as_str(),
+        anchor = %anchor,
+        root = %pending.anchor_root(),
+        error = %e,
+        "storing the anchor failed twice; not minted, method down for this tick; \
+         the next tick anchors again unless ops restores this anchor"
+    );
+    false
+}
+
+/// The node does not know the anchor's transaction ([`SelfCheckVerdict::Missing`]):
+/// kept while younger than [`WitnessContext::evm_not_found_timeout_secs`];
+/// past it the transaction counts as dropped or reorged out, the anchor is
+/// discarded and the record saved without it, so the next attempt
+/// re-anchors (OW1.6 H2). A record written before OW1.6 starts its clock at
+/// this first judgement.
+fn settle_missing(
+    store: &Store,
+    ctx: &WitnessContext,
+    pending: &mut PendingEpoch,
+    method: AnchorMethod,
+    now: u64,
+    value: &TimestampValue,
+    reason: &str,
+) {
+    let epoch_id = pending.epoch_id;
+    let Some((first_seen, changed)) = pending.anchor_first_seen(method, now) else {
+        return;
+    };
+    let age = now.saturating_sub(first_seen);
+    if age < ctx.evm_not_found_timeout_secs {
+        info!(
+            epoch_id,
+            method = method.as_str(),
+            tx_hash = %value.transaction_hash,
+            age_secs = age,
+            reason = %reason,
+            "anchor transaction not on the chain yet; anchor kept, re-checked next tick"
+        );
+        if changed {
+            if let Err(e) = store.save_pending(pending) {
+                warn!(epoch_id, method = method.as_str(), error = %e,
+                    "recording the anchor's first-seen time failed; retried next tick");
+            }
+        }
+        return;
+    }
+    // OW1.6b N3: an abandoned anchor counts toward the same cap as an
+    // anchor at fault, so re-anchors after timeouts are bounded too.
+    let faults = pending.count_anchor_fault(method);
+    log_fault_cap_reached(ctx, epoch_id, method, faults);
+    warn!(
+        epoch_id,
+        method = method.as_str(),
+        tx_hash = %value.transaction_hash,
+        age_secs = age,
+        timeout_secs = ctx.evm_not_found_timeout_secs,
+        faults,
+        max = ctx.max_anchor_faults,
+        reason = %reason,
+        "anchor transaction not on the chain past the not-found timeout (dropped or reorged out); \
+         anchor abandoned, the next attempt re-anchors"
+    );
+    pending.drop_anchor(method);
+    if let Err(e) = store.save_pending(pending) {
+        error!(epoch_id, method = method.as_str(), error = %e,
+            "discarding the abandoned anchor failed; retried next tick");
     }
 }
 
-async fn resolve_evm_outcome(
+/// [`verify_minted_batch`] over the witnesses of one (epoch, method), on a
+/// blocking thread (the SDK hosts block): the anchor is judged once, not per
+/// witness (OW1.6 H1). A panicked check counts as a failure, never as a pass.
+async fn self_check(ctx: &WitnessContext, minted: &[MintedWitness]) -> Vec<SelfCheckVerdict> {
+    let hosts = ctx.self_check.clone();
+    let did = ctx.service_did.clone();
+    let ws = minted.to_vec();
+    let n = ws.len();
+    tokio::task::spawn_blocking(move || verify_minted_batch(&ws, &did, &hosts))
+        .await
+        .unwrap_or_else(|e| {
+            vec![
+                SelfCheckVerdict::Failed {
+                    reason: format!("self-check task: {e}"),
+                    anchor_at_fault: false,
+                };
+                n
+            ]
+        })
+}
+
+/// Anchor `root` (epoch `epoch_id`) through `method`'s provider. `None` when
+/// the call failed: logged with the epoch and method, the witnesses stay
+/// pending. The caller has validated that the provider exists.
+async fn anchor_root(
     ctx: &WitnessContext,
+    method: AnchorMethod,
     epoch_id: u64,
-    merkle_root_hex: &str,
-    snapshot: &SealedSnapshot,
-) -> MethodAnchorOutcome {
-    let stub = || MethodAnchorOutcome::stub_evm(&ctx.service_eth_address, &ctx.evm_network);
-    let Some(anchor) = ctx.evm_anchor.as_ref() else {
-        return stub();
-    };
-    // Defensive: a non-empty `evm_anchor` slot should only ever be hit
-    // for non-empty epochs (the sealer is the only call-site and skips
-    // the anchor for empty snapshots by the time `resolve_*` runs only
-    // when the snapshot is non-empty). Keep the guard so a future caller
-    // can't burn gas on an empty root by accident.
-    if snapshot.leaves.is_empty() {
-        return stub();
-    }
-    match anchor.create_timestamp(merkle_root_hex).await {
+    root: &str,
+) -> Option<TimestampValue> {
+    let anchor = ctx.provider(method)?;
+    match anchor.create_timestamp(root).await {
         Ok(value) => {
             info!(
                 epoch_id,
-                merkle_root_hex,
+                method = method.as_str(),
+                root,
                 tx_hash = %value.transaction_hash,
                 sender = %value.sender_account_address,
-                "evm anchor submitted"
+                tsa_provider = %value.tsa_provider,
+                "anchor submitted"
             );
-            MethodAnchorOutcome::from_evm_timestamp_value(&value)
+            Some(value)
         }
         Err(e) => {
             warn!(
                 epoch_id,
-                merkle_root_hex,
+                method = method.as_str(),
+                root,
                 error = %e,
-                "evm anchor failed, falling back to stub"
+                "anchor failed; witnesses stay pending, retried next tick"
             );
-            stub()
+            None
         }
     }
 }
 
 /// Pure helper: convert an in-memory [`SealedSnapshot`] into the on-disk
-/// [`EpochRecord`] and the sorted leaf list used both for the Merkle root
-/// and the per-leaf inclusion proofs. Leaves are sorted lexicographically
-/// by raw bytes before being fed to the SDK Merkle builder, so the root
-/// is independent of submission order (the property the test suite
-/// asserts).
-fn build_record_and_sorted_leaves(snapshot: &SealedSnapshot) -> (EpochRecord, Vec<Hash32>) {
-    let mut sorted: Vec<Hash32> = snapshot.leaves.iter().map(|e| e.leaf).collect();
-    sorted.sort_unstable();
-    let root = merkle_root_for_leaves(&sorted);
-    let record = EpochRecord {
+/// [`EpochRecord`]. The record's root is the digest of the SDK batch root
+/// the epoch's anchors carry; an empty epoch prepares no batch and records
+/// [`empty_merkle_root`].
+fn build_record(
+    snapshot: &SealedSnapshot,
+    batch: Option<&EpochBatch>,
+) -> Result<EpochRecord, WitnessError> {
+    let root = match batch {
+        Some(batch) => batch.root_digest()?,
+        None => empty_merkle_root(),
+    };
+    Ok(EpochRecord {
         id: snapshot.epoch_id,
         opened_at: snapshot.opened_at,
         closed_at: snapshot.closed_at,
         merkle_root: root,
         leaf_count: snapshot.leaves.len() as u64,
         hash_type: HASH_TYPE_LABEL.to_string(),
-    };
-    (record, sorted)
+    })
 }
 
 /// Spawn the production seal loop on the current tokio runtime. Returns
@@ -493,7 +907,8 @@ pub fn run_sealer_with_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anchors::{FailingProvider, MockProvider};
+    use crate::anchors::FailingProvider;
+    use crate::selfcheck::doubles::{SimChain, SimTsa};
     use crate::time::FixedClock;
     use aqua_rs_sdk::schema::{timestamp::TimestampValue, AnyRevision};
     use tempfile::tempdir;
@@ -512,9 +927,25 @@ mod tests {
         WitnessContext::new(
             signer,
             "0x0000000000000000000000000000000000000000".into(),
-            "sepolia".into(),
             vec![AnchorMethod::Evm, AnchorMethod::Qtsa],
         )
+        .with_sims()
+    }
+
+    impl WitnessContext {
+        /// The canned anchors as self-checkable test doubles: each provider
+        /// is also the host its anchors are judged by.
+        fn with_sims(self) -> Self {
+            let chain = Arc::new(SimChain::new(canned_evm_value()));
+            let tsa = Arc::new(SimTsa::new(canned_tsa_value()));
+            self.with_evm_anchor(chain.clone())
+                .with_qtsa_anchor(tsa.clone())
+                .with_self_check(SelfCheckHosts {
+                    blockchain: Some(chain),
+                    tsa: Some(tsa),
+                    ..SelfCheckHosts::default()
+                })
+        }
     }
 
     fn canned_evm_value() -> TimestampValue {
@@ -553,16 +984,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[1u8; 32]], DID_A);
+        acc.append_batch(&[[1u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
-        let mock: Arc<dyn AnchorProvider> = Arc::new(MockProvider {
-            value: canned_evm_value(),
-        });
-        let ctx = base_ctx(signer).with_evm_anchor(Arc::clone(&mock));
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        let ctx = base_ctx(signer);
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         let evm_payloads = extract_evm_payloads(&witnesses);
         assert_eq!(evm_payloads.len(), 1);
         let p = &evm_payloads[0];
+        // The record stores the digest of the SDK batch root the payload carries.
+        assert_eq!(
+            p["merkle_root"].as_str().unwrap(),
+            aqua_rs_sdk::primitives::merkle::batch_root_wire(&rec.merkle_root)
+        );
         assert_eq!(
             p["transaction_hash"].as_str().unwrap(),
             "0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
@@ -579,11 +1012,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fall_back_path_failing_anchor_does_not_fail_seal() {
+    async fn failing_evm_anchor_stays_pending_and_does_not_fail_seal() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[2u8; 32]], DID_A);
+        acc.append_batch(&[[2u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let failing: Arc<dyn AnchorProvider> = Arc::new(FailingProvider {
             message: "synthetic".into(),
@@ -591,42 +1024,38 @@ mod tests {
         let ctx = base_ctx(signer).with_evm_anchor(Arc::clone(&failing));
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         assert_eq!(rec.leaf_count, 1);
-        let evm_payloads = extract_evm_payloads(&witnesses);
-        assert_eq!(evm_payloads.len(), 1);
-        let p = &evm_payloads[0];
-        // Stub fall-back: 64 zeros + 40 zeros, service address + sepolia.
-        assert_eq!(
-            p["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+        assert!(
+            extract_evm_payloads(&witnesses).is_empty(),
+            "no EVM witness"
         );
+        assert_eq!(extract_qtsa_payloads(&witnesses).len(), 1);
+        let pending = store.list_pending_epochs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].methods, vec![AnchorMethod::Evm]);
         assert_eq!(
-            p["smart_contract_address"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(40))
+            pending[0].anchor_root(),
+            aqua_rs_sdk::primitives::merkle::batch_root_wire(&rec.merkle_root)
         );
-        assert_eq!(
-            p["sender_account_address"].as_str().unwrap(),
-            "0x0000000000000000000000000000000000000000"
-        );
-        assert_eq!(p["network"].as_str().unwrap(), "sepolia");
     }
 
     #[tokio::test]
-    async fn disabled_path_no_provider_uses_stub() {
+    async fn enabled_method_without_provider_refuses_before_closing_the_epoch() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[3u8; 32]], DID_A);
+        acc.append_batch(&[[3u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
-        // No `with_evm_anchor`: live provider is never constructed and
-        // the sealer must not call any anchor service.
-        let ctx = base_ctx(signer);
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
-        let evm_payloads = extract_evm_payloads(&witnesses);
-        assert_eq!(evm_payloads.len(), 1);
-        assert_eq!(
-            evm_payloads[0]["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
-        );
+        let mut ctx = base_ctx(signer);
+        ctx.evm_anchor = None;
+        let err = seal_once(&acc, &store, 60, 60, Some(&ctx))
+            .await
+            .expect_err("EVM enabled without a provider");
+        assert!(matches!(err, SealError::MissingProvider(AnchorMethod::Evm)));
+        assert!(err.to_string().contains("evm"), "{err}");
+        // The epoch was not closed: the leaf is still in epoch 1.
+        let ctx = base_ctx(build_signer().await);
+        let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
+        assert_eq!((rec.id, rec.leaf_count, witnesses.len()), (1, 1, 2));
     }
 
     #[tokio::test]
@@ -696,12 +1125,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[1u8; 32]], DID_A);
+        acc.append_batch(&[[1u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
-        let mock: Arc<dyn AnchorProvider> = Arc::new(MockProvider {
-            value: canned_tsa_value(),
-        });
-        let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&mock));
+        let ctx = base_ctx(signer);
         let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         let qtsa_payloads = extract_qtsa_payloads(&witnesses);
         assert_eq!(qtsa_payloads.len(), 1);
@@ -714,11 +1140,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fall_back_path_failing_qtsa_does_not_fail_seal() {
+    async fn failing_qtsa_anchor_stays_pending_and_does_not_fail_seal() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[2u8; 32]], DID_A);
+        acc.append_batch(&[[2u8; 32]], DID_A).unwrap();
         let signer = build_signer().await;
         let failing: Arc<dyn AnchorProvider> = Arc::new(FailingProvider {
             message: "tsa unreachable".into(),
@@ -726,32 +1152,19 @@ mod tests {
         let ctx = base_ctx(signer).with_qtsa_anchor(Arc::clone(&failing));
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
         assert_eq!(rec.leaf_count, 1);
-        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
-        assert_eq!(qtsa_payloads.len(), 1);
-        let p = &qtsa_payloads[0];
-        assert_eq!(
-            p["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+        assert!(
+            extract_qtsa_payloads(&witnesses).is_empty(),
+            "no qTSA witness"
         );
-        assert_eq!(p["tsa_provider"].as_str().unwrap(), "stub");
-    }
-
-    #[tokio::test]
-    async fn disabled_path_no_qtsa_provider_uses_stub() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let acc = Accumulator::new(1, 0, 60);
-        acc.append_batch(&[[3u8; 32]], DID_A);
-        let signer = build_signer().await;
-        let ctx = base_ctx(signer);
-        let (_rec, witnesses) = seal_once(&acc, &store, 60, 60, Some(&ctx)).await.unwrap();
-        let qtsa_payloads = extract_qtsa_payloads(&witnesses);
-        assert_eq!(qtsa_payloads.len(), 1);
+        assert_eq!(extract_evm_payloads(&witnesses).len(), 1);
+        let pending = store.list_pending_epochs().unwrap();
+        assert_eq!(pending[0].methods, vec![AnchorMethod::Qtsa]);
         assert_eq!(
-            qtsa_payloads[0]["transaction_hash"].as_str().unwrap(),
-            format!("0x{}", "0".repeat(64))
+            store
+                .get_pending_epoch_for_leaf(&[2u8; 32], AnchorMethod::Qtsa)
+                .unwrap(),
+            Some(1)
         );
-        assert_eq!(qtsa_payloads[0]["tsa_provider"].as_str().unwrap(), "stub");
     }
 
     #[tokio::test]
@@ -794,18 +1207,19 @@ mod tests {
         let acc = Accumulator::new(1, 0, 60);
         let l1 = [1u8; 32];
         let l2 = [2u8; 32];
-        acc.append_batch(&[l1], DID_A);
-        acc.append_batch(&[l2], DID_B);
+        acc.append_batch(&[l1], DID_A).unwrap();
+        acc.append_batch(&[l2], DID_B).unwrap();
 
         let (rec, witnesses) = seal_once(&acc, &store, 60, 60, None).await.expect("seal");
         assert_eq!(rec.id, 1);
         assert_eq!(rec.leaf_count, 2);
         assert!(witnesses.is_empty(), "no witness ctx → no witnesses");
 
-        let mut leaves_sorted = vec![l1, l2];
-        leaves_sorted.sort_unstable();
-        let expected_root = merkle_root_for_leaves(&leaves_sorted);
-        assert_eq!(rec.merkle_root, expected_root);
+        assert_ne!(
+            rec.merkle_root,
+            crate::merkle::empty_merkle_root(),
+            "a non-empty epoch records its SDK batch root"
+        );
 
         // Next epoch is open.
         let view = acc.current_view();
@@ -832,7 +1246,7 @@ mod tests {
         let _clock = FixedClock::new(0);
         let handle = run_sealer_with_channel(Arc::clone(&acc), store.clone(), rx, 60, None, None);
 
-        acc.append_batch(&[[7u8; 32]], DID_A);
+        acc.append_batch(&[[7u8; 32]], DID_A).unwrap();
         tx.send(SealTick { now: 60 }).await.unwrap();
 
         // Give the task one yield to process; close the channel to let it
@@ -853,7 +1267,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[8u8; 32]], DID_A);
+        acc.append_batch(&[[8u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         // 10 ETH balance, 0.00135 ETH gas => ~7407 txs => rate ~0.643 => interval 2
@@ -902,7 +1316,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[9u8; 32]], DID_A);
+        acc.append_batch(&[[9u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         // Balance < 2 * gas_cost: should not seal
@@ -946,7 +1360,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let acc = Arc::new(Accumulator::new(1, 0, 60));
-        acc.append_batch(&[[10u8; 32]], DID_A);
+        acc.append_batch(&[[10u8; 32]], DID_A).unwrap();
 
         let clock = FixedClock::new(60);
         let oracle = Arc::new(FailingOracle {

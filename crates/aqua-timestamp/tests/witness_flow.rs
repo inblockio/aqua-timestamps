@@ -8,20 +8,31 @@
 use std::path::PathBuf;
 
 use aqua_rs_sdk::{
-    primitives::{merkle::verify_inclusion, HashType},
+    primitives::{
+        merkle::{
+            parse_batch_digest, parse_batch_proof, parse_batch_root, shielded_leaf,
+            verify_batch_inclusion,
+        },
+        RevisionLink,
+    },
     schema::AnyRevision,
 };
+use std::sync::Arc;
+
+use aqua_rs_sdk::schema::timestamp::TimestampValue;
 use aqua_timestamp::{
-    build_app,
+    build_app_with_anchors,
     config::{
         AnchorConfig, AnchorsConfig, AuthConfig, BondingCurveConfig, Config, EpochConfig,
         EvmAnchorConfig, IdentityConfig, LeaderboardConfig, QtsaAnchorConfig, ServerConfig,
         StorageConfig,
     },
     identity::{IdentityClaimOverrides, ServiceIdentity},
-    SealDriver,
+    AnchorOverrides, SealDriver,
 };
+use aqua_timestamp_core::anchors::FailingProvider;
 use aqua_timestamp_core::sealer::SealTick;
+use aqua_timestamp_core::selfcheck::doubles::{SimChain, SimTsa};
 use axum::{
     body::{to_bytes, Body},
     http::{Method, Request, StatusCode},
@@ -32,6 +43,59 @@ use sha3::{Digest, Keccak256};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+/// Offline anchor facts for route tests. They are served only after the
+/// pre-serve self-check, here against simulated hosts ([`canned_anchors`]);
+/// the SDK verification of minted witnesses against the real TSA host lives
+/// in aqua-timestamp-core's `witness_sdk_verify` suite.
+fn canned_evm_value() -> TimestampValue {
+    {
+        TimestampValue::new(
+            vec![],
+            "0xCAFE000000000000000000000000000000000000".into(),
+            String::new(),
+            format!("0x{}", "ab".repeat(32)),
+            "0xDEAD000000000000000000000000000000000000".into(),
+            "sepolia".into(),
+            String::new(),
+            1000,
+            1,
+            0,
+            String::new(),
+        )
+    }
+}
+
+fn canned_qtsa_value() -> TimestampValue {
+    {
+        TimestampValue::new(
+            vec![],
+            String::new(),
+            "Canned Test TSA".into(),
+            "AAAA".into(),
+            "http://tsa.test/".into(),
+            "tsa".into(),
+            String::new(),
+            1000,
+            1,
+            0,
+            String::new(),
+        )
+    }
+}
+
+/// The canned anchors as the pre-serve self-check's test doubles (OW1.4):
+/// each provider is also the host its own anchors are judged by.
+fn canned_anchors() -> AnchorOverrides {
+    let chain = Arc::new(SimChain::new(canned_evm_value()));
+    let tsa = Arc::new(SimTsa::new(canned_qtsa_value()));
+    AnchorOverrides {
+        evm: Some(chain.clone()),
+        qtsa: Some(tsa.clone()),
+        evm_check_host: Some(chain),
+        tsa_check_host: Some(tsa),
+    }
+}
 
 const SERVICE_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
@@ -66,18 +130,11 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
         anchor_legacy: AnchorConfig::default(),
         bonding_curve: BondingCurveConfig::default(),
         leaderboard: LeaderboardConfig::default(),
-        // M3 tests assert stub witness payloads byte for byte; keep the
-        // EVM live provider off here so the assertions remain stable
-        // (no Sepolia RPC dependency during unit/integration tests).
+        // Both methods enabled (the default); the providers are injected
+        // per harness (`canned_anchors`), so no RPC or TSA is contacted.
         anchors: AnchorsConfig {
-            evm: EvmAnchorConfig {
-                enabled: false,
-                ..EvmAnchorConfig::default()
-            },
-            qtsa: QtsaAnchorConfig {
-                enabled: false,
-                ..QtsaAnchorConfig::default()
-            },
+            evm: EvmAnchorConfig::default(),
+            qtsa: QtsaAnchorConfig::default(),
         },
     }
 }
@@ -85,6 +142,7 @@ fn cfg(allow: Vec<String>, storage: PathBuf, max_leaves: usize) -> Config {
 struct Harness {
     router: Router,
     seal_tx: mpsc::Sender<SealTick>,
+    state: std::sync::Arc<aqua_timestamp::state::AppState>,
     _tmp: TempDir,
 }
 
@@ -99,17 +157,19 @@ async fn build_harness() -> Harness {
         .await
         .expect("identity");
     let (tx, rx) = mpsc::channel::<SealTick>(8);
-    let (router, _state) = build_app(
+    let (router, state) = build_app_with_anchors(
         cfg,
         identity,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx),
+        canned_anchors(),
     )
     .await
     .expect("build_app");
     Harness {
         router,
         seal_tx: tx,
+        state,
         _tmp: tmp,
     }
 }
@@ -203,11 +263,32 @@ fn leaf_hex(prefix: u8) -> String {
 }
 
 async fn drain_seal(harness: &Harness, now: u64) {
+    let before = harness.state.store.last_sealed_epoch_id().unwrap();
     harness.seal_tx.send(SealTick { now }).await.unwrap();
-    // Yield enough times for the seal task to drain the queue without
-    // closing the channel (other tests in the same harness may seal too).
-    for _ in 0..40 {
-        tokio::task::yield_now().await;
+    wait_for_seal(&harness.state, before).await;
+}
+
+/// Wait (bounded) until the seal task has sealed a new epoch past `before`
+/// and no (epoch, method) is pending any more. The pre-serve self-check
+/// (OW1.4) runs on a blocking thread, so a fixed sleep raced it under load
+/// (OW2.2 flaky test); this waits on the store instead. The sealed record
+/// and its pending entry are written in one batch, so a new last sealed id
+/// with an empty pending list means every witness of that tick is served.
+async fn wait_for_seal(state: &aqua_timestamp::state::AppState, before: Option<u64>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let sealed = state.store.last_sealed_epoch_id().unwrap();
+        let pending = state.store.list_pending_epochs().unwrap();
+        if sealed != before && pending.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "seal did not finish in 20 s: last sealed {sealed:?} (before {before:?}), \
+             {} epoch(s) pending",
+            pending.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
@@ -264,28 +345,24 @@ async fn round_trip_submit_seal_fetch_witness_verify_proof() {
                 found_object = true;
                 let payloads = rev_value["payloads"].as_object().unwrap();
                 assert_eq!(payloads["type"].as_str().unwrap(), "timestamp");
-                let merkle_root_hex = payloads["merkle_root"].as_str().unwrap();
-                let merkle_root = parse_hex32(merkle_root_hex);
-                let proof: Vec<Vec<u8>> = payloads["merkle_proof"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|p| parse_hex32(p.as_str().unwrap()).to_vec())
-                    .collect();
-                let tree_size = payloads["batch_tree_size"].as_u64().unwrap() as usize;
-                let leaf_index = payloads["batch_leaf_index"].as_u64().unwrap() as usize;
-
-                assert!(
-                    verify_inclusion(
-                        &target_leaf_bytes,
-                        leaf_index,
-                        tree_size,
-                        &proof,
-                        &merkle_root,
-                        &HashType::Sha3_256
-                    ),
-                    "inclusion proof failed to verify against stated merkle_root"
-                );
+                // Inclusion, judged by the SDK's batch primitives (PCA-0015
+                // section 3.8): the shielded leaf under the payload's nonce sits
+                // at `batch_leaf_index` of the tree with root `merkle_root`.
+                let root = parse_batch_root(payloads["merkle_root"].as_str().unwrap())
+                    .expect("merkle_root is a batch root");
+                let nonce = parse_batch_digest(payloads["shielding_nonce"].as_str().unwrap())
+                    .expect("shielding_nonce is a batch digest");
+                let proof = parse_batch_proof(&payloads["merkle_proof"]).expect("proof");
+                let leaf = shielded_leaf(&RevisionLink::from_bytes(target_leaf_bytes), &nonce)
+                    .expect("shielded leaf");
+                verify_batch_inclusion(
+                    &leaf,
+                    payloads["batch_leaf_index"].as_u64().unwrap(),
+                    payloads["batch_tree_size"].as_u64().unwrap(),
+                    &proof,
+                    &root,
+                )
+                .expect("inclusion proof verifies against the stated merkle_root");
 
                 let prev = rev_value["previous_revision"].as_str().unwrap();
                 // `previous_revision` is the leaf as an SDK RevisionLink: `0x1620` + digest.
@@ -503,20 +580,20 @@ async fn witness_retrievable_across_keyspace_reopen() {
             .await
             .unwrap();
         let (tx, rx) = mpsc::channel::<SealTick>(8);
-        let (router, _state) = build_app(
+        let (router, state) = build_app_with_anchors(
             cfg,
             identity,
             IdentityClaimOverrides::default(),
             SealDriver::Channel(rx),
+            canned_anchors(),
         )
         .await
         .unwrap();
         let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
         let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+        let before = state.store.last_sealed_epoch_id().unwrap();
         tx.send(SealTick { now: 7777 }).await.unwrap();
-        for _ in 0..40 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_seal(&state, before).await;
         let (_, body) = get_json(&router, "/trees", Some(&token)).await;
         let tips = body.as_array().unwrap().clone();
         // Drop tx so the seal task can exit, but use std::mem::drop to
@@ -532,11 +609,12 @@ async fn witness_retrievable_across_keyspace_reopen() {
         .await
         .unwrap();
     let (_tx2, rx2) = mpsc::channel::<SealTick>(8);
-    let (router2, _state2) = build_app(
+    let (router2, _state2) = build_app_with_anchors(
         cfg2,
         identity2,
         IdentityClaimOverrides::default(),
         SealDriver::Channel(rx2),
+        canned_anchors(),
     )
     .await
     .unwrap();
@@ -573,4 +651,487 @@ async fn tip_response_shape_matches_aqua_node() {
     assert_eq!(status, StatusCode::OK);
     let _tree: aqua_rs_sdk::schema::tree::Tree =
         serde_json::from_value(body.clone()).expect("response deserialises to Tree");
+}
+
+/// D51: a leaf whose method anchor failed is pending. `GET /trees/by-leaf`
+/// answers 202 with a pending body for that method (never a placeholder
+/// witness) and 200 with the witness for the method that was minted.
+#[tokio::test]
+async fn by_leaf_answers_202_pending_for_a_pending_method() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        AnchorOverrides {
+            evm: Some(Arc::new(FailingProvider {
+                message: "synthetic outage".into(),
+            })),
+            ..canned_anchors()
+        },
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let leaf = leaf_hex(0x77);
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+    tx.send(SealTick { now: 1000 }).await.unwrap();
+    for _ in 0..40 {
+        tokio::task::yield_now().await;
+    }
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{leaf}?method=evm"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "pending", "{body}");
+    assert_eq!(body["method"], "evm", "{body}");
+    assert_eq!(body["epoch"], 1, "{body}");
+    assert_eq!(body["leaf"], leaf.to_lowercase(), "{body}");
+    assert!(
+        body.get("revisions").is_none(),
+        "no placeholder witness: {body}"
+    );
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{leaf}?method=qtsa"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revisions"].as_object().unwrap().len(), 2);
+}
+
+/// `cfg` with the anchor blocks of `toml_anchors` (an `[anchor]` and/or
+/// `[anchors.evm]` fragment), parsed as an operator config would be.
+fn cfg_with_anchor_toml(storage: PathBuf, toml_anchors: &str) -> Config {
+    let parsed: Config = toml::from_str(&format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\n{toml_anchors}"
+    ))
+    .expect("config toml");
+    let mut c = cfg(vec![CLIENT_A_DID.to_string()], storage, 10_000);
+    c.anchor_legacy = parsed.anchor_legacy;
+    c.anchors = parsed.anchors;
+    c
+}
+
+/// OW1.6 F1/M1: the EVM chain has one source. The provider writes the
+/// payload `network` from `anchors.evm.chain`; a deprecated label
+/// (`anchors.evm.network_label`, or the legacy `[anchor].evm_network`) that
+/// names another chain would key the self-check host to a chain the payload
+/// never names, so every EVM witness would stay pending forever. The service
+/// refuses to start instead, naming both settings, even with injected
+/// providers. A label that names the same chain still starts.
+#[tokio::test]
+async fn evm_label_naming_another_chain_refuses_to_start() {
+    for (fragment, setting) in [
+        (
+            "[anchors.evm]\nchain = \"sepolia\"\nnetwork_label = \"mainnet\"",
+            "anchors.evm.network_label",
+        ),
+        (
+            "[anchors.evm]\nchain = \"mainnet\"\nnetwork_label = \"sepolia\"",
+            "anchors.evm.network_label",
+        ),
+        ("[anchor]\nevm_network = \"mainnet\"", "anchor.evm_network"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_anchor_toml(tmp.path().to_path_buf(), fragment);
+        let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+            .await
+            .unwrap();
+        let (_tx, rx) = mpsc::channel::<SealTick>(8);
+        let err = match build_app_with_anchors(
+            cfg,
+            identity,
+            IdentityClaimOverrides::default(),
+            SealDriver::Channel(rx),
+            canned_anchors(),
+        )
+        .await
+        {
+            Ok(_) => panic!("{fragment:?}: a second chain source must refuse to start"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(setting), "{fragment:?}: {err}");
+        assert!(err.contains("anchors.evm.chain"), "{fragment:?}: {err}");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nchain = \"sepolia\"\nnetwork_label = \"sepolia\"",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let _app = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .expect("a label naming the same chain starts");
+}
+
+/// Write into the store at `path` a witness as the pre-OW1 code minted it
+/// (stub anchor, written straight to the serving partitions without the
+/// self-check) for `leaf` of `did`, in epoch 1.
+async fn preload_legacy_witness(path: &std::path::Path, leaf: [u8; 32], did: &str) {
+    use aqua_timestamp_core::{
+        accumulator::Accumulator,
+        epoch::EpochRecord,
+        storage::Store,
+        witness::{mint_witnesses_for_epoch, AnchorMethod, EpochBatch, MethodAnchorOutcome},
+    };
+    let store = Store::open(path).expect("store");
+    let acc = Accumulator::new(1, 940, 60);
+    acc.append_batch(&[leaf], did).unwrap();
+    let snapshot = acc.swap_and_open_next(1000, 1000, 60);
+    let leaves: Vec<[u8; 32]> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+    let batch = EpochBatch::prepare(&leaves).unwrap().expect("batch");
+    let mut stub = canned_evm_value();
+    stub.transaction_hash = format!("0x{}", "00".repeat(32));
+    let signer = Arc::new(aqua_rs_sdk::Secp256k1Signer::new(
+        hex::decode(CLIENT_B_PK).unwrap(),
+    ));
+    let minted = mint_witnesses_for_epoch(
+        &snapshot,
+        &batch,
+        &[(
+            AnchorMethod::Evm,
+            MethodAnchorOutcome::from_value(AnchorMethod::Evm, &stub),
+        )],
+        signer,
+    )
+    .await
+    .expect("legacy mint");
+    let record = EpochRecord {
+        id: 1,
+        opened_at: 940,
+        closed_at: 1000,
+        merkle_root: [0x11; 32],
+        leaf_count: 1,
+        hash_type: "FIPS_202-SHA3-256".into(),
+    };
+    store
+        .persist_sealed_epoch(&record, &snapshot.leaves, &minted)
+        .expect("legacy persist");
+}
+
+/// OW1.6 H3: only self-checked witnesses are served. A witness the pre-OW1
+/// code minted (no self-check marker) answers 410 Gone with
+/// `{"status":"not_verifiable", ...}` on the by-leaf, by-epoch and by-tip
+/// routes; a witness minted and self-checked by the new code is served.
+#[tokio::test]
+async fn legacy_witness_answers_not_verifiable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_leaf = [0x5a; 32];
+    preload_legacy_witness(tmp.path(), old_leaf, CLIENT_A_DID).await;
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let old_hex = format!("0x{}", hex::encode(old_leaf));
+
+    let (status, body) = get_json(
+        &router,
+        &format!("/trees/by-leaf/{old_hex}?method=evm"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+    assert_eq!(
+        body["reason"], "minted before self-check; resubmit the leaf",
+        "{body}"
+    );
+    assert_eq!(body["method"], "evm", "{body}");
+    assert_eq!(body["epoch"], 1, "{body}");
+    assert_eq!(body["leaf"], old_hex, "{body}");
+    assert!(body.get("revisions").is_none(), "{body}");
+
+    let (status, body) = get_json(&router, "/trees?epoch=1&method=evm", Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+    assert!(body.get("revisions").is_none(), "{body}");
+
+    // OW2.2 N7: the tip list names only tips the fetch routes serve, so a
+    // legacy tip (410 on every fetch route) is not listed.
+    let (status, tips) = get_json(&router, "/trees", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{tips}");
+    assert_eq!(tips, serde_json::json!([]), "legacy tip is not listed");
+    let stored = state.store.list_witness_tips_for_did(CLIENT_A_DID).unwrap();
+    let old_tip = aqua_timestamp_core::witness::revision_wire_hex(&stored[0].1);
+    let (status, body) = get_json(&router, &format!("/trees/{old_tip}"), Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["status"], "not_verifiable", "{body}");
+
+    // A leaf minted and self-checked by the new code is served.
+    let leaf = leaf_hex(0x6b);
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&leaf)).await;
+    tx.send(SealTick { now: 2000 }).await.unwrap();
+    let mut served = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status, _) = get_json(
+            &router,
+            &format!("/trees/by-leaf/{leaf}?method=evm"),
+            Some(&token),
+        )
+        .await;
+        if status == StatusCode::OK {
+            served = true;
+            break;
+        }
+    }
+    assert!(served, "a self-checked witness is served");
+    let (_, tips) = get_json(&router, "/trees", Some(&token)).await;
+    let tips = tips.as_array().unwrap();
+    assert!(!tips.is_empty(), "the self-checked witness is listed");
+    assert!(
+        tips.iter().all(|t| t.as_str() != Some(old_tip.as_str())),
+        "the legacy tip stays unlisted: {tips:?}"
+    );
+}
+
+/// OW1.6b F1 (N6): a holder follows the 410 advice and resubmits the leaf of
+/// a legacy witness. While the new epoch's anchor is pending, by-leaf answers
+/// 202 pending for the new epoch, not 410 for the legacy tip (which still
+/// maps the leaf until a self-checked witness replaces it).
+#[tokio::test]
+async fn legacy_tip_with_pending_resubmit_answers_202() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_leaf = [0x5c; 32];
+    preload_legacy_witness(tmp.path(), old_leaf, CLIENT_A_DID).await;
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        AnchorOverrides {
+            evm: Some(Arc::new(FailingProvider {
+                message: "synthetic outage".into(),
+            })),
+            ..canned_anchors()
+        },
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let old_hex = format!("0x{}", hex::encode(old_leaf));
+    let by_leaf = format!("/trees/by-leaf/{old_hex}?method=evm");
+
+    let (status, body) = get_json(&router, &by_leaf, Some(&token)).await;
+    assert_eq!(status, StatusCode::GONE, "nothing pending yet: {body}");
+
+    let _ = post_leaves(&router, &token, std::slice::from_ref(&old_hex)).await;
+    tx.send(SealTick { now: 2000 }).await.unwrap();
+    let mut last = (StatusCode::GONE, serde_json::Value::Null);
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        last = get_json(&router, &by_leaf, Some(&token)).await;
+        if last.0 != StatusCode::GONE {
+            break;
+        }
+    }
+    let (status, body) = last;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "pending", "{body}");
+    assert_eq!(body["method"], "evm", "{body}");
+    assert!(body["epoch"].as_u64().unwrap() > 1, "the new epoch: {body}");
+    assert_eq!(body["leaf"], old_hex, "{body}");
+}
+
+/// OW1.6b F2: a custom chain id whose payload `network` (`evm:<id>`) the SDK
+/// cannot name (`custom:0`, or an id above 2^53-1) refuses to start: the
+/// self-check would answer every EVM witness "unsupported network" while each
+/// epoch still spends a transaction. A custom id the SDK names starts.
+#[tokio::test]
+async fn evm_custom_chain_the_sdk_cannot_name_refuses_to_start() {
+    for chain in ["custom:0", "custom:9007199254740992"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_anchor_toml(
+            tmp.path().to_path_buf(),
+            &format!("[anchors.evm]\nchain = \"{chain}\""),
+        );
+        let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+            .await
+            .unwrap();
+        let (_tx, rx) = mpsc::channel::<SealTick>(8);
+        let err = match build_app_with_anchors(
+            cfg,
+            identity,
+            IdentityClaimOverrides::default(),
+            SealDriver::Channel(rx),
+            canned_anchors(),
+        )
+        .await
+        {
+            Ok(_) => panic!("{chain}: a chain the SDK cannot name must refuse to start"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("anchors.evm.chain"), "{chain}: {err}");
+        assert!(err.contains(chain), "{chain}: {err}");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nchain = \"custom:31337\"",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let _app = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .expect("a custom chain id the SDK names starts");
+}
+
+/// OW1.6b N8: `anchors.evm.not_found_timeout_secs = 0` refuses to start: an
+/// anchor a lagging node answers "not found" in the tick it was sent would be
+/// abandoned at once and re-anchored, again and again.
+#[tokio::test]
+async fn evm_zero_not_found_timeout_refuses_to_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg_with_anchor_toml(
+        tmp.path().to_path_buf(),
+        "[anchors.evm]\nnot_found_timeout_secs = 0",
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let err = match build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    {
+        Ok(_) => panic!("a zero not-found timeout must refuse to start"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("anchors.evm.not_found_timeout_secs"), "{err}");
+}
+
+/// OW2.2 N9: an (epoch, method) whose anchor reached the fault cap
+/// (`max_anchor_faults`, OW1.6 M4) is never re-anchored without ops, so the
+/// fetch routes must not answer it as an ordinary 202 pending (a client would
+/// poll forever): they answer 503 with `"status":"anchor_stalled"`.
+#[tokio::test]
+async fn fault_capped_method_answers_anchor_stalled() {
+    use aqua_timestamp_core::{
+        accumulator::Accumulator,
+        epoch::EpochRecord,
+        sealer::DEFAULT_MAX_ANCHOR_FAULTS,
+        storage::Store,
+        witness::{AnchorMethod, EpochBatch, PendingEpoch},
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = [0x4c; 32];
+    {
+        let store = Store::open(tmp.path()).expect("store");
+        let acc = Accumulator::new(1, 940, 60);
+        acc.append_batch(&[leaf], CLIENT_A_DID).unwrap();
+        let snapshot = acc.swap_and_open_next(1000, 1000, 60);
+        let leaves: Vec<[u8; 32]> = snapshot.leaves.iter().map(|e| e.leaf).collect();
+        let batch = EpochBatch::prepare(&leaves).unwrap().expect("batch");
+        let mut pending = PendingEpoch::new(&snapshot, &batch, vec![AnchorMethod::Evm]);
+        for _ in 0..DEFAULT_MAX_ANCHOR_FAULTS {
+            pending.count_anchor_fault(AnchorMethod::Evm);
+        }
+        let record = EpochRecord {
+            id: 1,
+            opened_at: 940,
+            closed_at: 1000,
+            merkle_root: [0x11; 32],
+            leaf_count: 1,
+            hash_type: "FIPS_202-SHA3-256".into(),
+        };
+        store
+            .persist_sealed_epoch_with_pending(&record, &snapshot.leaves, &[], Some(&pending))
+            .expect("persist");
+    }
+    let cfg = cfg(
+        vec![CLIENT_A_DID.to_string()],
+        tmp.path().to_path_buf(),
+        10_000,
+    );
+    let identity = ServiceIdentity::from_mnemonic(SERVICE_MNEMONIC, &cfg.identity)
+        .await
+        .unwrap();
+    let (_tx, rx) = mpsc::channel::<SealTick>(8);
+    let (router, _state) = build_app_with_anchors(
+        cfg,
+        identity,
+        IdentityClaimOverrides::default(),
+        SealDriver::Channel(rx),
+        canned_anchors(),
+    )
+    .await
+    .unwrap();
+    let token = mint_bearer_for(&router, CLIENT_A_DID, CLIENT_A_PK).await;
+    let leaf_hex = format!("0x{}", hex::encode(leaf));
+
+    for uri in [
+        format!("/trees/by-leaf/{leaf_hex}?method=evm"),
+        "/trees?epoch=1&method=evm".to_string(),
+    ] {
+        let (status, body) = get_json(&router, &uri, Some(&token)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
+        assert_eq!(body["status"], "anchor_stalled", "{uri}: {body}");
+        assert_eq!(body["method"], "evm", "{uri}: {body}");
+        assert_eq!(body["epoch"], 1, "{uri}: {body}");
+    }
 }
