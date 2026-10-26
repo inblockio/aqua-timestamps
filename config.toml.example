@@ -100,5 +100,7 @@ min_balance_multiplier = 2
 # rpc_url             = "https://ethereum-sepolia-rpc.publicnode.com"
 # # Maximum number of wallets tracked in the contributor pool.
 # max_pool_size       = 500
-# # The wallet address whose balance is monitored.
-# wallet_address      = "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f"
+# # The wallet address whose incoming transfers are watched. Default: the
+# # service identity's own address (derived from the mnemonic), the key that
+# # sends the anchors. Set it only to watch a different wallet.
+# wallet_address      = "0x..."

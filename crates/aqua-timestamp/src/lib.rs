@@ -343,7 +343,7 @@ pub async fn build_app_with_anchors(
 
     // Leaderboard: spawn the block watcher if enabled.
     if cfg.leaderboard.enabled {
-        let wallet_str = &cfg.leaderboard.wallet_address;
+        let wallet_str = cfg.leaderboard.watched_address(&identity.address_eip55);
         match wallet_str.parse::<alloy::primitives::Address>() {
             Ok(addr) => {
                 let chain_id = cfg.leaderboard_chain_id();
@@ -369,6 +369,7 @@ pub async fn build_app_with_anchors(
         }
     }
 
+    let rendered_landing_html = landing::render(&identity);
     let rendered_docs_html = docs::render_html(&identity);
     let rendered_skill_md = docs::render_skill_md(&identity);
     let rendered_skill_auth_md = docs::render_skill_auth_md(&identity);
@@ -408,6 +409,7 @@ pub async fn build_app_with_anchors(
         store,
         signer,
         witness_ctx,
+        landing_html: rendered_landing_html,
         docs_html: rendered_docs_html,
         well_known_skill_md: rendered_skill_md,
         well_known_skill_auth_md: rendered_skill_auth_md,

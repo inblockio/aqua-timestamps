@@ -29,6 +29,9 @@ pub struct AppState {
     /// the state so handlers that surface "what would this leaf look like
     /// if we re-minted now?" can reach the same configuration.
     pub witness_ctx: WitnessContext,
+    /// Pre-rendered landing page served at `GET /`. Built once at boot so
+    /// its wallet rows name the loaded identity's address (D77, key a).
+    pub landing_html: String,
     /// Pre-rendered self-served agent integration guide. Browser-friendly
     /// HTML served at `GET /docs`. Built once at boot from the loaded
     /// identity so DNS / IP / DID values are correct without an edit.

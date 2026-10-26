@@ -449,9 +449,19 @@ pub struct LeaderboardConfig {
     #[serde(default = "default_leaderboard_max_pool_size")]
     pub max_pool_size: usize,
 
-    /// The wallet address whose balance is monitored.
-    #[serde(default = "default_leaderboard_wallet_address")]
-    pub wallet_address: String,
+    /// The wallet address whose incoming transfers are watched. `None`
+    /// (the default) means the service identity's own address, the key
+    /// that sends the anchors (D77, key a). An explicit value wins.
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+}
+
+impl LeaderboardConfig {
+    /// The address the watcher follows: the configured one, else the
+    /// service identity's address.
+    pub fn watched_address<'a>(&'a self, service_address: &'a str) -> &'a str {
+        self.wallet_address.as_deref().unwrap_or(service_address)
+    }
 }
 
 fn default_leaderboard_enabled() -> bool {
@@ -466,9 +476,6 @@ fn default_leaderboard_rpc_url() -> String {
 fn default_leaderboard_max_pool_size() -> usize {
     500
 }
-fn default_leaderboard_wallet_address() -> String {
-    "0x55Fcf9F8C1287cB462aa3c1C97E2298d221c634f".to_string()
-}
 
 impl Default for LeaderboardConfig {
     fn default() -> Self {
@@ -477,7 +484,7 @@ impl Default for LeaderboardConfig {
             poll_interval_secs: default_leaderboard_poll_interval_secs(),
             rpc_url: default_leaderboard_rpc_url(),
             max_pool_size: default_leaderboard_max_pool_size(),
-            wallet_address: default_leaderboard_wallet_address(),
+            wallet_address: None,
         }
     }
 }
@@ -626,6 +633,32 @@ mod tests {
         assert!(!cfg.leaderboard.enabled);
         assert_eq!(cfg.leaderboard.poll_interval_secs, 30);
         assert_eq!(cfg.leaderboard.max_pool_size, 100);
+    }
+
+    /// D77 (key a): an unconfigured host watches the live service sending
+    /// key; an explicitly configured address still wins.
+    #[test]
+    fn leaderboard_watches_the_service_address_unless_configured() {
+        const SERVICE: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let cfg: Config = toml::from_str("[server]\nlisten = \"0.0.0.0:3000\"").unwrap();
+        assert_eq!(cfg.leaderboard.wallet_address, None);
+        assert_eq!(cfg.leaderboard.watched_address(SERVICE), SERVICE);
+        assert_eq!(
+            LeaderboardConfig::default().watched_address(SERVICE),
+            SERVICE
+        );
+
+        let toml_str = r#"
+            [server]
+            listen = "0.0.0.0:3000"
+            [leaderboard]
+            wallet_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.leaderboard.watched_address(SERVICE),
+            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        );
     }
 
     #[test]
