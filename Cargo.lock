@@ -452,12 +452,9 @@ dependencies = [
  "alloy-primitives",
  "alloy-signer",
  "async-trait",
- "coins-bip32",
- "coins-bip39",
  "k256 0.13.4",
  "rand 0.8.6",
  "thiserror 2.0.18",
- "zeroize",
 ]
 
 [[package]]
@@ -689,17 +686,21 @@ dependencies = [
 
 [[package]]
 name = "aqua-evm-provider"
-version = "7.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?rev=b8859a1682784050b3ec2f17244bb098f7c191f4#b8859a1682784050b3ec2f17244bb098f7c191f4"
+version = "8.0.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v8.0.0#e1afd3de54d5a5e120a05b9c021f55555fae3d12"
 dependencies = [
- "alloy",
  "aqua-rs-sdk",
  "async-trait",
+ "coins-bip32",
+ "coins-bip39",
  "futures",
  "hex",
+ "k256 0.14.0",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "serde_with",
+ "sha3 0.10.9",
  "tokio",
  "warp",
  "webbrowser",
@@ -707,8 +708,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-qualified-pki"
-version = "7.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?rev=b8859a1682784050b3ec2f17244bb098f7c191f4#b8859a1682784050b3ec2f17244bb098f7c191f4"
+version = "8.0.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v8.0.0#e1afd3de54d5a5e120a05b9c021f55555fae3d12"
 dependencies = [
  "aqua-rs-sdk",
  "const-oid 0.9.6",
@@ -724,8 +725,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-rs-sdk"
-version = "7.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?rev=b8859a1682784050b3ec2f17244bb098f7c191f4#b8859a1682784050b3ec2f17244bb098f7c191f4"
+version = "8.0.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v8.0.0#e1afd3de54d5a5e120a05b9c021f55555fae3d12"
 dependencies = [
  "async-trait",
  "base64 0.21.7",
@@ -887,8 +888,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-tsa-provider"
-version = "7.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?rev=b8859a1682784050b3ec2f17244bb098f7c191f4#b8859a1682784050b3ec2f17244bb098f7c191f4"
+version = "8.0.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v8.0.0#e1afd3de54d5a5e120a05b9c021f55555fae3d12"
 dependencies = [
  "aqua-qualified-pki",
  "aqua-rs-sdk",
@@ -1323,12 +1324,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bech32"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,6 +1402,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdd35008169921d80bc60d3d0ab416eecb028c4cd653352907921d95084790be"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1457,7 +1453,6 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
- "sha2 0.10.9",
  "tinyvec",
 ]
 
@@ -1643,53 +1638,50 @@ dependencies = [
 
 [[package]]
 name = "coins-bip32"
-version = "0.12.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2073678591747aed4000dd468b97b14d7007f7936851d3f2f01846899f5ebf08"
+checksum = "cfc8f6b87591355b762ca5eace648c2b403a0a96b72021bcc09dae02a1244fa4"
 dependencies = [
  "bs58",
  "coins-core",
- "digest 0.10.7",
- "hmac 0.12.1",
- "k256 0.13.4",
+ "digest 0.11.3",
+ "hmac 0.13.0",
+ "k256 0.14.0",
+ "primeorder 0.14.0",
  "serde",
- "sha2 0.10.9",
+ "sha2 0.11.1",
+ "subtle",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
 name = "coins-bip39"
-version = "0.12.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74b169b26623ff17e9db37a539fe4f15342080df39f129ef7631df7683d6d9d4"
+checksum = "a30335dbf443299d18ad631e1fd2a87a7c4c9fb01d89c726b2ebfd1a145bbb83"
 dependencies = [
- "bitvec",
  "coins-bip32",
- "hmac 0.12.1",
- "once_cell",
+ "hmac 0.13.0",
  "pbkdf2",
- "rand 0.8.6",
- "sha2 0.10.9",
+ "rand 0.10.3",
+ "sha2 0.11.1",
+ "subtle",
  "thiserror 1.0.69",
+ "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
 name = "coins-core"
-version = "0.12.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62b962ad8545e43a28e14e87377812ba9ae748dd4fd963f4c10e9fcc6d13475b"
+checksum = "0f5b1057c839d4bded1b83b9450ca5ecb0356484ec93f77d6675d58aa9d1e54b"
 dependencies = [
- "base64 0.21.7",
- "bech32",
- "bs58",
- "const-hex",
- "digest 0.10.7",
- "generic-array",
+ "digest 0.11.3",
+ "hybrid-array",
  "ripemd",
- "serde",
- "sha2 0.10.9",
- "sha3 0.10.9",
- "thiserror 1.0.69",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2173,6 +2165,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.1",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -3966,12 +3959,12 @@ dependencies = [
 
 [[package]]
 name = "pbkdf2"
-version = "0.12.2"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+checksum = "112d82ceb8c5bf524d9af484d4e4970c9fd5a0cc15ba14ad93dccd28873b0629"
 dependencies = [
- "digest 0.10.7",
- "hmac 0.12.1",
+ "digest 0.11.3",
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -4347,6 +4340,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+dependencies = [
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4592,11 +4594,11 @@ dependencies = [
 
 [[package]]
 name = "ripemd"
-version = "0.1.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd124222d17ad93a644ed9d011a40f4fb64aa54275c08cc216524a9ea82fb09f"
+checksum = "4dd4211456b4172d7e44261920c25acf07367c4f04bb5f5d54fc21b090d9b159"
 dependencies = [
- "digest 0.10.7",
+ "digest 0.11.3",
 ]
 
 [[package]]

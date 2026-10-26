@@ -20,17 +20,12 @@ rust-version = "1.85"
 # annotated release tag, canonical https URL, one git source per repo.
 # aqua-evm-provider and aqua-tsa-provider are crates of the aqua-rs-sdk repo and
 # share its pin.
-#
-# TEMPORARY (OW1, branch ow/1-dual-anchor): pinned by rev to aqua-rs-sdk main
-# b8859a16 for the two-phase batch producer (#213 prepare_batch_timestamp /
-# finish_batch_timestamp) and #238. No SDK release tag holds them yet (newest is
-# v7.0.0, 2026-10-18). The merge of this branch into aqua-timestamps main waits
-# for the release train: repin to the first release tag that contains b8859a16.
-aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4", default-features = false, features = ["native"] }
-aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
-aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
+# Pinned to the train release v8.0.0 (commit e1afd3de54d5a5e120a05b9c021f55555fae3d12, aqua-ops train/train.toml).
+aqua-rs-sdk       = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v8.0.0", default-features = false, features = ["native"] }
+aqua-evm-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v8.0.0" }
+aqua-tsa-provider = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v8.0.0" }
 # Test-only (OW1.1 TSA token fixture), same repo and pin as aqua-rs-sdk.
-aqua-qualified-pki = { git = "https://github.com/inblockio/aqua-rs-sdk", rev = "b8859a1682784050b3ec2f17244bb098f7c191f4" }
+aqua-qualified-pki = { git = "https://github.com/inblockio/aqua-rs-sdk", tag = "v8.0.0" }
 aqua-auth         = { git = "https://github.com/inblockio/aqua-auth", tag = "v0.9.0", default-features = false, features = ["http"] }
 
 # Async + HTTP
