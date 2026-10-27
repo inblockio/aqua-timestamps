@@ -315,6 +315,9 @@ is exercised over the wire as a real user would experience it.
 
 ### Definition of the test
 
+(2026-10-27: the script was removed; the test is the
+`aqua-timestamp-e2e live` subcommand, see `crates/aqua-timestamp-e2e/README.md`.)
+
 A script `tests/e2e/live_roundtrip.sh` (or `tests/e2e/live_roundtrip.rs`
 if a binary is cleaner) does the following, against `https://timestamp.inblock.io`:
 

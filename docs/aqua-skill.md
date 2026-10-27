@@ -267,12 +267,16 @@ deployed service or an in-process server, for all three DID methods.
 To smoke-test against this deployment:
 
 ```sh
-BASE_URL={BASE_URL} bash tests/e2e/live_roundtrip.sh
+cargo run -p aqua-timestamp-e2e -- live --base-url {BASE_URL}
 ```
 
-The wrapper looks up a test client mnemonic from the local
-gnome-keyring, runs the SIWE -> submit -> wait-for-seal -> witness
--> verify cycle for both anchor methods, and exits `STATUS = OK`.
+It checks `/health` and reports `/version`, then runs the SIWE ->
+submit -> wait-for-seal -> witness -> SDK verify cycle for both anchor
+methods (EVM and qTSA) as a standing secp256k1 identity kept in
+`~/.local/state/openwitness-seal-e2e/` (created once on the first run).
+The production host is refused unless `--allow-production` is passed.
+The reader asks `https://ethereum-sepolia-rpc.publicnode.com` for a
+Sepolia anchor unless `--evm-rpc-url` names another RPC.
 
 ## Quick reference
 

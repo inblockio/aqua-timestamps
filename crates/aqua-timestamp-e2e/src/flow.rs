@@ -47,7 +47,7 @@ pub enum SealTrigger {
 
 /// Cap on how long we will poll `/v1/schedule` before declaring failure.
 ///
-/// `live_roundtrip` against a 600s production epoch picks
+/// `live` against a 600s production epoch picks
 /// `PollBudget::from_epoch_close(close_at, now, 30)`; selfcheck (where the
 /// seal is driven manually) picks a small fixed budget.
 #[derive(Debug, Clone)]
@@ -85,6 +85,8 @@ impl PollBudget {
 #[derive(Debug)]
 pub struct E2eOutcome {
     pub base_url: String,
+    /// `revision` of the server's `GET /version` (the commit it was built from).
+    pub server_revision: String,
     pub server_did: String,
     pub client_did: String,
     pub leaf_hex: String,
@@ -340,8 +342,8 @@ fn eip55(addr: &[u8; 20]) -> String {
 
 /// Where the reader's external facts (chain, TSA trust) come from.
 pub enum ReaderConfig {
-    /// Real hosts: the EVM chain over RPC (`evm_rpc_url`, else the SDK host's own default for
-    /// the witness' network) and the EU trust list for TSA tokens.
+    /// Real hosts: the EVM chain over RPC (`evm_rpc_url`, else [`DEFAULT_SEPOLIA_RPC_URL`] for a
+    /// `sepolia` witness, see [`reader_evm_endpoint`]) and the EU trust list for TSA tokens.
     Live { evm_rpc_url: Option<String> },
     /// Injected hosts: the in-process dry run, where the aggregator's own simulated chain and
     /// TSA are also the reader's hosts. Never used against a remote.
@@ -353,18 +355,10 @@ impl ReaderConfig {
         match self {
             Self::Injected(h) => Ok(h.clone()),
             Self::Live { evm_rpc_url } => {
-                let mut chain =
-                    aqua_evm_provider::EthBlockchainHost::new(tokio::runtime::Handle::current());
-                if let Some(url) = evm_rpc_url {
-                    let chain_id =
-                        aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(evm_network)
-                            .with_context(|| {
-                                format!(
-                                    "witness network {evm_network:?} is not one the SDK verifies"
-                                )
-                            })?;
-                    chain = chain.with_endpoint(chain_id, url.clone());
-                }
+                let (chain_id, url) = reader_evm_endpoint(evm_network, evm_rpc_url.as_deref())?;
+                let chain =
+                    aqua_evm_provider::EthBlockchainHost::new(tokio::runtime::Handle::current())
+                        .with_endpoint(chain_id, url);
                 Ok(ReaderHosts {
                     blockchain: Arc::new(chain),
                     web: Arc::new(aqua_tsa_provider::TsaWebHost::new()),
@@ -372,6 +366,28 @@ impl ReaderConfig {
                 })
             }
         }
+    }
+}
+
+/// RPC the live reader asks for a `sepolia` witness when `--evm-rpc-url` is not given (the same
+/// public endpoint the aggregator anchors through, `deploy/config.toml`).
+pub const DEFAULT_SEPOLIA_RPC_URL: &str = "https://ethereum-sepolia-rpc.publicnode.com";
+
+/// The reader's EVM endpoint for the witness' network: `(chain id, RPC URL)`.
+///
+/// `override_url` (`--evm-rpc-url`) wins for any network the SDK verifies; without it only
+/// `sepolia` has a default ([`DEFAULT_SEPOLIA_RPC_URL`]). Any other network without the flag,
+/// and a network the SDK does not verify, is an error, never a pass. (The SDK host has no
+/// endpoints of its own: without one the anchor is `not_evaluable`.)
+pub fn reader_evm_endpoint(evm_network: &str, override_url: Option<&str>) -> Result<(u64, String)> {
+    let chain_id = aqua_rs_sdk::core::evm_anchor::evm_chain_id_for_network(evm_network)
+        .with_context(|| format!("witness network {evm_network:?} is not one the SDK verifies"))?;
+    match override_url {
+        Some(url) => Ok((chain_id, url.to_string())),
+        None if evm_network == "sepolia" => Ok((chain_id, DEFAULT_SEPOLIA_RPC_URL.to_string())),
+        None => bail!(
+            "no default EVM RPC endpoint for witness network {evm_network:?}: pass --evm-rpc-url"
+        ),
     }
 }
 
@@ -418,7 +434,32 @@ pub async fn run_full_flow(
         ),
     );
 
-    // 2. /.well-known/aqua-identity
+    // 2a. Liveness and the build that serves: GET /health must be 200, GET /version is reported.
+    let resp = http_get(&client, &format!("{base_url}/health"), None).await?;
+    if resp.status() != StatusCode::OK {
+        bail!("GET /health: HTTP {}", resp.status());
+    }
+    let resp = http_get(&client, &format!("{base_url}/version"), None).await?;
+    if !resp.status().is_success() {
+        bail!("GET /version: HTTP {}", resp.status());
+    }
+    let server_version: Value = resp.json().await.context("version json")?;
+    let server_revision = server_version["revision"]
+        .as_str()
+        .ok_or_else(|| anyhow!("/version has no string `revision`: {server_version}"))?
+        .to_string();
+    log(
+        2,
+        &format!(
+            "/health 200, /version {} {} revision={} dirty={}",
+            server_version["service"].as_str().unwrap_or("?"),
+            server_version["version"].as_str().unwrap_or("?"),
+            server_revision,
+            server_version["dirty"],
+        ),
+    );
+
+    // 2b. /.well-known/aqua-identity
     let identity_url = format!("{base_url}/.well-known/aqua-identity");
     let resp = http_get(&client, &identity_url, None).await?;
     if !resp.status().is_success() {
@@ -631,10 +672,54 @@ pub async fn run_full_flow(
 
     Ok(E2eOutcome {
         base_url: base_url.to_string(),
+        server_revision,
         server_did,
         client_did: primary.did.clone(),
         leaf_hex,
         epoch_id,
         witnesses: verdicts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
+
+    #[test]
+    fn live_reader_defaults_to_the_sepolia_public_rpc() {
+        let (chain_id, url) = reader_evm_endpoint("sepolia", None).unwrap();
+        assert_eq!(chain_id, SEPOLIA_CHAIN_ID);
+        assert_eq!(url, "https://ethereum-sepolia-rpc.publicnode.com");
+    }
+
+    #[test]
+    fn evm_rpc_url_overrides_the_default() {
+        let (chain_id, url) =
+            reader_evm_endpoint("sepolia", Some("https://rpc.example/sepolia")).unwrap();
+        assert_eq!(chain_id, SEPOLIA_CHAIN_ID);
+        assert_eq!(url, "https://rpc.example/sepolia");
+    }
+
+    #[test]
+    fn networks_without_a_default_need_the_flag() {
+        // The SDK verifies mainnet and holesky, but this crate knows no default for them.
+        for net in ["mainnet", "holesky"] {
+            assert!(reader_evm_endpoint(net, None).is_err(), "{net}");
+        }
+        let (chain_id, _) = reader_evm_endpoint("mainnet", Some("https://rpc.example/1")).unwrap();
+        assert_eq!(chain_id, 1);
+    }
+
+    #[test]
+    fn unknown_network_is_an_error_even_with_the_flag() {
+        for net in ["", "goerli", "bogus"] {
+            assert!(reader_evm_endpoint(net, None).is_err(), "{net:?}");
+            assert!(
+                reader_evm_endpoint(net, Some("https://rpc.example")).is_err(),
+                "{net:?}"
+            );
+        }
+    }
 }

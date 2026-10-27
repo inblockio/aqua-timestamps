@@ -4,7 +4,8 @@ End-to-end client for the aqua-timestamp aggregator (OpenWitness). OW1.5, audit 
 
 ## What the main path asserts
 
-Sign in with the standing identity, submit the tip of a fresh one-file client tree, wait for
+Check `GET /health` (200) and report `GET /version` (the served revision), sign in with the
+standing identity, submit the tip of a fresh one-file client tree, wait for
 the seal, then fetch BOTH witnesses of the leaf (`/trees/by-leaf/{leaf}?method=evm` and
 `?method=qtsa`), merge both witness pairs into the client tree and run the SDK verifier
 (`Aquafier::verify_tree_sync`) on it. Asserted per method: the timestamp revision carries no
@@ -42,7 +43,12 @@ aqua-timestamp-e2e selfcheck [--identity-dir D]      # in-process aggregator, of
 aqua-timestamp-e2e selfcheck-all
 ```
 
-`--base-url` (or `OPENWITNESS_E2E_BASE_URL`) has no default and is printed. The production host
+`--base-url` (or `OPENWITNESS_E2E_BASE_URL`) has no default and is printed.
+
+The live reader's EVM host asks `https://ethereum-sepolia-rpc.publicnode.com` for a `sepolia`
+witness. `--evm-rpc-url` (or `OPENWITNESS_E2E_EVM_RPC_URL`) overrides it; any other network
+needs the flag, and a network the SDK does not verify is an error, never a pass. (The SDK v8.0.0
+host has no endpoints of its own: without one the anchor is `TIMESTAMP_NOT_EVALUABLE`.) The production host
 (`openwitness.org`, any subdomain) is refused unless `--allow-production`; that run belongs to
 OW2 / SP3.
 

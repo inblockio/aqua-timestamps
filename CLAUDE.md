@@ -209,11 +209,13 @@ See memory [[reference-server-agentic-hub]] for full server details and
   `genTime=1779012930`, signed under the Sectigo Qualified Time
   Stamping Root R45.
 - M-E2E: live + selfcheck client at `crates/aqua-timestamp-e2e/`.
-  Subcommands: `live`, `selfcheck`, `live-all`, `selfcheck-all`.
-  The wrapper at `tests/e2e/live_roundtrip.sh` runs the full flow
-  (SIWE -> submit -> wait for seal -> fetch evm witness -> fetch
-  qtsa witness -> verify L1 / L2 / L3 on both -> negative isolation
-  + no-bearer checks) and exits `STATUS = OK`.
+  Subcommands: `live`, `selfcheck`, `selfcheck-all`.
+  `cargo run -p aqua-timestamp-e2e -- live --base-url <URL>` runs the
+  full flow (`/health` + `/version` -> SIWE -> submit -> wait for seal
+  -> fetch evm and qtsa witness -> SDK verifier on both -> no-bearer
+  check) as the standing identity `~/.local/state/openwitness-seal-e2e/`;
+  production needs `--allow-production`. (The old wrapper
+  `tests/e2e/live_roundtrip.sh` was removed 2026-10-27, OW2.)
 
 **Session log:** [`docs/runbooks/session-2026-05-17-overnight-build.md`](docs/runbooks/session-2026-05-17-overnight-build.md).
 **Multi-DID + second Sepolia anchor:** [`docs/runbooks/multi-method-e2e-and-anchor-2026-05-17.md`](docs/runbooks/multi-method-e2e-and-anchor-2026-05-17.md).
