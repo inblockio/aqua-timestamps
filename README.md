@@ -173,7 +173,7 @@ buildx there, `docker compose up -d` against
 | **M1** Identity + SIWE auth | shipped 2026-05-17 (signed `service_claim_server` at `/.well-known/aqua-identity`, secp256k1+EIP-191 plus Ed25519 + P-256 clients verified) |
 | **M2** Accumulate + seal | shipped 2026-05-17 (600s epochs, deterministic RFC 9162 Merkle root, fjall LSM-tree storage) |
 | **M3** Witness revisions | shipped 2026-05-17 (aqua-node compatible `/trees/{tip}` plus `by-leaf` / `?epoch=&method=` extensions, DID isolation, restart durability) |
-| **M-E2E** Live roundtrip | shipped 2026-05-17 (`tests/e2e/live_roundtrip.sh` end-to-end, all three DID methods proven in-process) |
+| **M-E2E** Live roundtrip | shipped 2026-05-17 (end-to-end, all three DID methods proven in-process; now `aqua-timestamp-e2e live`, the old `tests/e2e/live_roundtrip.sh` wrapper was removed 2026-10-27) |
 | **M4** Real EVM anchor (Sepolia) | shipped 2026-05-17 (`CliEthTimestamper` against Sepolia at chain id 11155111; service wallet `0x55Fcf9F8...634f`) |
 | **M5** Real qTSA anchor | shipped 2026-05-17 (`TsaTimestamper` against `http://timestamp.sectigo.com/qualified`, eIDAS qualified chain) |
 | M6 Production hardening | pending (metrics, rate-limits per DID, fjall pruning, WAL, chaos test) |

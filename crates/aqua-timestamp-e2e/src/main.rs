@@ -62,7 +62,8 @@ enum Cmd {
         /// Seconds between polls.
         #[arg(long, default_value_t = 5)]
         poll_interval_secs: u64,
-        /// EVM RPC URL of the reader's chain host (default: the SDK host's own endpoint).
+        /// EVM RPC URL of the reader's chain host. Default for a `sepolia` witness:
+        /// https://ethereum-sepolia-rpc.publicnode.com; any other network needs this flag.
         #[arg(long, env = "OPENWITNESS_E2E_EVM_RPC_URL")]
         evm_rpc_url: Option<String>,
     },
@@ -186,6 +187,7 @@ fn print_summary(outcome: &crate::flow::E2eOutcome) {
     println!();
     println!("------ e2e summary ------");
     println!("base_url       = {}", outcome.base_url);
+    println!("server_rev     = {}", outcome.server_revision);
     println!("server_did     = {}", outcome.server_did);
     println!("client_did     = {}", outcome.client_did);
     println!("epoch_id       = {}", outcome.epoch_id);

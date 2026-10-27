@@ -564,7 +564,7 @@ Deliverables:
 - Allowlist a test DID on the deployed `timestamp.inblock.io` (operational,
   not code).
 - One integration test under `tests/live_roundtrip.rs` (feature-gated)
-  that mirrors `tests/e2e/live_roundtrip.sh` from the server repo: submit
+  that mirrors the `aqua-timestamp-e2e live` flow of the server repo: submit
   one hash, await the EVM witness, await the qTSA witness, verify both.
 - Update the server's `runbooks/` with a "verifying the client against
   the live deployment" page.
