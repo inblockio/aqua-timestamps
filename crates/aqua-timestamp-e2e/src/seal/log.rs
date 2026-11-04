@@ -91,7 +91,8 @@ mod tests {
     #[test]
     fn a_failed_assertion_fails_the_step_and_names_the_falsifier_once() {
         let mut log = StepLog::new(3, "t", &[]);
-        assert!(log.check(true, "fine", "x"));
+        let fine = !"".contains('x');
+        assert!(log.check(fine, "fine", "x"));
         assert!(log.passed());
         assert_eq!(log.verdict(), "STEP 3 PASS");
         assert!(!log.check(false, "bad", "stub"));

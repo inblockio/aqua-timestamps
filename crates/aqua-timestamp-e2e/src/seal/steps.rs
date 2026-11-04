@@ -551,7 +551,7 @@ async fn step1_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
             return Ok(());
         }
     };
-    log.check(true, "evaluate_seal_witnesses returned Ok", "refusal");
+    log.l("evaluate_seal_witnesses returned Ok");
     log.l(format!(
         "accepted anchor = {}; witnesses = {:?}",
         accepted.anchor(),
@@ -1750,18 +1750,14 @@ fn step7_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
     };
     match pair_coverage(pairs, OWN_LEAVES, leaf_count) {
         Ok(PairCoverage::Full { pairs }) => {
-            log.check(
-                true,
-                format!("{pairs} witness pairs read = 2 x leaf_count {leaf_count}: full coverage of epoch {epoch}"),
-                FALS,
-            );
+            log.l(format!(
+                "{pairs} witness pairs read = 2 x leaf_count {leaf_count}: full coverage of epoch {epoch}"
+            ));
         }
         Ok(PairCoverage::Partial { pairs, leaf_count }) => {
-            log.check(
-                true,
-                format!("{pairs} witness pairs read = 2 x {OWN_LEAVES} own leaves"),
-                FALS,
-            );
+            log.l(format!(
+                "{pairs} witness pairs read = 2 x {OWN_LEAVES} own leaves"
+            ));
             log.l(format!(
                 "partial coverage of epoch {epoch}: {pairs} own pairs visible, leaf_count {leaf_count}; other DIDs' witnesses are not readable by this identity"
             ));

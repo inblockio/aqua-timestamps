@@ -70,6 +70,23 @@ mod tests {
         assert!(sdk_rev_in("").is_err());
     }
 
+    /// Ruling 3: an assertion line that cannot fail is no evidence. Line breaks do not hide one.
+    #[test]
+    fn no_assertion_line_is_hardwired_to_pass() {
+        let needle = concat!("check(", "true");
+        for (name, src) in [
+            ("live.rs", include_str!("live.rs")),
+            ("log.rs", include_str!("log.rs")),
+            ("replay.rs", include_str!("replay.rs")),
+            ("run_dir.rs", include_str!("run_dir.rs")),
+            ("steps.rs", include_str!("steps.rs")),
+            ("tamper.rs", include_str!("tamper.rs")),
+        ] {
+            let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(!flat.contains(needle), "{name} holds a {needle}");
+        }
+    }
+
     /// The replay guarantee, held by the source: the replay path and everything it reads cannot
     /// name an HTTP client, a session or the identity. A new use of one fails here at once.
     #[test]
