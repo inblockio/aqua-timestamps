@@ -29,7 +29,7 @@ use aqua_timestamp_e2e::seal::tamper::{
     alter_p_key_kept, link_of, rekey_bad_signature, relink_flipped_token,
 };
 use aqua_timestamp_e2e::selfcheck::run_seal_in_process;
-use aqua_timestamp_e2e::witness::{ReaderHosts, WitnessMethod};
+use aqua_timestamp_e2e::witness::{fetch_served, ReaderHosts, WitnessError, WitnessMethod};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::OnceCell;
@@ -621,8 +621,8 @@ async fn m1_an_addressed_p_with_a_bad_signature_runs_the_signature_check() {
 enum Answer {
     /// Read the request, then close the connection: a transport error at the client.
     Hangup,
-    /// A 200 that promises more body than it sends: the body read fails at the client.
-    Truncated,
+    /// An answer that promises more body than it sends: the body read fails at the client.
+    Truncated(u16),
     Http(u16, String),
 }
 
@@ -665,7 +665,7 @@ async fn scripted(answer: impl Fn(&str, usize) -> Answer + Send + Sync + 'static
                 };
                 let reply = match answer(&line, before) {
                     Answer::Hangup => return,
-                    Answer::Truncated => http_reply(200, 1000, "{"),
+                    Answer::Truncated(status) => http_reply(status, 1000, "{"),
                     Answer::Http(status, body) => http_reply(status, body.len(), &body),
                 };
                 let _ = stream.write_all(reply.as_bytes()).await;
@@ -748,7 +748,7 @@ async fn wait_for_seal_retries_a_transport_error_and_a_5xx_logging_each_attempt(
     let server = scripted(|_, n| match n {
         0 => http(502, "<html>bad gateway</html>"),
         1 => Answer::Hangup,
-        2 => Answer::Truncated,
+        2 => Answer::Truncated(200),
         3 => http(503, ""),
         4 => http(200, r#"{"last_sealed_epoch_id":6}"#),
         _ => http(200, r#"{"last_sealed_epoch_id":7}"#),
@@ -816,7 +816,7 @@ async fn the_epoch_reads_retry_a_transport_error_and_a_5xx_and_keep_the_served_b
     let server = scripted(|line, n| match (line, n) {
         (EVM, 0) => http(502, "<html>"),
         (QTSA, 0) => Answer::Hangup,
-        (EPOCHS, 0) => Answer::Truncated,
+        (EPOCHS, 0) => Answer::Truncated(200),
         (EVM, _) => http(200, r#"{"revisions":{"evm":1}}"#),
         (QTSA, _) => http(200, r#"{"revisions":{"qtsa":1}}"#),
         _ => http(200, r#"{"epochs":[]}"#),
@@ -1278,4 +1278,127 @@ async fn the_run_directory_is_private_even_if_it_existed_before() {
     let server = aggregator(|| http(500, "refused")).await;
     let _ = seal_against(&server, tmp.path(), &run.reader, None).await;
     assert_eq!(mode(&dir), 0o700);
+}
+
+// ---- Ruling 11: the witness poll -----------------------------------------------------------------
+
+const WITNESS: &str = "GET /trees/by-leaf/0xabc?method=qtsa";
+
+async fn poll_witness(
+    server: &Scripted,
+    millis: u64,
+) -> (Result<(u16, String), WitnessError>, Vec<String>) {
+    let mut lines = Vec::new();
+    let result = fetch_served(
+        &reqwest::Client::new(),
+        &server.url,
+        "0xabc",
+        "token",
+        WitnessMethod::Qtsa,
+        &budget(millis),
+        &mut |line| lines.push(line),
+    )
+    .await;
+    (result, lines)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_witness_poll_retries_a_5xx_and_a_transport_error_logging_each_attempt() {
+    let server = scripted(|_, n| match n {
+        0 => http(503, "<html>"),
+        1 => Answer::Hangup,
+        2 => http(202, r#"{"status":"pending"}"#),
+        3 => http(502, ""),
+        _ => http(200, "the witness"),
+    })
+    .await;
+    let (result, lines) = poll_witness(&server, 30_000).await;
+    assert_eq!(result.unwrap(), (200, "the witness".to_string()));
+    assert_eq!(server.hits(WITNESS), 5);
+    assert_eq!(lines.len(), 3, "one line per failed attempt: {lines:?}");
+}
+
+/// A 200 whose body did not arrive is no empty witness: the read is repeated.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_witness_poll_takes_a_failed_body_read_on_a_200_as_a_transport_error() {
+    let server = scripted(|_, n| match n {
+        0 => Answer::Truncated(200),
+        _ => http(200, "the witness"),
+    })
+    .await;
+    let (result, lines) = poll_witness(&server, 30_000).await;
+    assert_eq!(result.unwrap(), (200, "the witness".to_string()));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_witness_poll_takes_a_404_and_any_other_4xx_as_final() {
+    let server = scripted(|_, _| http(404, "none")).await;
+    let (result, _) = poll_witness(&server, 30_000).await;
+    assert!(
+        matches!(result, Err(WitnessError::NotFound { .. })),
+        "{result:?}"
+    );
+    assert_eq!(server.hits(WITNESS), 1);
+    for status in [400, 403, 410, 429] {
+        let server = scripted(move |_, _| http(status, "no")).await;
+        let (result, _) = poll_witness(&server, 30_000).await;
+        assert!(
+            matches!(result, Err(WitnessError::Http { status: s, .. }) if s == status),
+            "{result:?}"
+        );
+        assert_eq!(server.hits(WITNESS), 1, "{status} was not retried");
+    }
+}
+
+/// A 4xx stays final even if its body does not arrive: what is retried is the read of an answer
+/// that may change, not a refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_body_read_on_a_4xx_stays_final() {
+    let server = scripted(|_, _| Answer::Truncated(404)).await;
+    let (result, lines) = poll_witness(&server, 30_000).await;
+    assert!(
+        matches!(result, Err(WitnessError::NotFound { .. })),
+        "{result:?}"
+    );
+    assert_eq!(server.hits(WITNESS), 1);
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_witness_poll_that_stays_on_a_5xx_ends_in_a_failed_witness() {
+    let server = scripted(|_, _| http(503, "down")).await;
+    let (result, lines) = poll_witness(&server, 1_000).await;
+    match result {
+        Err(WitnessError::Unreachable { error, .. }) => assert!(error.contains("503"), "{error}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(lines.len() >= 2, "{lines:?}");
+
+    // Seen pending first, then only 5xx: still a failed witness, and it says it was pending.
+    let server = scripted(|_, n| match n {
+        0 => http(202, r#"{"status":"pending"}"#),
+        _ => http(503, "down"),
+    })
+    .await;
+    let (result, _) = poll_witness(&server, 1_000).await;
+    assert!(
+        matches!(result, Err(WitnessError::StillPending { .. })),
+        "{result:?}"
+    );
+}
+
+/// What a failed witness does to the run: step 1 fails, it is not evaluated.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_witness_recorded_as_failed_fails_step_1() {
+    let run = run().await;
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(&run.dir, copy.path());
+    let mut status: Value = serde_json::from_str(&read(copy.path(), "fetch-status.json")).unwrap();
+    status["s1_qtsa"] = json!({"status": null, "error": "HTTP 503", "at": "t"});
+    std::fs::write(copy.path().join("fetch-status.json"), status.to_string()).unwrap();
+    let logs = steps_over_copy(&copy, Steps::All, run.reader.clone(), Duration::ZERO).await;
+    let one = logs.iter().find(|l| l.number() == 1).unwrap();
+    assert!(!one.passed(), "{:?}", one.lines());
+    assert!(!all_passed(&logs));
 }

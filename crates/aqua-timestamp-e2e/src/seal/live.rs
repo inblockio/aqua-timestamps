@@ -380,8 +380,12 @@ async fn submit_and_pull(
     .await?;
     println!("epoch {epoch_id} sealed at {}", utc());
 
-    let deadline = after_close(cfg.witness_grace);
-    let iv = cfg.poll_interval;
+    let budget = PollBudget {
+        deadline: after_close(cfg.witness_grace),
+        interval: cfg.poll_interval,
+    };
+    let show = |line: String| println!("{line}");
+    let (mut log1, mut log2, mut log3) = (show, show, show);
     let (r1e, r1q, r2q) = tokio::join!(
         fetch_served(
             client,
@@ -389,8 +393,8 @@ async fn submit_and_pull(
             &s1,
             &bearer,
             WitnessMethod::Evm,
-            deadline,
-            iv
+            &budget,
+            &mut log1
         ),
         fetch_served(
             client,
@@ -398,8 +402,8 @@ async fn submit_and_pull(
             &s1,
             &bearer,
             WitnessMethod::Qtsa,
-            deadline,
-            iv
+            &budget,
+            &mut log2
         ),
         fetch_served(
             client,
@@ -407,8 +411,8 @@ async fn submit_and_pull(
             &s2,
             &bearer,
             WitnessMethod::Qtsa,
-            deadline,
-            iv
+            &budget,
+            &mut log3
         ),
     );
     let mut fetch_status = serde_json::Map::new();
@@ -436,10 +440,7 @@ async fn submit_and_pull(
         &bearer,
         epoch_id,
         run,
-        PollBudget {
-            deadline,
-            interval: iv,
-        },
+        budget,
         &mut |line| println!("{line}"),
     )
     .await?;

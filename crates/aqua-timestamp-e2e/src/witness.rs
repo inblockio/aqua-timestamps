@@ -15,8 +15,10 @@ use aqua_rs_sdk::schema::tree::Tree;
 use aqua_rs_sdk::schema::{AnyRevision, AquaTreeWrapper, FileData};
 use aqua_rs_sdk::{Aquafier, BlockchainHost, VerificationResult, WebHost};
 use rand::RngCore;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde_json::Value;
+
+use crate::flow::{get_retrying, PollBudget};
 
 /// The two anchors every leaf must carry on the main path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,60 +225,65 @@ pub async fn fetch_witness(
     deadline: Instant,
     interval: Duration,
 ) -> Result<Fetched, WitnessError> {
+    let budget = PollBudget { deadline, interval };
     let (_, body) = fetch_served(
-        client, base_url, leaf_hex, bearer, method, deadline, interval,
+        client,
+        base_url,
+        leaf_hex,
+        bearer,
+        method,
+        &budget,
+        &mut |line| println!("{line}"),
     )
     .await?;
     parse_witness(method, &body)
 }
 
 /// The poll of [`fetch_witness`], returning the HTTP status and the raw body of the first
-/// success, unparsed, so a caller can persist the served bytes before it judges them.
+/// success, unparsed, so a caller can persist the served bytes before it judges them. A 202 polls
+/// on; a transport error, a failed body read or a 5xx is retried within the budget, logged per
+/// attempt (see [`get_retrying`]). A 404 and any other 4xx end the poll at once. A budget that
+/// runs out is a failed witness.
 pub async fn fetch_served(
     client: &Client,
     base_url: &str,
     leaf_hex: &str,
     bearer: &str,
     method: WitnessMethod,
-    deadline: Instant,
-    interval: Duration,
+    budget: &PollBudget,
+    log: &mut dyn FnMut(String),
 ) -> Result<(u16, String), WitnessError> {
     let url = format!(
         "{base_url}/trees/by-leaf/{leaf_hex}?method={}",
         method.as_str()
     );
     let mut pending: Option<String> = None;
-    let mut transport: Option<String> = None;
     loop {
-        match client.get(&url).bearer_auth(bearer).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                match status {
-                    StatusCode::ACCEPTED => pending = Some(pending_detail(&body)),
-                    StatusCode::NOT_FOUND => return Err(WitnessError::NotFound { method, body }),
-                    s if s.is_success() => return Ok((s.as_u16(), body)),
-                    s => {
-                        return Err(WitnessError::Http {
-                            method,
-                            status: s.as_u16(),
-                            body,
-                        })
-                    }
+        match get_retrying(client, &url, Some(bearer), budget, log).await {
+            Ok((202, body)) => {
+                let detail = pending_detail(&body);
+                if Instant::now() >= budget.deadline {
+                    return Err(WitnessError::StillPending { method, detail });
                 }
+                pending = Some(detail);
             }
-            Err(e) => transport = Some(e.to_string()),
-        }
-        if Instant::now() >= deadline {
-            return Err(match (pending, transport) {
-                (Some(detail), _) => WitnessError::StillPending { method, detail },
-                (None, error) => WitnessError::Unreachable {
+            Ok((404, body)) => return Err(WitnessError::NotFound { method, body }),
+            Ok((status, body)) if (200..300).contains(&status) => return Ok((status, body)),
+            Ok((status, body)) => {
+                return Err(WitnessError::Http {
                     method,
-                    error: error.unwrap_or_default(),
-                },
-            });
+                    status,
+                    body,
+                })
+            }
+            Err(error) => {
+                return Err(match pending {
+                    Some(detail) => WitnessError::StillPending { method, detail },
+                    None => WitnessError::Unreachable { method, error },
+                })
+            }
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(budget.interval).await;
     }
 }
 

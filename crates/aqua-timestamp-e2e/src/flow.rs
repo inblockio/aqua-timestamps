@@ -412,8 +412,8 @@ pub struct FlowOptions {
 
 /// One read of `url`, repeated until `budget.deadline` while the answer is a transport error
 /// (the body read included) or a 5xx, with one `log` line per failed attempt. Any other answer is
-/// final and returned, a 4xx included. `Err` is the last failure: a read that never got an answer
-/// is never an answer. Run at least once.
+/// final and returned. A 4xx is final even if its body does not arrive (it comes back empty). `Err`
+/// is the last failure: a read that never got an answer is never an answer. Run at least once.
 pub async fn get_retrying(
     client: &Client,
     url: &str,
@@ -429,6 +429,9 @@ pub async fn get_retrying(
             Ok(resp) => {
                 let status = resp.status();
                 match resp.text().await {
+                    Err(_) if status.is_client_error() => {
+                        return Ok((status.as_u16(), String::new()))
+                    }
                     Err(e) => format!("HTTP {status}, body read failed: {e}"),
                     Ok(body) if status.is_server_error() => {
                         let shown: String = body.chars().take(200).collect();
