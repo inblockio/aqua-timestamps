@@ -10,7 +10,12 @@
 //!   identity.json   0600   {"alias","did","key_type","created_at"}
 //! ```
 //!
-//! Rules enforced by [`load_or_create`]:
+//! Which loader runs is decided by the target, in [`for_base_url`] (the only way a command line
+//! run reaches a loader): a non-loopback `--base-url` gets [`load_existing`], which writes
+//! nothing and refuses a missing identity; only loopback may create one. There is no init
+//! command: the standing identity on a remote already exists, or the run stops.
+//!
+//! Rules enforced by the loaders:
 //!
 //! * created once: the key and the record are written only when the key file is absent, with
 //!   `create_new` (an existing file is never truncated or replaced);
@@ -27,10 +32,12 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use aqua_rs_sdk::schema::SigningCredentials;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::flow::ClientKey;
+use crate::target::is_loopback;
 
 /// The alias that names this test, recorded beside the key.
 pub const ALIAS: &str = "openwitness-seal-e2e";
@@ -63,6 +70,13 @@ impl StandingIdentity {
     /// The sign-in key for the flow.
     pub fn client_key(&self) -> Result<ClientKey> {
         ClientKey::from_secp256k1_bytes(self.key)
+    }
+
+    /// The SDK signer for the seal's own signature S and the member trees.
+    pub fn signing_credentials(&self) -> SigningCredentials {
+        SigningCredentials::Secp256k1 {
+            secp256k1_key: self.key.to_vec(),
+        }
     }
 }
 
@@ -110,8 +124,83 @@ fn read_key(path: &Path) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("key file holds {} bytes, expected 32", bytes.len()))
 }
 
-/// Load the standing identity from `dir`, creating it once if the key file is absent.
-pub fn load_or_create(dir: &Path) -> Result<StandingIdentity> {
+/// The identity for a run against `base_url` (already through
+/// [`crate::target::check_base_url`]): any non-loopback target is load only, only loopback may
+/// create.
+pub fn for_base_url(base_url: &str, dir: &Path) -> Result<StandingIdentity> {
+    if is_loopback(base_url) {
+        load_or_create(dir)
+    } else {
+        load_existing(dir)
+    }
+}
+
+/// Load the standing identity from `dir` and write nothing. A missing directory, key or record
+/// is an error that says what to do, never a new identity.
+pub fn load_existing(dir: &Path) -> Result<StandingIdentity> {
+    for (path, what) in [
+        (dir.to_path_buf(), "directory"),
+        (dir.join(KEY_FILE), "key file"),
+    ] {
+        // `symlink_metadata`, not `exists`: a dangling link is present, and stays refused below.
+        if fs::symlink_metadata(&path).is_err() {
+            bail!(
+                "no standing identity: {what} {} is missing. A non-loopback --base-url loads the \
+                 standing identity and never creates one, so that a typo in a path cannot mint a \
+                 second identity on a remote. Point --identity-dir at the existing directory; \
+                 only a loopback --base-url may create an identity. Nothing was written.",
+                path.display()
+            );
+        }
+    }
+    let dmeta = fs::symlink_metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    if !dmeta.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    require_private(dir, "state directory")?;
+    let key_path = dir.join(KEY_FILE);
+    let record_path = dir.join(RECORD_FILE);
+
+    let key = read_key(&key_path)?;
+    let client = ClientKey::from_secp256k1_bytes(key).context("derive DID from the key file")?;
+    if !record_path.exists() {
+        bail!(
+            "{} exists but {} does not: refusing to guess the record (restore it or move the key aside by hand)",
+            key_path.display(),
+            record_path.display()
+        );
+    }
+    require_private(&record_path, "identity record")?;
+    let record: IdentityRecord = serde_json::from_str(
+        &fs::read_to_string(&record_path)
+            .with_context(|| format!("read {}", record_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", record_path.display()))?;
+    if record.did != client.did {
+        bail!(
+            "{} names {} but the key derives {}: refusing to continue",
+            record_path.display(),
+            record.did,
+            client.did
+        );
+    }
+    if record.alias != ALIAS {
+        bail!(
+            "{} has alias {:?}, expected {ALIAS:?}: this is not the e2e's identity directory",
+            record_path.display(),
+            record.alias
+        );
+    }
+    Ok(StandingIdentity {
+        record,
+        created: false,
+        key,
+    })
+}
+
+/// Load the standing identity from `dir`, creating it once if the key file is absent. Crate
+/// private on purpose: a remote run goes through [`for_base_url`], which never gets here.
+pub(crate) fn load_or_create(dir: &Path) -> Result<StandingIdentity> {
     if !dir.exists() {
         DirBuilder::new()
             .recursive(true)
@@ -164,41 +253,7 @@ pub fn load_or_create(dir: &Path) -> Result<StandingIdentity> {
         });
     }
 
-    let key = read_key(&key_path)?;
-    let client = ClientKey::from_secp256k1_bytes(key).context("derive DID from the key file")?;
-    if !record_path.exists() {
-        bail!(
-            "{} exists but {} does not: refusing to guess the record (restore it or move the key aside by hand)",
-            key_path.display(),
-            record_path.display()
-        );
-    }
-    require_private(&record_path, "identity record")?;
-    let record: IdentityRecord = serde_json::from_str(
-        &fs::read_to_string(&record_path)
-            .with_context(|| format!("read {}", record_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", record_path.display()))?;
-    if record.did != client.did {
-        bail!(
-            "{} names {} but the key derives {}: refusing to continue",
-            record_path.display(),
-            record.did,
-            client.did
-        );
-    }
-    if record.alias != ALIAS {
-        bail!(
-            "{} has alias {:?}, expected {ALIAS:?}: this is not the e2e's identity directory",
-            record_path.display(),
-            record.alias
-        );
-    }
-    Ok(StandingIdentity {
-        record,
-        created: false,
-        key,
-    })
+    load_existing(dir)
 }
 
 #[cfg(test)]
@@ -310,6 +365,56 @@ mod tests {
         fs::write(dir.join(KEY_FILE), "not hex\n").unwrap();
         assert!(load_or_create(&dir).is_err());
         assert_eq!(fs::read_to_string(dir.join(KEY_FILE)).unwrap(), "not hex\n");
+    }
+
+    #[test]
+    fn a_remote_refuses_a_missing_identity_says_why_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        for url in ["https://openwitness.org", "https://staging.example.org"] {
+            let err = for_base_url(url, &dir).err().expect("must refuse");
+            let text = err.to_string();
+            assert!(text.contains("no standing identity"), "{text}");
+            assert!(text.contains("--identity-dir"), "{text}");
+            assert!(!dir.exists(), "{url}: no directory is created");
+        }
+    }
+
+    #[test]
+    fn a_remote_refuses_an_empty_directory_and_leaves_it_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        assert!(for_base_url("https://example.org", &dir).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing is written");
+    }
+
+    #[test]
+    fn a_remote_loads_an_existing_identity_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        let a = load_or_create(&dir).unwrap();
+        let (key, record) = (
+            fs::read(dir.join(KEY_FILE)).unwrap(),
+            fs::read(dir.join(RECORD_FILE)).unwrap(),
+        );
+        let b = for_base_url("https://example.org", &dir).unwrap();
+        assert!(!b.created);
+        assert_eq!(b.record, a.record);
+        assert_eq!(fs::read(dir.join(KEY_FILE)).unwrap(), key);
+        assert_eq!(fs::read(dir.join(RECORD_FILE)).unwrap(), record);
+    }
+
+    #[test]
+    fn only_loopback_may_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (i, url) in ["http://127.0.0.1:1", "http://localhost:1", "http://[::1]:1"]
+            .iter()
+            .enumerate()
+        {
+            let id = for_base_url(url, &tmp.path().join(format!("s{i}"))).unwrap();
+            assert!(id.created, "{url}");
+        }
     }
 
     #[test]

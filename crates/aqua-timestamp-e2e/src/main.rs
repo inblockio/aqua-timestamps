@@ -4,11 +4,11 @@
 //!
 //! * `live --base-url <URL>`: the main path against a deployed aggregator. The base URL has
 //!   no default (a bare run must never reach production) and is printed. Signs in with the ONE
-//!   standing secp256k1 identity from `~/.local/state/openwitness-seal-e2e/` (created once,
-//!   never rotated), submits the tip of a fresh client tree, waits for the seal, fetches BOTH
-//!   witnesses (EVM and qTSA) and has the SDK verifier judge the client tree with both merged
-//!   in. 404, a stub or a timeout is a failure. The production host needs
-//!   `--allow-production`; that run belongs to OW2 / SP3, not to OW1.
+//!   standing secp256k1 identity from `~/.local/state/openwitness-seal-e2e/` (never rotated, and
+//!   on a non-loopback URL never created), submits the tip of a fresh client tree, waits for the
+//!   seal, fetches BOTH witnesses (EVM and qTSA) and has the SDK verifier judge the client tree
+//!   with both merged in. 404, a stub or a timeout is a failure. The production host needs
+//!   `--allow-production`.
 //! * `selfcheck`: the same main path against an in-process aggregator on localhost whose
 //!   anchors are the offline test doubles; the reader asks the same doubles (see README).
 //! * `selfcheck-all`: `selfcheck` plus ed25519 and p256 clients with ephemeral in-process keys
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
                 Some(d) => d,
                 None => identity::default_dir()?,
             };
-            let id = identity::load_or_create(&dir)?;
+            let id = identity::for_base_url(&base_url, &dir)?;
             println!(
                 "identity = {} ({}, alias {}, created_at {}){}",
                 id.record.did,
