@@ -5,6 +5,7 @@
 
 pub mod flow;
 pub mod identity;
+pub mod seal;
 pub mod selfcheck;
 pub mod target;
 pub mod witness;
