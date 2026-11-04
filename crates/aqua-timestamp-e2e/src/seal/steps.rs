@@ -21,11 +21,9 @@ use aqua_rs_sdk::core::seal::{
 use aqua_rs_sdk::primitives::merkle::{
     parse_batch_digest, parse_batch_root, shielded_leaf, BatchDigest,
 };
-use aqua_rs_sdk::primitives::{HashType, Method, RevisionLink};
-use aqua_rs_sdk::schema::link::Anchor;
+use aqua_rs_sdk::primitives::RevisionLink;
 use aqua_rs_sdk::schema::tree::Tree;
 use aqua_rs_sdk::schema::{AnyRevision, SigningCredentials};
-use aqua_rs_sdk::verification::Linkable;
 use rand::RngCore;
 use serde_json::{json, Value};
 
@@ -36,7 +34,7 @@ use super::run_dir::{
     ATTESTATIONS_1, CONTAINER_1, FETCH_STATUS,
 };
 use super::tamper::{
-    alter_p_key_kept, flip_tsa_token, link_of, only_p, rekey_bad_signature, remove_p,
+    alter_p_key_kept, link_of, only_p, rekey_bad_signature, relink_flipped_token, remove_p,
 };
 use crate::witness::{detect_stub, parse_served, parse_witness, Fetched, WitnessMethod};
 
@@ -1152,7 +1150,7 @@ async fn step5(ctx: &Ctx, s2: Option<&Step2Out>) -> StepLog {
         "tamper: one byte of the qTSA token changed (relinked); the attestation P removed or altered (Q16 default)",
         &ctx.header,
     );
-    if let Err(e) = step5a(ctx, &mut log).await {
+    if let Err(e) = step5a(ctx, &mut log, s2).await {
         log.check(false, format!("harness error (5a): {e:#}"), "harness error");
     }
     if let Err(e) = step5b(ctx, &mut log, s2).await {
@@ -1161,7 +1159,7 @@ async fn step5(ctx: &Ctx, s2: Option<&Step2Out>) -> StepLog {
     log
 }
 
-async fn step5a(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
+async fn step5a(ctx: &Ctx, log: &mut StepLog, s2: Option<&Step2Out>) -> Result<()> {
     let st = &ctx.state;
     let policy = &ctx.reader.policy;
     log.l("--- 5a: relinked qTSA tamper, read with P2");
@@ -1180,6 +1178,17 @@ async fn step5a(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
             return Ok(());
         }
     };
+    // A and H as the SDK read them in step 2: the seal's genesis G is an anchor revision too, so
+    // a search over the container by revision kind would find G or A depending on their links.
+    let Some(s2) = s2 else {
+        log.check(
+            false,
+            "step 2 seal reading available (it names A and H)",
+            "verified (no seal reading from step 2)",
+        );
+        return Ok(());
+    };
+    let (a_key, head_link) = (s2.seal.anchor().clone(), s2.seal.head_link().clone());
     let tq: RevisionLink = load_pair(&ctx.store, "s1-qtsa.json", WitnessMethod::Qtsa)?
         .fetched
         .object_key
@@ -1190,42 +1199,21 @@ async fn step5a(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
         .object_key
         .parse()
         .map_err(|e| anyhow!("{e:?}"))?;
-    let (a_key, a_rev) = c1
-        .revisions
-        .iter()
-        .find(|(_, r)| matches!(r, AnyRevision::Anchor(_)))
-        .map(|(k, r)| (k.clone(), r.clone()))
-        .ok_or_else(|| anyhow!("no A in container 1"))?;
-    let a_json = serde_json::to_value(&a_rev)?;
-    let method: Method = serde_json::from_value(a_json["method"].clone())?;
-    let head_link: RevisionLink = serde_json::from_value(a_json["previous_revision"].clone())?;
-    let t = c1
-        .revisions
-        .get(&tq)
-        .ok_or_else(|| anyhow!("qTSA T not in container 1"))?;
-    let (t2, note) = flip_tsa_token(t)?;
-    log.l(format!("flip: {note}"));
-    let t2_link = link_of(&t2)?;
+    let relinked = relink_flipped_token(&c1, &a_key, &head_link, &tq, &te)?;
+    let (t2, t2_link, a2_link, c5) = (
+        relinked.flipped,
+        relinked.flipped_link,
+        relinked.anchor_link,
+        relinked.container,
+    );
+    log.l(format!("flip: {}", relinked.note));
     log.l(format!(
         "T {tq} -> T' {t2_link} (SDK global_calculate_hash)"
     ));
-    let mut links = vec![te.clone(), t2_link.clone()];
-    links.sort();
-    let mut a2 = Anchor::new(head_link.clone(), method, links.clone());
-    let a2_link = a2
-        .calculate_link(HashType::Sha3_256)
-        .map_err(|e| anyhow!("{e:?}"))?;
-    a2.populate_leaves(HashType::Sha3_256)
-        .map_err(|e| anyhow!("{e:?}"))?;
     log.l(format!(
-        "A {a_key} -> A' {a2_link} = Anchor::new(H {head_link}, method {method:?}, sorted {links:?}), calculate_link then populate_leaves"
+        "A {a_key} -> A' {a2_link} = Anchor::new(H {head_link}, A's method, sorted {:?}), calculate_link then populate_leaves",
+        relinked.links
     ));
-    let mut c5 = c1.clone();
-    c5.revisions.remove(&tq);
-    c5.revisions.remove(&a_key);
-    c5.revisions.insert(t2_link.clone(), t2.clone());
-    c5.revisions
-        .insert(a2_link.clone(), AnyRevision::Anchor(a2));
     ctx.store
         .artifact("container-5a.json", serde_json::to_string(&c5)?)?;
     log.l(format!(

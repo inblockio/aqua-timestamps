@@ -2,8 +2,11 @@
 //! SDK for the links of what it changed; judging the result is the SDK reader's job.
 
 use anyhow::{anyhow, bail, Context, Result};
-use aqua_rs_sdk::primitives::{HashType, RevisionLink};
+use aqua_rs_sdk::primitives::{HashType, Method, RevisionLink};
+use aqua_rs_sdk::schema::link::Anchor;
+use aqua_rs_sdk::schema::tree::Tree;
 use aqua_rs_sdk::schema::AnyRevision;
+use aqua_rs_sdk::verification::Linkable;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
@@ -41,6 +44,72 @@ pub fn flip_tsa_token(t: &AnyRevision) -> Result<(AnyRevision, String)> {
     );
     v["payloads"]["transaction_hash"] = json!(eng.encode(&der));
     Ok((serde_json::from_value(v)?, note))
+}
+
+/// A container whose qTSA T was flipped and relinked: T' replaces T, A' links T' and replaces A.
+#[derive(Debug)]
+pub struct RelinkedContainer {
+    pub container: Tree,
+    pub flipped: AnyRevision,
+    pub flipped_link: RevisionLink,
+    pub anchor_link: RevisionLink,
+    /// A's structural links, sorted, as A' carries them.
+    pub links: Vec<RevisionLink>,
+    pub note: String,
+}
+
+/// The relinked qTSA tamper. `anchor` and `head` name A and H as the SDK read them (the seal's
+/// genesis is an anchor revision too, so they are not searched for here); a revision under
+/// `anchor` that does not follow `head` is an error, never a guess.
+pub fn relink_flipped_token(
+    container: &Tree,
+    anchor: &RevisionLink,
+    head: &RevisionLink,
+    t_tsa: &RevisionLink,
+    t_evm: &RevisionLink,
+) -> Result<RelinkedContainer> {
+    let a_rev = container
+        .revisions
+        .get(anchor)
+        .ok_or_else(|| anyhow!("A {anchor} is not in the container"))?;
+    if !matches!(a_rev, AnyRevision::Anchor(_)) {
+        bail!("{anchor} is not an anchor revision");
+    }
+    if a_rev.get_previous_revision_hash().as_ref() != Some(head) {
+        bail!("{anchor} does not follow the head {head}: it is not the seal's A");
+    }
+    let a_json = serde_json::to_value(a_rev)?;
+    let method: Method =
+        serde_json::from_value(a_json["method"].clone()).context("A has no method")?;
+    let t = container
+        .revisions
+        .get(t_tsa)
+        .ok_or_else(|| anyhow!("qTSA T {t_tsa} is not in the container"))?;
+    let (flipped, note) = flip_tsa_token(t)?;
+    let flipped_link = link_of(&flipped)?;
+    let mut links = vec![t_evm.clone(), flipped_link.clone()];
+    links.sort();
+    let mut relinked = Anchor::new(head.clone(), method, links.clone());
+    let anchor_link = relinked
+        .calculate_link(HashType::Sha3_256)
+        .map_err(|e| anyhow!("{e:?}"))?;
+    relinked
+        .populate_leaves(HashType::Sha3_256)
+        .map_err(|e| anyhow!("{e:?}"))?;
+    let mut out = container.clone();
+    out.revisions.remove(t_tsa);
+    out.revisions.remove(anchor);
+    out.revisions.insert(flipped_link.clone(), flipped.clone());
+    out.revisions
+        .insert(anchor_link.clone(), AnyRevision::Anchor(relinked));
+    Ok(RelinkedContainer {
+        container: out,
+        flipped,
+        flipped_link,
+        anchor_link,
+        links,
+        note,
+    })
 }
 
 fn p_of<'a>(doc: &'a Value, p_key: &str) -> Result<&'a Value> {

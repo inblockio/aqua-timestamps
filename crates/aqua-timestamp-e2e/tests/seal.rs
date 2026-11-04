@@ -20,7 +20,9 @@ use aqua_timestamp_e2e::seal::policy::Reader;
 use aqua_timestamp_e2e::seal::replay::{run_replay, ReplayConfig};
 use aqua_timestamp_e2e::seal::run_dir::verify_complete;
 use aqua_timestamp_e2e::seal::steps::{rekeyed_reading_ok, served_witness};
-use aqua_timestamp_e2e::seal::tamper::{alter_p_key_kept, link_of, rekey_bad_signature};
+use aqua_timestamp_e2e::seal::tamper::{
+    alter_p_key_kept, link_of, rekey_bad_signature, relink_flipped_token,
+};
 use aqua_timestamp_e2e::selfcheck::run_seal_in_process;
 use aqua_timestamp_e2e::witness::{ReaderHosts, WitnessMethod};
 use serde_json::{json, Value};
@@ -440,6 +442,66 @@ async fn step1_flags_a_stub_body_and_passes_a_real_one() {
         assert!(got.is_none(), "{file}");
         assert_eq!(log.verdict(), "STEP 1 FAIL stub", "{file}");
     }
+}
+
+/// Attempt 1 of the clean-checkout suite found this: the seal's genesis G is an anchor revision
+/// too, so picking "the" anchor by searching the container depends on which link sorts first.
+/// A comes from the SDK's reading instead, and G is refused in its place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tamper_takes_a_from_the_sdk_reading_never_from_the_link_order() {
+    let run = run().await;
+    let container: Tree = serde_json::from_str(&read(&run.dir, "container-1.json")).unwrap();
+    let anchors: Vec<_> = container
+        .revisions
+        .iter()
+        .filter(|(_, r)| matches!(r, AnyRevision::Anchor(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    assert_eq!(anchors.len(), 2, "G and A are both anchor revisions");
+
+    let reader = run.reader.clone();
+    let (input, catalogue, aq, c) = (
+        reader.policy.dual(),
+        reader.policy.catalogue(),
+        reader.aq.clone(),
+        container.clone(),
+    );
+    let reading =
+        tokio::task::spawn_blocking(move || verify_seal_container(&aq, &c, &input, &catalogue))
+            .await
+            .unwrap();
+    let SealReading::Seal(seal) = reading else {
+        panic!("container 1 reads as a seal");
+    };
+    let key_of = |file: &str| -> RevisionLink {
+        let served: Value = serde_json::from_str(&read(&run.dir, file)).unwrap();
+        served["revisions"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, r)| r.get("payloads").is_some())
+            .map(|(k, _)| k.parse().unwrap())
+            .unwrap()
+    };
+    let (tq, te) = (key_of("s1-qtsa.json"), key_of("s1-evm.json"));
+
+    let done = relink_flipped_token(&container, seal.anchor(), seal.head_link(), &tq, &te).unwrap();
+    assert_eq!(done.container.revisions.len(), 6);
+    assert!(!done.container.revisions.contains_key(seal.anchor()));
+    assert!(!done.container.revisions.contains_key(&tq));
+    assert!(done.container.revisions.contains_key(&done.anchor_link));
+    assert!(done.container.revisions.contains_key(&done.flipped_link));
+    assert!(done.links.contains(&done.flipped_link) && done.links.contains(&te));
+
+    let err = relink_flipped_token(&container, seal.genesis(), seal.head_link(), &tq, &te)
+        .expect_err("G is not the seal's A");
+    assert!(
+        err.to_string().contains("does not follow the head"),
+        "{err}"
+    );
+    let err = relink_flipped_token(&container, seal.head_link(), seal.head_link(), &tq, &te)
+        .expect_err("H is no anchor");
+    assert!(err.to_string().contains("not an anchor"), "{err}");
 }
 
 /// M1: a P with an altered signature, re-keyed under the link the SDK computes for it. It is
