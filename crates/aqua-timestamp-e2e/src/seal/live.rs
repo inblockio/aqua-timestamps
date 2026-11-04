@@ -55,7 +55,7 @@ pub struct SealConfig {
     /// How long after the epoch's close to wait for the witnesses (EVM serves at finality).
     pub witness_grace: Duration,
     pub poll_interval: Duration,
-    /// How long step 1 retries "EVM not final yet".
+    /// How long step 1 retries "EVM not final yet" and "EVM host unavailable".
     pub finality_budget: Duration,
 }
 

@@ -52,7 +52,7 @@ pub struct Ctx {
     pub state: RunState,
     pub header: Vec<String>,
     pub expect_server_did: Option<String>,
-    /// How long step 1 retries the documented retryable refusal (EVM not final yet).
+    /// How long step 1 retries a retryable refusal (EVM not final yet, EVM host unavailable).
     pub finality_budget: Duration,
 }
 
@@ -388,11 +388,27 @@ struct Evaluation<'a> {
     did: &'a str,
     witnesses: &'a [SealWitness],
     requirement: &'a WitnessRequirement,
-    /// How long the retryable "EVM not final" refusal is retried; zero never retries.
+    /// How long a retryable refusal is retried; zero never retries.
     budget: Duration,
 }
 
-/// The evaluator, retried only on the documented retryable refusal; every attempt is logged.
+/// How long step 1 waits before it repeats a retryable evaluation.
+const RETRY_PAUSE: Duration = Duration::from_secs(60);
+
+/// The refusals a repeated read can change: the SDK's retryable "not final yet", and a failed read
+/// of the EVM host (ruling 11). Every other refusal is about what the chain says, and is final.
+fn retryable(refusal: &WitnessRefusal) -> bool {
+    match refusal {
+        WitnessRefusal::EvmAnchorNotFinal { .. } => true,
+        WitnessRefusal::EvmAnchorNotVerified { verdict, .. } => {
+            verdict == "not_evaluable: host_unavailable"
+        }
+        _ => false,
+    }
+}
+
+/// The evaluator, retried only on a [`retryable`] refusal within the budget; every attempt is
+/// logged. A retry only repeats a read: what ends this is the SDK's answer to the last one.
 async fn evaluate_with_retry(
     log: &mut StepLog,
     reader: &Reader,
@@ -412,14 +428,13 @@ async fn evaluate_with_retry(
         );
         let res = blocking(move || evaluate_seal_witnesses(&aq, &p, &h, &d, &w, &r)).await?;
         match &res {
-            Err(refusal @ WitnessRefusal::EvmAnchorNotFinal { .. })
-                if Instant::now() < deadline =>
-            {
+            Err(refusal) if retryable(refusal) && Instant::now() < deadline => {
+                let pause = RETRY_PAUSE.min(deadline - Instant::now());
                 log.l(format!(
-                    "evaluate attempt {attempt} at {}: {refusal} (retryable); retry in 60 s",
+                    "evaluate attempt {attempt} at {}: {refusal} (retryable); retry in {pause:?}",
                     utc()
                 ));
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(pause).await;
             }
             _ => {
                 let outcome = match &res {
@@ -1762,6 +1777,29 @@ fn step7_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
 mod tests {
     use super::*;
     use aqua_rs_sdk::core::seal::{AttestationReading, WitnessAttestations};
+
+    #[test]
+    fn step1_retries_only_not_final_and_an_unavailable_host() {
+        let witness = RevisionLink::from_bytes([1u8; 32]);
+        let not_verified = |verdict: &str| WitnessRefusal::EvmAnchorNotVerified {
+            witness: witness.clone(),
+            verdict: verdict.to_string(),
+        };
+        assert!(retryable(&WitnessRefusal::EvmAnchorNotFinal {
+            witness: witness.clone(),
+            reason: "not_final".to_string(),
+        }));
+        assert!(retryable(&not_verified("not_evaluable: host_unavailable")));
+        for verdict in [
+            "invalid: reverted",
+            "not_evaluable: chain_mismatch",
+            "not_evaluable: host_unavailable_x",
+            "absent",
+            "",
+        ] {
+            assert!(!retryable(&not_verified(verdict)), "{verdict}");
+        }
+    }
 
     fn reading_with_cause(
         t: &RevisionLink,

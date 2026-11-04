@@ -912,3 +912,104 @@ async fn an_epoch_read_that_stayed_down_fails_step_7() {
     assert!(!seven.passed(), "{:?}", seven.lines());
     assert!(!all_passed(&logs));
 }
+
+// ---- F4: step 1 repeats a read of an unavailable host, a verdict stays final --------------------
+
+/// A chain host whose answer the test chooses: down for the first `down` reads, reverted always
+/// when `revert`.
+struct Chain {
+    inner: Arc<dyn aqua_rs_sdk::BlockchainHost>,
+    down: AtomicU64,
+    revert: bool,
+}
+
+impl aqua_rs_sdk::BlockchainHost for Chain {
+    fn transaction_facts(
+        &self,
+        chain_id: u64,
+        tx_hash: &str,
+    ) -> Result<Option<aqua_rs_sdk::EvmTransactionFacts>, aqua_rs_sdk::HostError> {
+        let left = self.down.load(Ordering::SeqCst);
+        if left > 0 {
+            self.down.store(left - 1, Ordering::SeqCst);
+            return Err(aqua_rs_sdk::HostError::NetworkError("down".to_string()));
+        }
+        let mut facts = self.inner.transaction_facts(chain_id, tx_hash)?;
+        if self.revert {
+            if let Some(inclusion) = facts.as_mut().and_then(|f| f.inclusion.as_mut()) {
+                inclusion.succeeded = false;
+            }
+        }
+        Ok(facts)
+    }
+}
+
+async fn step_1_over(run: &Run, down: u64, revert: bool, budget: Duration) -> StepLog {
+    let hosts = ReaderHosts {
+        blockchain: Arc::new(Chain {
+            inner: run.hosts.blockchain.clone(),
+            down: AtomicU64::new(down),
+            revert,
+        }),
+        ..run.hosts.clone()
+    };
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(&run.dir, copy.path());
+    let reader = Reader::new(hosts, run.reader.policy.clone());
+    let logs = steps_over_copy(&copy, Steps::All, reader, budget).await;
+    logs.into_iter().find(|l| l.number() == 1).unwrap()
+}
+
+fn attempts(log: &StepLog) -> Vec<String> {
+    log.lines()
+        .iter()
+        .filter(|l| l.starts_with("evaluate attempt"))
+        .cloned()
+        .collect()
+}
+
+/// One failed read at evaluate time does not end the run: the read is repeated, logged per
+/// attempt, and the verdict is the SDK's on the repeated read.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_1_repeats_a_read_of_an_unavailable_host_within_the_budget() {
+    let run = run().await;
+    let log = step_1_over(run, 1, false, Duration::from_secs(5)).await;
+    let tried = attempts(&log);
+    assert_eq!(tried.len(), 2, "{tried:?}");
+    assert!(tried[0].contains("host_unavailable"), "{tried:?}");
+    assert!(tried[1].contains(": Ok"), "{tried:?}");
+    assert!(log.passed(), "{:?}", log.lines());
+}
+
+/// A retry never turns a verdict into a pass: a host that stays down ends in a failed step.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_1_with_a_host_that_stays_unavailable_ends_in_a_failed_step() {
+    let run = run().await;
+    let log = step_1_over(run, u64::MAX, false, Duration::from_secs(5)).await;
+    let tried = attempts(&log);
+    assert!(tried.len() >= 2, "{tried:?}");
+    assert!(
+        tried.iter().all(|t| t.contains("host_unavailable")),
+        "{tried:?}"
+    );
+    assert!(!log.passed());
+    assert!(
+        log.verdict().contains("EvmAnchorNotVerified"),
+        "{}",
+        log.verdict()
+    );
+}
+
+/// A refusal on what the chain says stays final, however much budget is left.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_1_takes_a_final_refusal_as_final_with_budget_left() {
+    let run = run().await;
+    let started = Instant::now();
+    let log = step_1_over(run, 0, true, Duration::from_secs(3_600)).await;
+    let tried = attempts(&log);
+    assert_eq!(tried.len(), 1, "{tried:?}");
+    assert!(tried[0].contains("EvmAnchorNotVerified"), "{tried:?}");
+    assert!(tried[0].contains("invalid"), "{tried:?}");
+    assert!(!log.passed());
+    assert!(started.elapsed() < Duration::from_secs(60), "it waited");
+}

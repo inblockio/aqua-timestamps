@@ -105,7 +105,8 @@ enum Cmd {
         /// Seconds between polls.
         #[arg(long, default_value_t = 15)]
         poll_interval_secs: u64,
-        /// Seconds step 1 retries a witness set whose EVM anchor is not final yet.
+        /// Seconds step 1 retries a witness set whose EVM anchor is not final yet, or whose EVM
+        /// host did not answer.
         #[arg(long, default_value_t = 1200)]
         finality_budget_secs: u64,
         /// EVM RPC URL of the reader's chain host. Default:
