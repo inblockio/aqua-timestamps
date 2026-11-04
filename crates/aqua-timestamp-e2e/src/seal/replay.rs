@@ -19,7 +19,8 @@ pub struct ReplayConfig {
     /// Where step logs and derived files go. `None` writes nothing, anywhere.
     pub out: Option<PathBuf>,
     pub reader: Reader,
-    pub expect_server_did: Option<String>,
+    /// What step 2 compares the persisted server DID with. Required: a replay has no other pin.
+    pub expect_server_did: String,
 }
 
 pub struct ReplayReport {
@@ -62,7 +63,7 @@ pub async fn run_replay(cfg: ReplayConfig) -> Result<ReplayReport> {
         reader: cfg.reader,
         state,
         header,
-        expect_server_did: cfg.expect_server_did,
+        expect_server_did: Some(cfg.expect_server_did),
         finality_budget: Duration::ZERO,
     };
     let logs = steps::run(&ctx, Steps::FromPersisted, "replay").await?;

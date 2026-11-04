@@ -44,7 +44,8 @@ aqua-timestamp-e2e live --base-url <URL> [--identity-dir D] [--seal-wait-secs 15
                         [--witness-timeout-secs 1200] [--evm-rpc-url URL]
 aqua-timestamp-e2e seal --base-url <URL> [--allow-production] [--identity-dir D] [--run-dir D]
                         [--expect-version REV] [--expect-server-did DID] [--evm-rpc-url URL]
-aqua-timestamp-e2e seal-replay <RUN-DIR> [--out D] [--expect-server-did DID] [--evm-rpc-url URL]
+                        # --expect-server-did is required on a non-loopback --base-url
+aqua-timestamp-e2e seal-replay <RUN-DIR> --expect-server-did DID [--out D] [--evm-rpc-url URL]
 aqua-timestamp-e2e selfcheck [--identity-dir D]      # in-process aggregator, offline doubles
 aqua-timestamp-e2e selfcheck-all
 ```
@@ -93,8 +94,10 @@ epoch's seal, and pulls the witnesses and the epoch listing. Then the steps run,
 
 `/version` before the run must equal `/version` after it; `--expect-version` additionally pins the
 revision before anything is posted. A new deploy does not fail the test, a deploy during the run
-does. `--expect-server-did` pins the DID step 2 expects; without it the served one is taken and
-logged. The reader policy is the one of the openwitness.org witnesses (`ReaderPolicy::open_witness`).
+does. `--expect-server-did` pins the server's DID: it is required on any non-loopback `--base-url`,
+with no default in code, and `/.well-known/aqua-identity` must serve exactly that DID before anything
+is posted (a remote run with no pin is refused at the start). Step 2 asserts it again; only on loopback
+may it be left out, then the served DID is taken and logged. The reader policy is the one of the openwitness.org witnesses (`ReaderPolicy::open_witness`).
 
 Every step writes `step-<n>.log` with its assertion lines and a final `STEP <n> PASS` or
 `STEP <n> FAIL <falsifier>`; the run prints `SEAL RUN PASS` or `SEAL RUN FAIL` and exits non-zero on
@@ -121,6 +124,8 @@ bodies byte for byte:
 ## `seal-replay <RUN-DIR>`
 
 Runs steps 2 to 7 from a run directory alone. Step 1 built the container the replay re-reads.
+
+`--expect-server-did` is required here too: step 2 compares the persisted server DID with it.
 
 What it needs: the files above except `leaves.json`, `step4b/`, `debug/`, `step-<n>.log` and what a
 replay builds anew and does not compare (`container-5a`, `container-5a2`, `container-6b`, the

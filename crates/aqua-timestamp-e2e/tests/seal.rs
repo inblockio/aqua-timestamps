@@ -16,8 +16,9 @@ use aqua_rs_sdk::core::seal::{
 use aqua_rs_sdk::primitives::RevisionLink;
 use aqua_rs_sdk::schema::tree::Tree;
 use aqua_rs_sdk::schema::AnyRevision;
-use aqua_timestamp_e2e::flow::{wait_for_seal, PollBudget};
-use aqua_timestamp_e2e::seal::live::read_epoch_bodies;
+use aqua_timestamp_e2e::flow::{wait_for_seal, PollBudget, SealTrigger};
+use aqua_timestamp_e2e::identity::for_base_url;
+use aqua_timestamp_e2e::seal::live::{read_epoch_bodies, run_seal, SealConfig, SealReport};
 use aqua_timestamp_e2e::seal::log::{all_passed, StepLog};
 use aqua_timestamp_e2e::seal::policy::Reader;
 use aqua_timestamp_e2e::seal::replay::{run_replay, ReplayConfig};
@@ -81,6 +82,12 @@ async fn run() -> &'static Run {
         }
     })
     .await
+}
+
+/// The server DID the in-process run persisted: the pin a replay of it takes.
+fn pin(run: &Run) -> String {
+    let identity: Value = serde_json::from_str(&read(&run.dir, "aqua-identity.json")).unwrap();
+    identity["server_did"].as_str().unwrap().to_string()
 }
 
 fn read(dir: &Path, file: &str) -> String {
@@ -205,7 +212,7 @@ async fn the_replay_passes_with_the_server_gone_and_leaves_the_run_untouched() {
         run_dir: run.dir.clone(),
         out: None,
         reader: run.reader.clone(),
-        expect_server_did: None,
+        expect_server_did: pin(run),
     })
     .await
     .expect("replay");
@@ -236,7 +243,7 @@ async fn replay_out_gets_the_logs_and_may_not_sit_in_the_run() {
         run_dir: run.dir.clone(),
         out: Some(out.clone()),
         reader: run.reader.clone(),
-        expect_server_did: None,
+        expect_server_did: pin(run),
     })
     .await
     .expect("replay");
@@ -249,7 +256,7 @@ async fn replay_out_gets_the_logs_and_may_not_sit_in_the_run() {
         run_dir: run.dir.clone(),
         out: Some(run.dir.join("x")),
         reader: run.reader.clone(),
-        expect_server_did: None,
+        expect_server_did: pin(run),
     })
     .await;
     assert!(inside.is_err());
@@ -295,7 +302,7 @@ async fn the_fresh_read_compare_survives_a_moving_chain_head() {
         run_dir: run.dir.clone(),
         out: None,
         reader: Reader::new(hosts, run.reader.policy.clone()),
-        expect_server_did: None,
+        expect_server_did: pin(run),
     })
     .await
     .expect("replay");
@@ -362,7 +369,7 @@ async fn replay_refuses_a_missing_or_malformed_file_by_name() {
             run_dir: tmp.path().to_path_buf(),
             out: None,
             reader: run.reader.clone(),
-            expect_server_did: None,
+            expect_server_did: pin(run),
         })
         .await
         .err()
@@ -416,7 +423,7 @@ async fn replay_refuses_a_run_json_that_names_another_leaf() {
         run_dir: tmp.path().to_path_buf(),
         out: None,
         reader: run.reader.clone(),
-        expect_server_did: None,
+        expect_server_did: pin(run),
     })
     .await
     .err()
@@ -431,9 +438,7 @@ async fn a_replay_with_another_expected_server_did_fails_step_2() {
         run_dir: run.dir.clone(),
         out: None,
         reader: run.reader.clone(),
-        expect_server_did: Some(
-            "did:pkh:eip155:1:0x0000000000000000000000000000000000000001".into(),
-        ),
+        expect_server_did: "did:pkh:eip155:1:0x0000000000000000000000000000000000000001".into(),
     })
     .await
     .expect("replay ran");
@@ -1012,4 +1017,99 @@ async fn step_1_takes_a_final_refusal_as_final_with_budget_left() {
     assert!(tried[0].contains("invalid"), "{tried:?}");
     assert!(!log.passed());
     assert!(started.elapsed() < Duration::from_secs(60), "it waited");
+}
+
+// ---- F5: the server DID pin holds before anything is posted --------------------------------------
+
+const SERVER_DID: &str = "did:pkh:eip155:1:0x0000000000000000000000000000000000000abc";
+const OTHER_DID: &str = "did:pkh:eip155:1:0x0000000000000000000000000000000000000def";
+const LEAVES: &str = "POST /v1/leaves";
+const SESSION: &str = "POST /auth/session";
+
+/// The aggregator as the run's preflight and sign-in see it; `leaves` answers the POST.
+async fn aggregator(leaves: Answer) -> Scripted {
+    scripted(move |line, _| match line.split('?').next().unwrap() {
+        "GET /version" => http(200, r#"{"service":"aqua-timestamp","revision":"abc"}"#),
+        "GET /health" => http(200, "ok"),
+        "GET /.well-known/aqua-identity" => {
+            http(200, &json!({ "server_did": SERVER_DID }).to_string())
+        }
+        "GET /auth/challenge" => http(200, r#"{"message":"m","nonce":"n"}"#),
+        SESSION => http(200, r#"{"token":"t"}"#),
+        LEAVES => leaves.clone(),
+        other => http(404, other),
+    })
+    .await
+}
+
+fn seal_config(base_url: &str, dir: &Path, reader: &Reader, pin: Option<&str>) -> SealConfig {
+    SealConfig {
+        base_url: base_url.to_string(),
+        run_dir: dir.join("run"),
+        identity_dir: dir.join("identity"),
+        reader: reader.clone(),
+        seal_trigger: SealTrigger::None,
+        expect_version: None,
+        expect_server_did: pin.map(str::to_string),
+        seal_grace: Duration::from_secs(1),
+        witness_grace: Duration::from_secs(1),
+        poll_interval: Duration::from_millis(5),
+        finality_budget: Duration::ZERO,
+    }
+}
+
+/// The run against the scripted aggregator, under a throwaway loopback identity.
+async fn seal_against(
+    server: &Scripted,
+    dir: &Path,
+    reader: &Reader,
+    pin: Option<&str>,
+) -> anyhow::Result<SealReport> {
+    let cfg = seal_config(&server.url, dir, reader, pin);
+    let id = for_base_url(&server.url, &cfg.identity_dir).unwrap();
+    run_seal(cfg, &id).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_did_other_than_the_pin_stops_the_run_before_anything_is_posted() {
+    let run = run().await;
+    let server = aggregator(http(500, "must not be reached")).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let err = seal_against(&server, tmp.path(), &run.reader, Some(OTHER_DID))
+        .await
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(err.contains("--expect-server-did"), "{err}");
+    assert!(err.contains("nothing was posted"), "{err}");
+    assert_eq!(server.hits(LEAVES), 0);
+    assert_eq!(server.hits(SESSION), 0);
+    assert!(!tmp.path().join("run").exists(), "no run directory");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_served_server_did_equal_to_the_pin_goes_on_to_the_post() {
+    let run = run().await;
+    let server = aggregator(http(500, "refused")).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let err = seal_against(&server, tmp.path(), &run.reader, Some(SERVER_DID))
+        .await
+        .err()
+        .expect("the POST was refused")
+        .to_string();
+    assert!(err.contains("/v1/leaves"), "{err}");
+    assert_eq!(server.hits(LEAVES), 1);
+}
+
+/// The library holds ruling 10 too, not only the command line.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_seal_on_a_remote_with_no_pin_is_refused_before_any_read() {
+    let run = run().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let loopback = aggregator(http(500, "unused")).await;
+    let id = for_base_url(&loopback.url, &tmp.path().join("identity")).unwrap();
+    let cfg = seal_config("https://e2e.example.invalid", tmp.path(), &run.reader, None);
+    let err = run_seal(cfg, &id).await.err().expect("refused").to_string();
+    assert!(err.contains("--expect-server-did"), "{err}");
+    assert!(!tmp.path().join("run").exists());
 }

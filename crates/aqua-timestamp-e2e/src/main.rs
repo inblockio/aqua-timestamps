@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use aqua_timestamp_e2e::flow::{
     run_full_flow, E2eOutcome, FlowOptions, PollBudget, ReaderConfig, SealTrigger,
 };
-use aqua_timestamp_e2e::seal::live::{run_seal, SealConfig};
+use aqua_timestamp_e2e::seal::live::{require_server_did_pin, run_seal, SealConfig};
 use aqua_timestamp_e2e::seal::log::StepLog;
 use aqua_timestamp_e2e::seal::policy::Reader;
 use aqua_timestamp_e2e::seal::replay::{run_replay, ReplayConfig};
@@ -93,7 +93,8 @@ enum Cmd {
         /// it any version passes; /version before must equal /version after in any case.
         #[arg(long)]
         expect_version: Option<String>,
-        /// When given, step 2 asserts the served server_did equals this.
+        /// The served server_did must equal this before anything is posted, and step 2 asserts
+        /// it. Required on a non-loopback --base-url; there is no default.
         #[arg(long)]
         expect_server_did: Option<String>,
         /// Seconds after the epoch's close to wait for its seal.
@@ -122,9 +123,9 @@ enum Cmd {
         /// Write the step logs and derived files here (default: stdout only, nothing written).
         #[arg(long)]
         out: Option<PathBuf>,
-        /// When given, step 2 asserts the persisted server_did equals this.
+        /// Step 2 asserts the persisted server_did equals this. Required; there is no default.
         #[arg(long)]
-        expect_server_did: Option<String>,
+        expect_server_did: String,
         /// EVM RPC URL of the reader's chain host. Default:
         /// https://ethereum-sepolia-rpc.publicnode.com.
         #[arg(long, env = "OPENWITNESS_E2E_EVM_RPC_URL")]
@@ -231,6 +232,7 @@ async fn main() -> Result<()> {
             evm_rpc_url,
         } => {
             let base_url = check_base_url(&base_url, allow_production)?;
+            require_server_did_pin(&base_url, expect_server_did.as_deref())?;
             println!("aqua-timestamp e2e :: seal");
             println!("base_url = {base_url}");
             let dir = identity_dir_or_default(identity_dir)?;
@@ -353,8 +355,10 @@ mod tests {
         std::env::remove_var("OPENWITNESS_E2E_BASE_URL");
         assert!(Cli::try_parse_from(["e2e", "seal"]).is_err());
         assert!(Cli::try_parse_from(["e2e", "seal", "--base-url", "http://127.0.0.1:1"]).is_ok());
-        assert!(Cli::try_parse_from(["e2e", "seal-replay", "d"]).is_ok());
-        assert!(Cli::try_parse_from(["e2e", "seal-replay", "d", "--identity-dir", "x"]).is_err());
-        assert!(Cli::try_parse_from(["e2e", "seal-replay", "d", "--base-url", "x"]).is_err());
+        let replay = ["e2e", "seal-replay", "d", "--expect-server-did", "did:x"];
+        assert!(Cli::try_parse_from(["e2e", "seal-replay", "d"]).is_err());
+        assert!(Cli::try_parse_from(replay).is_ok());
+        assert!(Cli::try_parse_from([&replay[..], &["--identity-dir", "x"]].concat()).is_err());
+        assert!(Cli::try_parse_from([&replay[..], &["--base-url", "x"]].concat()).is_err());
     }
 }

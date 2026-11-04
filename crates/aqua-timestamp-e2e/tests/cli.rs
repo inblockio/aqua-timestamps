@@ -112,6 +112,7 @@ fn a_remote_with_a_missing_identity_is_refused_on_live_and_on_seal() {
             .arg(&dir);
         if cmd == "seal" {
             c.arg("--run-dir").arg(&run);
+            c.args(["--expect-server-did", "did:pkh:eip155:1:0x01"]);
         }
         let out = c.output().unwrap();
         assert!(!out.status.success(), "{cmd}");
@@ -139,6 +140,37 @@ fn seal_refuses_production_without_the_flag_before_touching_the_identity() {
     assert!(!dir.exists());
 }
 
+/// Ruling 10: no default in code. A remote `seal` with no pin stops at the start, before the
+/// identity and before any network; the host is reserved and never resolves.
+#[test]
+fn seal_on_a_remote_without_the_server_did_pin_is_refused_at_the_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("id");
+    let run = tmp.path().join("run");
+    let out = bin()
+        .args(["seal", "--base-url", "https://e2e.example.invalid"])
+        .arg("--identity-dir")
+        .arg(&dir)
+        .arg("--run-dir")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--expect-server-did"), "{err}");
+    assert!(!dir.exists(), "no identity directory");
+    assert!(!run.exists(), "no run directory");
+}
+
+#[test]
+fn seal_replay_without_the_server_did_pin_does_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = bin().arg("seal-replay").arg(tmp.path()).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--expect-server-did"), "{err}");
+}
+
 #[test]
 fn seal_without_a_base_url_does_not_run() {
     let out = bin().arg("seal").output().unwrap();
@@ -149,7 +181,12 @@ fn seal_without_a_base_url_does_not_run() {
 #[test]
 fn seal_replay_of_an_incomplete_directory_names_the_file_and_fails() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = bin().arg("seal-replay").arg(tmp.path()).output().unwrap();
+    let out = bin()
+        .arg("seal-replay")
+        .arg(tmp.path())
+        .args(["--expect-server-did", "did:pkh:eip155:1:0x01"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("run.json"), "{err}");

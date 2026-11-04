@@ -33,6 +33,7 @@ use crate::flow::{
     get_retrying, http_get, http_post, mint_bearer, wait_for_seal, PollBudget, SealTrigger,
 };
 use crate::identity::StandingIdentity;
+use crate::target::is_loopback;
 use crate::witness::{fetch_served, WitnessMethod};
 
 /// Local clock ahead of the server by more than this stops the run: a T the SDK would read as
@@ -49,6 +50,8 @@ pub struct SealConfig {
     pub seal_trigger: SealTrigger,
     /// When set, `/version`'s revision must equal it before anything is posted.
     pub expect_version: Option<String>,
+    /// What `/.well-known/aqua-identity` must serve before anything is posted, and what step 2
+    /// compares. Required unless `base_url` is loopback.
     pub expect_server_did: Option<String>,
     /// How long after the epoch's close to wait for its seal.
     pub seal_grace: Duration,
@@ -88,6 +91,30 @@ pub fn check_expected_version(before: &str, expect: Option<&str>) -> Result<()> 
         let got = served_revision(before)?;
         if got != want {
             bail!("/version serves {got}, --expect-version wants {want}: nothing was posted");
+        }
+    }
+    Ok(())
+}
+
+/// Ruling 10: a remote run with no server DID pin is refused at the start. There is no default
+/// in code; loopback is the only place a run may take the served DID as it comes.
+pub fn require_server_did_pin(base_url: &str, pin: Option<&str>) -> Result<()> {
+    if pin.is_none() && !is_loopback(base_url) {
+        bail!("--expect-server-did is required on a non-loopback --base-url: {base_url} was not contacted");
+    }
+    Ok(())
+}
+
+/// The server DID pin before the first POST: what `/.well-known/aqua-identity` serves must be
+/// what `--expect-server-did` names, byte for byte.
+pub fn check_expected_server_did(identity_body: &str, expect: Option<&str>) -> Result<()> {
+    if let Some(want) = expect {
+        let identity: Value = serde_json::from_str(identity_body).context("aqua-identity json")?;
+        let got = identity["server_did"].as_str().unwrap_or("");
+        if got != want {
+            bail!(
+                "/.well-known/aqua-identity serves {got}, --expect-server-did wants {want}: nothing was posted"
+            );
         }
     }
     Ok(())
@@ -479,6 +506,7 @@ pub fn check_run_dir(run_dir: &Path, identity_dir: &Path) -> Result<()> {
 /// The whole `seal` run. Failed step assertions are in the report, not an `Err`; an `Err` means
 /// the live part stopped before the steps could run.
 pub async fn run_seal(cfg: SealConfig, identity: &StandingIdentity) -> Result<SealReport> {
+    require_server_did_pin(&cfg.base_url, cfg.expect_server_did.as_deref())?;
     check_run_dir(&cfg.run_dir, &cfg.identity_dir)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
@@ -487,6 +515,7 @@ pub async fn run_seal(cfg: SealConfig, identity: &StandingIdentity) -> Result<Se
     let sdk = sdk_rev()?;
     let pre = preflight(&client, &cfg.base_url).await?;
     check_expected_version(&pre.version, cfg.expect_version.as_deref())?;
+    check_expected_server_did(&pre.identity_body, cfg.expect_server_did.as_deref())?;
 
     let run = cfg.run_dir.clone();
     std::fs::create_dir_all(&run).with_context(|| format!("mkdir {}", run.display()))?;
@@ -558,6 +587,23 @@ mod tests {
         assert!(check_expected_version(V, Some("ab")).is_err());
         assert!(check_expected_version(V, Some("abcd")).is_err());
         assert!(check_expected_version("not json", Some("abc")).is_err());
+    }
+
+    #[test]
+    fn the_server_did_pin_is_exact_and_required_off_loopback() {
+        let body = r#"{"server_did":"did:pkh:eip155:1:0xAbC"}"#;
+        assert!(check_expected_server_did(body, None).is_ok());
+        assert!(check_expected_server_did(body, Some("did:pkh:eip155:1:0xAbC")).is_ok());
+        for other in ["did:pkh:eip155:1:0xabc", "did:pkh:eip155:1:0xAb", ""] {
+            assert!(
+                check_expected_server_did(body, Some(other)).is_err(),
+                "{other}"
+            );
+        }
+        assert!(check_expected_server_did("{}", Some("x")).is_err());
+        assert!(require_server_did_pin("https://openwitness.org", None).is_err());
+        assert!(require_server_did_pin("https://openwitness.org", Some("x")).is_ok());
+        assert!(require_server_did_pin("http://127.0.0.1:8080", None).is_ok());
     }
 
     #[test]
