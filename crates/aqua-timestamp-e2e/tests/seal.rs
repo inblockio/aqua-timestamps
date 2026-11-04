@@ -1113,3 +1113,75 @@ async fn run_seal_on_a_remote_with_no_pin_is_refused_before_any_read() {
     assert!(err.contains("--expect-server-did"), "{err}");
     assert!(!tmp.path().join("run").exists());
 }
+
+// ---- F7: step 7 counts per method, not only the sum ----------------------------------------------
+
+async fn step_7_over(run: &Run, copy: &tempfile::TempDir) -> StepLog {
+    let logs = steps_over_copy(
+        copy,
+        Steps::FromPersisted,
+        run.reader.clone(),
+        Duration::ZERO,
+    )
+    .await;
+    logs.into_iter().find(|l| l.number() == 7).unwrap()
+}
+
+/// Three EVM pairs and one qTSA pair sum to the same four as two of each.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_7_fails_a_listing_that_only_sums_right() {
+    let run = run().await;
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(&run.dir, copy.path());
+    let meta: Value = serde_json::from_str(&read(copy.path(), "run.json")).unwrap();
+    let epoch = meta["epoch_id"].as_u64().unwrap();
+    let edit = |method: &str, change: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+        let file = format!("epoch-{epoch}-{method}.json");
+        let mut body: Value = serde_json::from_str(&read(copy.path(), &file)).unwrap();
+        change(body["revisions"].as_object_mut().unwrap());
+        std::fs::write(copy.path().join(file), body.to_string()).unwrap();
+    };
+    let is_t = |r: &Value| r.get("payloads").is_some();
+    edit("evm", &|revisions| {
+        let t = revisions.values().find(|r| is_t(r)).unwrap().clone();
+        revisions.insert("0xextra".to_string(), t);
+    });
+    edit("qtsa", &|revisions| {
+        let key = revisions.iter().find(|(_, r)| is_t(r)).unwrap().0.clone();
+        revisions.remove(&key);
+    });
+    let seven = step_7_over(run, &copy).await;
+    assert!(!seven.passed(), "{:?}", seven.lines());
+    let failed: Vec<_> = seven
+        .lines()
+        .iter()
+        .filter(|l| l.starts_with("ASSERT FAIL"))
+        .collect();
+    assert_eq!(failed.len(), 2, "one per method: {failed:?}");
+}
+
+/// Ruling 2 stands: more leaves in the epoch than this run's is partial coverage with both
+/// numbers, no failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_7_logs_a_busier_epoch_as_partial_coverage_and_passes() {
+    let run = run().await;
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(&run.dir, copy.path());
+    let meta: Value = serde_json::from_str(&read(copy.path(), "run.json")).unwrap();
+    let file = format!("epochs-{}.json", meta["epoch_id"].as_u64().unwrap());
+    let mut body: Value = serde_json::from_str(&read(copy.path(), &file)).unwrap();
+    for item in body["epochs"].as_array_mut().unwrap() {
+        item["leaf_count"] = json!(7);
+    }
+    std::fs::write(copy.path().join(file), body.to_string()).unwrap();
+    let seven = step_7_over(run, &copy).await;
+    assert!(seven.passed(), "{:?}", seven.lines());
+    assert!(
+        seven
+            .lines()
+            .iter()
+            .any(|l| l.contains("partial coverage") && l.contains("leaf_count 7")),
+        "{:?}",
+        seven.lines()
+    );
+}

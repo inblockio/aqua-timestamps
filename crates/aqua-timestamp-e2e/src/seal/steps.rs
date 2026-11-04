@@ -1721,9 +1721,10 @@ fn step7_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
         );
         let body: Value = serde_json::from_str(&ctx.store.read(&epoch_file(epoch, m))?)?;
         let revisions = body["revisions"].as_object().cloned().unwrap_or_default();
+        let mut method_pairs = 0u64;
         for (k, r) in &revisions {
             let Some(p) = r.get("payloads") else { continue };
-            pairs += 1;
+            method_pairs += 1;
             log.l(format!("{} T {k}: {}", m.as_str(), shorten_token(p)));
             let stub = detect_stub(m, p);
             log.check(
@@ -1743,6 +1744,15 @@ fn step7_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
                 FALS,
             );
         }
+        log.check(
+            method_pairs == OWN_LEAVES,
+            format!(
+                "{} witness pairs read = {method_pairs}, {OWN_LEAVES} own leaves expected",
+                m.as_str()
+            ),
+            FALS,
+        );
+        pairs += method_pairs;
     }
     let Some(leaf_count) = item["leaf_count"].as_u64() else {
         log.check(false, format!("epoch {epoch} lists a leaf_count"), FALS);
