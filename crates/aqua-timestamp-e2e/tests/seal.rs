@@ -5,6 +5,7 @@
 //! One run per test binary: the tests share it read-only.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1027,7 +1028,7 @@ const LEAVES: &str = "POST /v1/leaves";
 const SESSION: &str = "POST /auth/session";
 
 /// The aggregator as the run's preflight and sign-in see it; `leaves` answers the POST.
-async fn aggregator(leaves: Answer) -> Scripted {
+async fn aggregator(leaves: impl Fn() -> Answer + Send + Sync + 'static) -> Scripted {
     scripted(move |line, _| match line.split('?').next().unwrap() {
         "GET /version" => http(200, r#"{"service":"aqua-timestamp","revision":"abc"}"#),
         "GET /health" => http(200, "ok"),
@@ -1036,7 +1037,7 @@ async fn aggregator(leaves: Answer) -> Scripted {
         }
         "GET /auth/challenge" => http(200, r#"{"message":"m","nonce":"n"}"#),
         SESSION => http(200, r#"{"token":"t"}"#),
-        LEAVES => leaves.clone(),
+        LEAVES => leaves(),
         other => http(404, other),
     })
     .await
@@ -1073,7 +1074,7 @@ async fn seal_against(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_did_other_than_the_pin_stops_the_run_before_anything_is_posted() {
     let run = run().await;
-    let server = aggregator(http(500, "must not be reached")).await;
+    let server = aggregator(|| http(500, "must not be reached")).await;
     let tmp = tempfile::tempdir().unwrap();
     let err = seal_against(&server, tmp.path(), &run.reader, Some(OTHER_DID))
         .await
@@ -1090,7 +1091,7 @@ async fn a_server_did_other_than_the_pin_stops_the_run_before_anything_is_posted
 #[tokio::test(flavor = "multi_thread")]
 async fn the_served_server_did_equal_to_the_pin_goes_on_to_the_post() {
     let run = run().await;
-    let server = aggregator(http(500, "refused")).await;
+    let server = aggregator(|| http(500, "refused")).await;
     let tmp = tempfile::tempdir().unwrap();
     let err = seal_against(&server, tmp.path(), &run.reader, Some(SERVER_DID))
         .await
@@ -1106,7 +1107,7 @@ async fn the_served_server_did_equal_to_the_pin_goes_on_to_the_post() {
 async fn run_seal_on_a_remote_with_no_pin_is_refused_before_any_read() {
     let run = run().await;
     let tmp = tempfile::tempdir().unwrap();
-    let loopback = aggregator(http(500, "unused")).await;
+    let loopback = aggregator(|| http(500, "unused")).await;
     let id = for_base_url(&loopback.url, &tmp.path().join("identity")).unwrap();
     let cfg = seal_config("https://e2e.example.invalid", tmp.path(), &run.reader, None);
     let err = run_seal(cfg, &id).await.err().expect("refused").to_string();
@@ -1184,4 +1185,97 @@ async fn step_7_logs_a_busier_epoch_as_partial_coverage_and_passes() {
         "{:?}",
         seven.lines()
     );
+}
+
+// ---- F13: the record before the POST ---------------------------------------------------------------
+
+fn run_record(dir: &Path) -> Value {
+    serde_json::from_str(&read(dir, "run.json")).unwrap()
+}
+
+/// The POST as the run's only irreversible act: its record is on disk when it goes out.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_json_is_on_disk_before_the_post_goes_out() {
+    let run = run().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("run");
+    let probe = dir.clone();
+    let on_disk_at_post = Arc::new(Mutex::new(None));
+    let seen = on_disk_at_post.clone();
+    let server = aggregator(move || {
+        *seen.lock().unwrap() = Some(probe.join("run.json").is_file());
+        http(500, "refused")
+    })
+    .await;
+    let err = seal_against(&server, tmp.path(), &run.reader, None)
+        .await
+        .err()
+        .expect("the POST was refused");
+    assert!(err.to_string().contains("/v1/leaves"), "{err}");
+    assert_eq!(*on_disk_at_post.lock().unwrap(), Some(true));
+    let record = run_record(&dir);
+    assert_eq!(record["post_status"], 500);
+    assert_eq!(record["post_body"], "refused");
+    assert!(record["s1"].is_string() && record["s2"].is_string());
+    assert!(record["run_id"].is_string() && record["sdk_rev"].is_string());
+}
+
+/// A POST with no answer may still have been accepted: the record stays, and a rerun in that
+/// directory cannot overwrite the prepared seals of leaves the server may hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_with_no_answer_leaves_a_record_and_a_rerun_is_refused() {
+    let run = run().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("run");
+    let server = aggregator(|| Answer::Hangup).await;
+    seal_against(&server, tmp.path(), &run.reader, None)
+        .await
+        .err()
+        .expect("no answer");
+    let record = run_record(&dir);
+    assert!(record["s1"].is_string() && record["s2"].is_string());
+    assert_eq!(record["post_status"], Value::Null);
+    let before = snapshot(&dir);
+    let err = seal_against(&server, tmp.path(), &run.reader, None)
+        .await
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(err.contains("already holds a run"), "{err}");
+    assert_eq!(snapshot(&dir), before, "the rerun touched the run");
+    assert_eq!(server.hits(LEAVES), 1, "the rerun posted");
+}
+
+/// An accepted POST whose answer cannot be read: the leaves are spent, so the answer is on record.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unparsable_202_is_on_record_and_a_replay_refuses_the_incomplete_run() {
+    let run = run().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("run");
+    let server = aggregator(|| http(202, "not json")).await;
+    seal_against(&server, tmp.path(), &run.reader, None)
+        .await
+        .err()
+        .expect("unparsable");
+    let record = run_record(&dir);
+    assert_eq!(record["post_status"], 202);
+    assert_eq!(record["post_body"], "not json");
+    assert!(record["s1"].is_string() && record["s2"].is_string());
+    let err = verify_complete(&dir).expect_err("no epoch on record");
+    assert_eq!(err.file, "run.json");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_run_directory_is_private_even_if_it_existed_before() {
+    let run = run().await;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&run.dir), 0o700);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("run");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let server = aggregator(|| http(500, "refused")).await;
+    let _ = seal_against(&server, tmp.path(), &run.reader, None).await;
+    assert_eq!(mode(&dir), 0o700);
 }

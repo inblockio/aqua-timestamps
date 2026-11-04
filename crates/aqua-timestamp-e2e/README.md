@@ -111,15 +111,18 @@ aqua-timestamp-e2e seal --base-url https://openwitness.org --allow-production \
 ### The run directory
 
 `--run-dir` (default `seal-run-<UTC>` under the working directory; never inside the identity
-directory; a directory that already holds a run is refused) holds the client state, the served
-bodies byte for byte:
+directory; made 0700; a directory that already holds a run is refused, so a rerun cannot overwrite the
+prepared seals of leaves the server may hold) holds the client state, the served bodies byte for
+byte. `run.json` is written before the POST and completed after it:
 
 `run.json`, `aqua-identity.json`, `set-folder.json`, `members/m<i>/tree.json`,
 `members/m<i>/files/m<i>.txt`, `nonces-<s>.json`, `leaves.json`, `prepared-seal-<s>.json`,
 `s1-evm.json`, `s1-qtsa.json`, `s2-qtsa.json`, `fetch-status.json`, `epochs-<N>.json`,
 `epoch-<N>-evm.json`, `epoch-<N>-qtsa.json`, `container-<1,2,5a,5a2,6b>.json`, `attestations-*.json`,
 `receipts-<s>/m<i>.json`, `step4b/` (empty unless a probe was wrongly accepted), `debug/`,
-`step-<n>.log`. No key material.
+`step-<n>.log`. No key material. `nonces-<s>.json` holds the receipt nonces that shield each member in
+the leaves: whoever holds them and a member's tip can tie that member to the sealed set, so do not
+publish the directory whole.
 
 ## `seal-replay <RUN-DIR>`
 

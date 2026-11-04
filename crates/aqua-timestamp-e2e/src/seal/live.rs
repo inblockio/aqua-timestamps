@@ -5,6 +5,7 @@
 //!
 //! The identity reaches this module already loaded: see [`crate::identity::for_base_url`].
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -297,6 +298,13 @@ async fn build_local_state(
     <[PreparedSeal; 2]>::try_from(prepared).map_err(|_| anyhow!("expected two prepared seals"))
 }
 
+fn write_run_json(run: &Path, meta: &Value) -> Result<()> {
+    write_file(
+        &run.join(RUN_JSON),
+        (serde_json::to_string_pretty(meta)? + "\n").as_bytes(),
+    )
+}
+
 /// Sign in, one `POST /v1/leaves` with both S, wait, pull, persist. The token ends here.
 async fn submit_and_pull(
     client: &Client,
@@ -313,7 +321,19 @@ async fn submit_and_pull(
     println!("S1 {s1}\nS2 {s2}");
 
     let bearer = mint_bearer(client, base_url, &identity.client_key()?).await?;
-    let submitted_at = utc();
+    // The record exists before the POST: an answer that never arrives or cannot be read may still
+    // mean the server holds the leaves, and a rerun must not overwrite their prepared seals.
+    let mut meta = json!({
+        "run_id": run_id,
+        "base_url": base_url,
+        "s1": s1,
+        "s2": s2,
+        "submitted_at": utc(),
+        "post_status": Value::Null,
+        "server_version_before": pre.version,
+        "sdk_rev": sdk,
+    });
+    write_run_json(run, &meta)?;
     let resp = http_post(
         client,
         &format!("{base_url}/v1/leaves"),
@@ -324,13 +344,10 @@ async fn submit_and_pull(
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
     println!("POST /v1/leaves -> {status} {body}");
+    meta["post_status"] = json!(status);
+    meta["post_body"] = json!(body);
+    write_run_json(run, &meta)?;
     if status != 202 {
-        write_file(
-            &run.join(RUN_JSON),
-            json!({"run_id": run_id, "s1": s1, "s2": s2, "post_status": status, "post_body": body})
-                .to_string()
-                .as_bytes(),
-        )?;
         bail!("POST /v1/leaves: expected 202, got {status} {body}");
     }
     let posted: Value = serde_json::from_str(&body).context("leaves response json")?;
@@ -340,23 +357,10 @@ async fn submit_and_pull(
     let closes_at = posted["epoch_closes_at"]
         .as_u64()
         .ok_or_else(|| anyhow!("leaves response has no epoch_closes_at"))?;
-    let meta = json!({
-        "run_id": run_id,
-        "base_url": base_url,
-        "s1": s1,
-        "s2": s2,
-        "submitted_at": submitted_at,
-        "post_status": status,
-        "post_body": posted,
-        "epoch_id": epoch_id,
-        "epoch_closes_at": closes_at,
-        "server_version_before": pre.version,
-        "sdk_rev": sdk,
-    });
-    write_file(
-        &run.join(RUN_JSON),
-        (serde_json::to_string_pretty(&meta)? + "\n").as_bytes(),
-    )?;
+    meta["post_body"] = posted;
+    meta["epoch_id"] = json!(epoch_id);
+    meta["epoch_closes_at"] = json!(closes_at);
+    write_run_json(run, &meta)?;
 
     if let SealTrigger::Driver(drive) = &cfg.seal_trigger {
         drive().await;
@@ -494,11 +498,13 @@ pub async fn read_epoch_bodies(
 /// Refuse a run directory that would overwrite a run, or sit beside the key.
 pub fn check_run_dir(run_dir: &Path, identity_dir: &Path) -> Result<()> {
     ensure_outside(run_dir, identity_dir, "--run-dir", "the identity directory")?;
-    if run_dir.join(RUN_JSON).exists() {
-        bail!(
-            "{} already holds a run ({RUN_JSON}): name another --run-dir",
-            run_dir.display()
-        );
+    for held in [RUN_JSON.to_string(), prepared_file(1), prepared_file(2)] {
+        if run_dir.join(&held).exists() {
+            bail!(
+                "{} already holds a run ({held}): name another --run-dir",
+                run_dir.display()
+            );
+        }
     }
     Ok(())
 }
@@ -519,6 +525,8 @@ pub async fn run_seal(cfg: SealConfig, identity: &StandingIdentity) -> Result<Se
 
     let run = cfg.run_dir.clone();
     std::fs::create_dir_all(&run).with_context(|| format!("mkdir {}", run.display()))?;
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 0700 {}", run.display()))?;
     write_file(&run.join(AQUA_IDENTITY), pre.identity_body.as_bytes())?;
     let run_id = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     println!("run id {run_id}, run directory {}", run.display());
@@ -562,10 +570,7 @@ pub async fn run_seal(cfg: SealConfig, identity: &StandingIdentity) -> Result<Se
     }
     let mut meta: Value = serde_json::from_str(&ctx.store.read(RUN_JSON)?)?;
     meta["server_version_after"] = json!(version_after);
-    write_file(
-        &run.join(RUN_JSON),
-        (serde_json::to_string_pretty(&meta)? + "\n").as_bytes(),
-    )?;
+    write_run_json(&run, &meta)?;
     Ok(SealReport {
         logs,
         run_dir: run,
@@ -625,6 +630,11 @@ mod tests {
         assert!(check_run_dir(&run, &id).is_ok());
         std::fs::create_dir_all(&run).unwrap();
         std::fs::write(run.join(RUN_JSON), "{}").unwrap();
+        assert!(check_run_dir(&run, &id).is_err());
+        // Prepared seals with no record yet: a crash before the POST. Still not overwritten.
+        std::fs::remove_file(run.join(RUN_JSON)).unwrap();
+        assert!(check_run_dir(&run, &id).is_ok());
+        std::fs::write(run.join(prepared_file(2)), "{}").unwrap();
         assert!(check_run_dir(&run, &id).is_err());
     }
 }
