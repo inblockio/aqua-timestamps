@@ -330,6 +330,14 @@ async fn replay_refuses_a_missing_or_malformed_file_by_name() {
         "s2-qtsa.json".into(),
         "container-1.json".into(),
         "attestations-1.json".into(),
+        "container-2.json".into(),
+        "attestations-2.json".into(),
+        "receipts-1/m1.json".into(),
+        "receipts-1/m2.json".into(),
+        "receipts-1/m3.json".into(),
+        "receipts-2/m1.json".into(),
+        "receipts-2/m2.json".into(),
+        "receipts-2/m3.json".into(),
         "fetch-status.json".into(),
         format!("epochs-{epoch}.json"),
         format!("epoch-{epoch}-evm.json"),
@@ -368,6 +376,27 @@ async fn replay_refuses_a_missing_or_malformed_file_by_name() {
             "{file}: {}",
             err.problem
         );
+    }
+}
+
+/// A read failure other than "not found" is no gap to step over: a directory in place of a file
+/// the replay byte-compares is refused by name.
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_refuses_an_unreadable_compared_file_by_name() {
+    let run = run().await;
+    for file in [
+        "container-2.json",
+        "attestations-2.json",
+        "receipts-1/m2.json",
+        "receipts-2/m3.json",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        copy_tree(&run.dir, tmp.path());
+        std::fs::remove_file(tmp.path().join(file)).unwrap();
+        std::fs::create_dir(tmp.path().join(file)).unwrap();
+        let err = verify_complete(tmp.path()).expect_err(file);
+        assert_eq!(err.file, file);
+        assert!(err.problem.starts_with("unreadable"), "{}", err.problem);
     }
 }
 

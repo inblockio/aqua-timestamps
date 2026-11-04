@@ -30,8 +30,8 @@ use serde_json::{json, Value};
 use super::log::{utc, StepLog};
 use super::policy::Reader;
 use super::run_dir::{
-    admit_members, blocking, epoch_file, epochs_file, hex_digest, prepared_file, RunState, Store,
-    ATTESTATIONS_1, CONTAINER_1, FETCH_STATUS,
+    admit_members, blocking, epoch_file, epochs_file, hex_digest, prepared_file, receipt_file,
+    RunState, Store, ATTESTATIONS_1, ATTESTATIONS_2, CONTAINER_1, CONTAINER_2, FETCH_STATUS,
 };
 use super::tamper::{
     alter_p_key_kept, link_of, only_p, rekey_bad_signature, relink_flipped_token, remove_p,
@@ -668,7 +668,7 @@ async fn step2_inner(ctx: &Ctx, log: &mut StepLog) -> Result<Option<Step2Out>> {
     for (i, r) in receipts.iter().enumerate() {
         ctx.store.derived(
             log,
-            &format!("receipts-1/m{}.json", i + 1),
+            &receipt_file(1, i + 1),
             r.to_json_string() + "\n",
             "partially_verified (receipt differs)",
         )?;
@@ -992,13 +992,13 @@ async fn step4a(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
     const DIFFERS: &str = "seal 2 differs from the persisted run";
     ctx.store.derived(
         log,
-        "container-2.json",
+        CONTAINER_2,
         serde_json::to_string(&out.container)?,
         DIFFERS,
     )?;
     ctx.store.derived(
         log,
-        "attestations-2.json",
+        ATTESTATIONS_2,
         out.attestations.to_canonical_json()?,
         DIFFERS,
     )?;
@@ -1025,7 +1025,7 @@ async fn step4a(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
     for (i, r) in receipts.iter().enumerate() {
         ctx.store.derived(
             log,
-            &format!("receipts-2/m{}.json", i + 1),
+            &receipt_file(2, i + 1),
             r.to_json_string() + "\n",
             DIFFERS,
         )?;

@@ -122,8 +122,10 @@ bodies byte for byte:
 
 Runs steps 2 to 7 from a run directory alone. Step 1 built the container the replay re-reads.
 
-What it needs: the files above (a missing or malformed one is an error naming the file, before any
-step runs, never a pass) and the EVM host's chain reads. Those are read-only JSON-RPC calls to
+What it needs: the files above except `leaves.json`, `step4b/`, `debug/`, `step-<n>.log` and what a
+replay builds anew and does not compare (`container-5a`, `container-5a2`, `container-6b`, the
+`attestations-5b-*` and `attestations-6b` documents). A missing or malformed one is an error naming
+the file, before any step runs, never a pass. It also needs the EVM host's chain reads. Those are read-only JSON-RPC calls to
 `--evm-rpc-url` (default the public Sepolia node), which go over HTTP POST to that RPC URL. TSA
 tokens are checked against the embedded EU trust list, with no network.
 

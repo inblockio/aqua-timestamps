@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use aqua_rs_sdk::core::seal::{MemberTree, PreparedSeal, SealAttestations, SealHead};
+use aqua_rs_sdk::core::seal::{MemberTree, PreparedSeal, SealAttestations, SealHead, SealReceipt};
 use aqua_rs_sdk::primitives::merkle::{shielded_leaf, BatchDigest};
 use aqua_rs_sdk::primitives::RevisionLink;
 use aqua_rs_sdk::schema::tree::Tree;
@@ -26,6 +26,8 @@ pub const LEAVES: &str = "leaves.json";
 pub const FETCH_STATUS: &str = "fetch-status.json";
 pub const CONTAINER_1: &str = "container-1.json";
 pub const ATTESTATIONS_1: &str = "attestations-1.json";
+pub const CONTAINER_2: &str = "container-2.json";
+pub const ATTESTATIONS_2: &str = "attestations-2.json";
 
 /// A seal run seals one set of this many members, twice.
 pub const MEMBERS: usize = 3;
@@ -50,6 +52,9 @@ pub fn member_name(member: usize) -> String {
 }
 pub fn member_body_file(member: usize) -> String {
     format!("members/m{member}/files/{}", member_name(member))
+}
+pub fn receipt_file(seal: usize, member: usize) -> String {
+    format!("receipts-{seal}/m{member}.json")
 }
 pub fn epochs_file(epoch: u64) -> String {
     format!("epochs-{epoch}.json")
@@ -163,9 +168,19 @@ pub fn verify_complete(dir: &Path) -> Result<(), RunDirError> {
         parse_witness(method, &text_of(dir, file)?)
             .map_err(|e| named(dir, file, format!("malformed: {e}")))?;
     }
-    let _: Tree = typed(dir, CONTAINER_1)?;
-    SealAttestations::parse(&text_of(dir, ATTESTATIONS_1)?)
-        .map_err(|e| named(dir, ATTESTATIONS_1, format!("malformed: {e}")))?;
+    for (container, attestations) in [(CONTAINER_1, ATTESTATIONS_1), (CONTAINER_2, ATTESTATIONS_2)]
+    {
+        let _: Tree = typed(dir, container)?;
+        SealAttestations::parse(&text_of(dir, attestations)?)
+            .map_err(|e| named(dir, attestations, format!("malformed: {e}")))?;
+    }
+    for seal in 1..=2 {
+        for member in 1..=MEMBERS {
+            let file = receipt_file(seal, member);
+            SealReceipt::parse(&text_of(dir, &file)?)
+                .map_err(|e| named(dir, &file, format!("malformed: {e}")))?;
+        }
+    }
     let status: Value = typed(dir, FETCH_STATUS)?;
     for key in [
         "s1_evm",
@@ -309,7 +324,13 @@ impl Store {
                         falsifier,
                     );
                 }
-                Err(_) => log.l(format!("{file}: not persisted by this run, not compared")),
+                Err(e) => {
+                    log.check(
+                        false,
+                        format!("{file}: the persisted bytes to compare cannot be read: {e}"),
+                        falsifier,
+                    );
+                }
             }
         }
         self.artifact(file, bytes)
@@ -478,5 +499,59 @@ impl RunState {
             leaves,
             heads,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn replay_store(dir: &Path) -> Store {
+        Store::new(dir, StoreMode::Replay { out: None })
+    }
+
+    #[test]
+    fn a_replay_compare_with_nothing_to_compare_fails_the_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut log = StepLog::new(4, "t", &[]);
+        replay_store(tmp.path())
+            .derived(&mut log, "container-2.json", b"x", "seal 2 differs")
+            .unwrap();
+        assert!(!log.passed(), "a missing file is no skipped compare");
+        assert!(
+            log.verdict().contains("seal 2 differs"),
+            "{}",
+            log.verdict()
+        );
+        assert!(
+            log.lines()
+                .iter()
+                .any(|l| l.starts_with("ASSERT FAIL") && l.contains("container-2.json")),
+            "{:?}",
+            log.lines()
+        );
+    }
+
+    #[test]
+    fn a_replay_compare_fails_on_any_read_error_not_only_on_a_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("container-2.json")).unwrap();
+        let mut log = StepLog::new(4, "t", &[]);
+        replay_store(tmp.path())
+            .derived(&mut log, "container-2.json", b"x", "seal 2 differs")
+            .unwrap();
+        assert!(!log.passed());
+    }
+
+    #[test]
+    fn a_replay_compare_of_equal_bytes_passes_and_of_other_bytes_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.json"), b"x").unwrap();
+        let store = replay_store(tmp.path());
+        let mut log = StepLog::new(4, "t", &[]);
+        store.derived(&mut log, "f.json", b"x", "differs").unwrap();
+        assert!(log.passed());
+        store.derived(&mut log, "f.json", b"y", "differs").unwrap();
+        assert!(!log.passed());
     }
 }
