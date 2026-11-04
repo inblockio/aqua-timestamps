@@ -1338,8 +1338,9 @@ async fn step5a(ctx: &Ctx, log: &mut StepLog, s2: Option<&Step2Out>) -> Result<(
     Ok(())
 }
 
-/// The re-keyed variant's reading of the tampered witness: it reached the signature check and
-/// named nobody. `Err` carries the reason for the assertion line.
+/// The re-keyed variant's reading of the tampered witness: it reached the signature check (the
+/// SDK's cause is `signature_invalid`, nothing else says the EIP-191 predicate ran) and named
+/// nobody. `Err` carries the reason for the assertion line.
 pub fn rekeyed_reading_ok(
     r: &SealAttestationsReading,
     t: &RevisionLink,
@@ -1369,6 +1370,9 @@ pub fn rekeyed_reading_ok(
         }
         AttestationVerdict::Unverifiable { cause } if cause.contains("did:") => {
             Err(format!("a DID in the cause: {cause}"))
+        }
+        AttestationVerdict::Unverifiable { cause } if !cause.starts_with("signature_invalid") => {
+            Err(format!("the signature check did not run: {cause}"))
         }
         AttestationVerdict::Unverifiable { cause } => {
             if format!("{witness:?}").contains("did:") {
@@ -1757,6 +1761,54 @@ fn step7_inner(ctx: &Ctx, log: &mut StepLog) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aqua_rs_sdk::core::seal::{AttestationReading, WitnessAttestations};
+
+    fn reading_with_cause(
+        t: &RevisionLink,
+        p: &RevisionLink,
+        cause: &str,
+    ) -> SealAttestationsReading {
+        SealAttestationsReading {
+            witnesses: vec![WitnessAttestations {
+                witness: t.clone(),
+                attestations: vec![AttestationReading {
+                    attestation: p.clone(),
+                    verdict: AttestationVerdict::Unverifiable {
+                        cause: cause.to_string(),
+                    },
+                }],
+            }],
+            unmatched: Vec::new(),
+            findings: Vec::new(),
+            rejected: None,
+        }
+    }
+
+    /// The live M1 assertion: only the SDK's `signature_invalid` means the EIP-191 check ran.
+    #[test]
+    fn step5b_rekeyed_reading_requires_the_sdks_signature_invalid_cause() {
+        let t = RevisionLink::from_bytes([1u8; 32]);
+        let p = RevisionLink::from_bytes([2u8; 32]);
+        let cause = "signature_invalid: predicate_false";
+        assert_eq!(
+            rekeyed_reading_ok(&reading_with_cause(&t, &p, cause), &t, &p),
+            Ok(cause.to_string())
+        );
+        for other in [
+            "malformed: no signature",
+            "scheme_unverifiable",
+            "not_a_built_in_signature_type",
+            "not_addressed",
+            "invalid_signature",
+            "x signature_invalid",
+            "signature_invalid: did:pkh:eip155:1:0x01",
+        ] {
+            assert!(
+                rekeyed_reading_ok(&reading_with_cause(&t, &p, other), &t, &p).is_err(),
+                "{other}"
+            );
+        }
+    }
 
     #[test]
     fn step7_equal_pairs_are_full_coverage() {
