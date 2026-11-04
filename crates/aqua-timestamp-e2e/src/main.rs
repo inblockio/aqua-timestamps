@@ -14,21 +14,20 @@
 //! * `selfcheck-all`: `selfcheck` plus ed25519 and p256 clients with ephemeral in-process keys
 //!   (those key types have no standing identity and never run against a remote).
 //!
-//! The verification logic lives in [`witness`] (SDK) and [`flow`]; every subcommand calls the
-//! same flow function.
-
-mod flow;
-mod identity;
-mod selfcheck;
-mod witness;
+//! The verification logic lives in the library (`witness` for the SDK calls, `flow`); every
+//! subcommand calls the same flow function.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::flow::{run_full_flow, FlowOptions, PollBudget, ReaderConfig, SealTrigger};
+use aqua_timestamp_e2e::flow::{
+    run_full_flow, E2eOutcome, FlowOptions, PollBudget, ReaderConfig, SealTrigger,
+};
+use aqua_timestamp_e2e::target::check_base_url;
+use aqua_timestamp_e2e::{identity, selfcheck};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -82,26 +81,6 @@ enum Cmd {
 
 fn print_step(n: usize, msg: &str) {
     println!("[step {n}] OK   {msg}");
-}
-
-/// Refuse the production host unless asked, and any URL that does not parse.
-fn check_base_url(raw: &str, allow_production: bool) -> Result<String> {
-    let url = reqwest::Url::parse(raw).with_context(|| format!("--base-url {raw:?}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("--base-url must be http or https, got {raw:?}");
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("--base-url {raw:?} has no host"))?
-        .to_ascii_lowercase();
-    let production = host == "openwitness.org" || host.ends_with(".openwitness.org");
-    if production && !allow_production {
-        bail!(
-            "{host} is production: refusing without --allow-production (the live production run \
-             belongs to OW2 / SP3, not to OW1)"
-        );
-    }
-    Ok(raw.trim_end_matches('/').to_string())
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -183,7 +162,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn print_summary(outcome: &crate::flow::E2eOutcome) {
+fn print_summary(outcome: &E2eOutcome) {
     println!();
     println!("------ e2e summary ------");
     println!("base_url       = {}", outcome.base_url);
@@ -212,35 +191,6 @@ fn print_summary(outcome: &crate::flow::E2eOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn production_host_needs_the_flag() {
-        for url in [
-            "https://openwitness.org",
-            "https://openwitness.org/",
-            "https://OpenWitness.org:443/x",
-            "https://api.openwitness.org",
-        ] {
-            assert!(check_base_url(url, false).is_err(), "{url}");
-            assert!(check_base_url(url, true).is_ok(), "{url}");
-        }
-    }
-
-    #[test]
-    fn other_hosts_pass_and_are_normalised() {
-        assert_eq!(
-            check_base_url("http://127.0.0.1:8080/", false).unwrap(),
-            "http://127.0.0.1:8080"
-        );
-        assert!(check_base_url("https://staging.example.org", false).is_ok());
-        assert!(check_base_url("https://notopenwitness.org", false).is_ok());
-    }
-
-    #[test]
-    fn junk_urls_are_refused() {
-        assert!(check_base_url("openwitness.org", true).is_err());
-        assert!(check_base_url("ftp://example.org", false).is_err());
-    }
 
     #[test]
     fn live_has_no_default_base_url() {

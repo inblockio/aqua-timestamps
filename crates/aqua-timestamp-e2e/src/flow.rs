@@ -238,7 +238,7 @@ impl ClientKey {
 
 /// EIP-191 personal_sign over keccak256(prefix || message). Returns the
 /// raw 65-byte `r || s || v` blob (with `v = recovery_id + 27`).
-fn eip191_personal_sign(message: &str, private_key: &[u8; 32]) -> Result<[u8; 65]> {
+pub fn eip191_personal_sign(message: &str, private_key: &[u8; 32]) -> Result<[u8; 65]> {
     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
     let signing_key = SigningKey::from_slice(private_key).context("k256 SigningKey")?;
     let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
@@ -255,7 +255,11 @@ fn eip191_personal_sign(message: &str, private_key: &[u8; 32]) -> Result<[u8; 65
     Ok(bytes)
 }
 
-async fn http_get(client: &Client, url: &str, bearer: Option<&str>) -> Result<reqwest::Response> {
+pub async fn http_get(
+    client: &Client,
+    url: &str,
+    bearer: Option<&str>,
+) -> Result<reqwest::Response> {
     let mut req = client.get(url);
     if let Some(t) = bearer {
         req = req.bearer_auth(t);
@@ -263,7 +267,7 @@ async fn http_get(client: &Client, url: &str, bearer: Option<&str>) -> Result<re
     req.send().await.with_context(|| format!("GET {url}"))
 }
 
-async fn http_post(
+pub async fn http_post(
     client: &Client,
     url: &str,
     bearer: Option<&str>,
@@ -277,7 +281,7 @@ async fn http_post(
 }
 
 /// Walk the full SIWE handshake for `client` and return its Bearer token.
-async fn mint_bearer(client: &Client, base_url: &str, key: &ClientKey) -> Result<String> {
+pub async fn mint_bearer(client: &Client, base_url: &str, key: &ClientKey) -> Result<String> {
     let challenge_url = format!("{base_url}/auth/challenge?did={}", key.did);
     let resp = http_get(client, &challenge_url, None).await?;
     if !resp.status().is_success() {
@@ -351,7 +355,8 @@ pub enum ReaderConfig {
 }
 
 impl ReaderConfig {
-    fn hosts(&self, evm_network: &str) -> Result<ReaderHosts> {
+    /// The reader's hosts for a witness on `evm_network`. `Live` needs a tokio runtime.
+    pub fn hosts(&self, evm_network: &str) -> Result<ReaderHosts> {
         match self {
             Self::Injected(h) => Ok(h.clone()),
             Self::Live { evm_rpc_url } => {
@@ -403,6 +408,36 @@ pub struct FlowOptions {
     /// remote (the main path creates no random DIDs).
     pub foreign_did_negative: bool,
     pub reader: ReaderConfig,
+}
+
+/// Poll `GET /v1/schedule` until `last_sealed_epoch_id` reaches `epoch_id`; past `deadline` it
+/// is an error.
+pub async fn wait_for_seal(
+    client: &Client,
+    base_url: &str,
+    epoch_id: u64,
+    deadline: Instant,
+    interval: Duration,
+) -> Result<()> {
+    let sched_url = format!("{base_url}/v1/schedule");
+    loop {
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for epoch {epoch_id} to seal");
+        }
+        let resp = http_get(client, &sched_url, None).await?;
+        if !resp.status().is_success() {
+            bail!("GET /v1/schedule: HTTP {}", resp.status());
+        }
+        let body: Value = resp.json().await.context("schedule json")?;
+        let last_sealed = body
+            .get("last_sealed_epoch_id")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if last_sealed >= epoch_id {
+            return Ok(());
+        }
+        tokio::time::sleep(interval).await;
+    }
 }
 
 /// The full M-E2E flow. Takes a pre-constructed primary [`ClientKey`] so the same flow drives
@@ -547,25 +582,14 @@ pub async fn run_full_flow(
         .unwrap_or(0);
     let dyn_budget = PollBudget::from_epoch_close(epoch_closes_at, now_secs, 30);
     let effective_deadline = opts.seal_wait.deadline.min(dyn_budget.deadline);
-    let sched_url = format!("{base_url}/v1/schedule");
-    loop {
-        if Instant::now() >= effective_deadline {
-            bail!("timed out waiting for epoch {epoch_id} to seal");
-        }
-        let resp = http_get(&client, &sched_url, None).await?;
-        if !resp.status().is_success() {
-            bail!("GET /v1/schedule: HTTP {}", resp.status());
-        }
-        let body: Value = resp.json().await.context("schedule json")?;
-        let last_sealed = body
-            .get("last_sealed_epoch_id")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if last_sealed >= epoch_id {
-            break;
-        }
-        tokio::time::sleep(opts.seal_wait.interval).await;
-    }
+    wait_for_seal(
+        &client,
+        base_url,
+        epoch_id,
+        effective_deadline,
+        opts.seal_wait.interval,
+    )
+    .await?;
     log(7, &format!("/v1/schedule confirms epoch {epoch_id} sealed"));
 
     // 8. Fetch BOTH witnesses. A sealed epoch is not yet a served witness (the anchor may be

@@ -159,7 +159,9 @@ fn pending_detail(body: &str) -> String {
         .unwrap_or_else(|| body.to_string())
 }
 
-fn parse_witness(method: WitnessMethod, body: &str) -> Result<Fetched, WitnessError> {
+/// The served body as a pair, without the stub verdict: the caller (the `seal` step log) asks
+/// [`detect_stub`] itself so the answer lands in its assertion line.
+pub fn parse_served(method: WitnessMethod, body: &str) -> Result<Fetched, WitnessError> {
     let malformed = |reason: String| WitnessError::Malformed { method, reason };
     let tree: Value =
         serde_json::from_str(body).map_err(|e| malformed(format!("not JSON: {e}")))?;
@@ -192,9 +194,6 @@ fn parse_witness(method: WitnessMethod, body: &str) -> Result<Fetched, WitnessEr
         .get("payloads")
         .cloned()
         .ok_or_else(|| malformed("timestamp revision has no payloads".into()))?;
-    if let Some(reason) = detect_stub(method, &payloads) {
-        return Err(WitnessError::Stub { method, reason });
-    }
     Ok(Fetched {
         method,
         tree,
@@ -202,6 +201,15 @@ fn parse_witness(method: WitnessMethod, body: &str) -> Result<Fetched, WitnessEr
         signature_key,
         payloads,
     })
+}
+
+/// [`parse_served`] plus the stub verdict: a stub payload is [`WitnessError::Stub`].
+pub fn parse_witness(method: WitnessMethod, body: &str) -> Result<Fetched, WitnessError> {
+    let fetched = parse_served(method, body)?;
+    if let Some(reason) = detect_stub(method, &fetched.payloads) {
+        return Err(WitnessError::Stub { method, reason });
+    }
+    Ok(fetched)
 }
 
 /// Fetch the witness of `leaf_hex` for `method`, polling while the server answers 202 until
@@ -215,6 +223,24 @@ pub async fn fetch_witness(
     deadline: Instant,
     interval: Duration,
 ) -> Result<Fetched, WitnessError> {
+    let (_, body) = fetch_served(
+        client, base_url, leaf_hex, bearer, method, deadline, interval,
+    )
+    .await?;
+    parse_witness(method, &body)
+}
+
+/// The poll of [`fetch_witness`], returning the HTTP status and the raw body of the first
+/// success, unparsed, so a caller can persist the served bytes before it judges them.
+pub async fn fetch_served(
+    client: &Client,
+    base_url: &str,
+    leaf_hex: &str,
+    bearer: &str,
+    method: WitnessMethod,
+    deadline: Instant,
+    interval: Duration,
+) -> Result<(u16, String), WitnessError> {
     let url = format!(
         "{base_url}/trees/by-leaf/{leaf_hex}?method={}",
         method.as_str()
@@ -229,7 +255,7 @@ pub async fn fetch_witness(
                 match status {
                     StatusCode::ACCEPTED => pending = Some(pending_detail(&body)),
                     StatusCode::NOT_FOUND => return Err(WitnessError::NotFound { method, body }),
-                    s if s.is_success() => return parse_witness(method, &body),
+                    s if s.is_success() => return Ok((s.as_u16(), body)),
                     s => {
                         return Err(WitnessError::Http {
                             method,
