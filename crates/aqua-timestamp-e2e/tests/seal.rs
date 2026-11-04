@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use aqua_rs_sdk::core::seal::{
     read_seal_attestations, verify_seal_container, AttestationVerdict, SealReading,
@@ -15,17 +16,20 @@ use aqua_rs_sdk::core::seal::{
 use aqua_rs_sdk::primitives::RevisionLink;
 use aqua_rs_sdk::schema::tree::Tree;
 use aqua_rs_sdk::schema::AnyRevision;
+use aqua_timestamp_e2e::flow::{wait_for_seal, PollBudget};
+use aqua_timestamp_e2e::seal::live::read_epoch_bodies;
 use aqua_timestamp_e2e::seal::log::{all_passed, StepLog};
 use aqua_timestamp_e2e::seal::policy::Reader;
 use aqua_timestamp_e2e::seal::replay::{run_replay, ReplayConfig};
-use aqua_timestamp_e2e::seal::run_dir::verify_complete;
-use aqua_timestamp_e2e::seal::steps::{rekeyed_reading_ok, served_witness};
+use aqua_timestamp_e2e::seal::run_dir::{verify_complete, RunState, Store, StoreMode};
+use aqua_timestamp_e2e::seal::steps::{self, rekeyed_reading_ok, served_witness, Ctx, Steps};
 use aqua_timestamp_e2e::seal::tamper::{
     alter_p_key_kept, link_of, rekey_bad_signature, relink_flipped_token,
 };
 use aqua_timestamp_e2e::selfcheck::run_seal_in_process;
 use aqua_timestamp_e2e::witness::{ReaderHosts, WitnessMethod};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::OnceCell;
 
 struct Run {
@@ -603,4 +607,308 @@ async fn m1_an_addressed_p_with_a_bad_signature_runs_the_signature_check() {
     // The check itself refuses a verified P: it is no always-pass.
     let why = rekeyed_reading_ok(&honest, &t, &p_link).expect_err("a verified P is a failure");
     assert!(why.contains("Verified"), "{why}");
+}
+
+// ---- a scripted server: the faults the in-process aggregator cannot show ------------------------
+
+#[derive(Clone)]
+enum Answer {
+    /// Read the request, then close the connection: a transport error at the client.
+    Hangup,
+    /// A 200 that promises more body than it sends: the body read fails at the client.
+    Truncated,
+    Http(u16, String),
+}
+
+fn http(status: u16, body: &str) -> Answer {
+    Answer::Http(status, body.to_string())
+}
+
+struct Scripted {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl Scripted {
+    fn hits(&self, line: &str) -> usize {
+        let requests = self.requests.lock().unwrap();
+        requests.iter().filter(|r| r.as_str() == line).count()
+    }
+}
+
+/// Serve on localhost until the test ends. `answer` gets the request line's method and path, and
+/// how many times that same request came before.
+async fn scripted(answer: impl Fn(&str, usize) -> Answer + Send + Sync + 'static) -> Scripted {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = requests.clone();
+    let answer = Arc::new(answer);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let (seen, answer) = (seen.clone(), answer.clone());
+            tokio::spawn(async move {
+                let Some(line) = read_request(&mut stream).await else {
+                    return;
+                };
+                let before = {
+                    let mut seen = seen.lock().unwrap();
+                    let before = seen.iter().filter(|r| **r == line).count();
+                    seen.push(line.clone());
+                    before
+                };
+                let reply = match answer(&line, before) {
+                    Answer::Hangup => return,
+                    Answer::Truncated => http_reply(200, 1000, "{"),
+                    Answer::Http(status, body) => http_reply(status, body.len(), &body),
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    Scripted { url, requests }
+}
+
+/// The request line's method and path, with the request read to its end.
+async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let end = loop {
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        raw.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&raw[..end]).to_string();
+    let length: usize = head
+        .lines()
+        .find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    while raw.len() < end + length {
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        raw.extend_from_slice(&chunk[..n]);
+    }
+    let mut parts = head.lines().next()?.split(' ');
+    Some(format!("{} {}", parts.next()?, parts.next()?))
+}
+
+fn http_reply(status: u16, length: usize, body: &str) -> String {
+    let date = chrono::Utc::now().to_rfc2822();
+    format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nDate: {date}\r\nConnection: close\r\n\r\n{body}"
+    )
+}
+
+// ---- F3: live-run reads survive what a proxy does, 4xx stays final ------------------------------
+
+const SCHEDULE: &str = "GET /v1/schedule";
+
+fn budget(millis: u64) -> PollBudget {
+    PollBudget {
+        deadline: Instant::now() + Duration::from_millis(millis),
+        interval: Duration::from_millis(5),
+    }
+}
+
+async fn wait(server: &Scripted, millis: u64) -> (anyhow::Result<()>, Vec<String>) {
+    let mut lines = Vec::new();
+    let b = budget(millis);
+    let result = wait_for_seal(
+        &reqwest::Client::new(),
+        &server.url,
+        7,
+        b.deadline,
+        b.interval,
+        &mut |line| lines.push(line),
+    )
+    .await;
+    (result, lines)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_for_seal_retries_a_transport_error_and_a_5xx_logging_each_attempt() {
+    let server = scripted(|_, n| match n {
+        0 => http(502, "<html>bad gateway</html>"),
+        1 => Answer::Hangup,
+        2 => Answer::Truncated,
+        3 => http(503, ""),
+        4 => http(200, r#"{"last_sealed_epoch_id":6}"#),
+        _ => http(200, r#"{"last_sealed_epoch_id":7}"#),
+    })
+    .await;
+    let (result, lines) = wait(&server, 30_000).await;
+    result.expect("the epoch sealed");
+    assert_eq!(server.hits(SCHEDULE), 6);
+    assert_eq!(lines.len(), 4, "one line per failed attempt: {lines:?}");
+    assert!(lines[0].contains("502"), "{lines:?}");
+    assert!(lines[3].contains("503"), "{lines:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_for_seal_takes_a_4xx_as_final() {
+    for status in [400, 403, 404, 410] {
+        let server = scripted(move |_, _| http(status, "no")).await;
+        let (result, _) = wait(&server, 30_000).await;
+        let err = result.expect_err("a 4xx is final");
+        assert!(err.to_string().contains(&status.to_string()), "{err}");
+        assert_eq!(server.hits(SCHEDULE), 1, "{status} was not retried");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_for_seal_gives_up_at_the_deadline_with_the_last_answer() {
+    let server = scripted(|_, _| http(503, "still down")).await;
+    let (result, lines) = wait(&server, 1_000).await;
+    let err = result.expect_err("no seal, no pass").to_string();
+    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("503"), "{err}");
+    assert!(lines.len() >= 2, "{lines:?}");
+}
+
+const EVM: &str = "GET /trees?epoch=7&method=evm";
+const QTSA: &str = "GET /trees?epoch=7&method=qtsa";
+const EPOCHS: &str = "GET /v1/epochs?from=7&limit=1";
+
+async fn epoch_reads(
+    server: &Scripted,
+    millis: u64,
+) -> (
+    serde_json::Map<String, Value>,
+    tempfile::TempDir,
+    Vec<String>,
+) {
+    let run = tempfile::tempdir().unwrap();
+    let mut lines = Vec::new();
+    let reads = read_epoch_bodies(
+        &reqwest::Client::new(),
+        &server.url,
+        "token",
+        7,
+        run.path(),
+        budget(millis),
+        &mut |line| lines.push(line),
+    )
+    .await
+    .expect("a failed read is recorded, it does not discard the run");
+    (reads, run, lines)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_epoch_reads_retry_a_transport_error_and_a_5xx_and_keep_the_served_bytes() {
+    let server = scripted(|line, n| match (line, n) {
+        (EVM, 0) => http(502, "<html>"),
+        (QTSA, 0) => Answer::Hangup,
+        (EPOCHS, 0) => Answer::Truncated,
+        (EVM, _) => http(200, r#"{"revisions":{"evm":1}}"#),
+        (QTSA, _) => http(200, r#"{"revisions":{"qtsa":1}}"#),
+        _ => http(200, r#"{"epochs":[]}"#),
+    })
+    .await;
+    let (reads, run, lines) = epoch_reads(&server, 30_000).await;
+    for key in ["epoch_evm", "epoch_qtsa", "epochs"] {
+        assert_eq!(reads[key]["status"], 200, "{key}");
+    }
+    assert_eq!(lines.len(), 3, "one line per failed attempt: {lines:?}");
+    assert_eq!(
+        read(run.path(), "epoch-7-evm.json"),
+        r#"{"revisions":{"evm":1}}"#
+    );
+    assert_eq!(
+        read(run.path(), "epoch-7-qtsa.json"),
+        r#"{"revisions":{"qtsa":1}}"#
+    );
+    assert_eq!(read(run.path(), "epochs-7.json"), r#"{"epochs":[]}"#);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_epoch_read_takes_a_4xx_as_final_and_records_it() {
+    let server = scripted(|line, _| match line {
+        EVM => http(410, r#"{"error":"gone"}"#),
+        _ => http(200, "{}"),
+    })
+    .await;
+    let (reads, run, lines) = epoch_reads(&server, 30_000).await;
+    assert_eq!(server.hits(EVM), 1);
+    assert_eq!(reads["epoch_evm"]["status"], 410);
+    assert_eq!(read(run.path(), "epoch-7-evm.json"), r#"{"error":"gone"}"#);
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+/// A run that already holds its witnesses is not discarded by an epoch read that stays down: the
+/// failure is on record and no body is invented for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_epoch_read_that_stays_down_is_recorded_with_no_body_and_the_rest_still_read() {
+    let server = scripted(|line, _| match line {
+        EVM => http(503, "down"),
+        _ => http(200, "{}"),
+    })
+    .await;
+    let (reads, run, _) = epoch_reads(&server, 150).await;
+    assert_eq!(reads["epoch_evm"]["status"], Value::Null);
+    assert!(
+        reads["epoch_evm"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("503"),
+        "{reads:?}"
+    );
+    assert!(!run.path().join("epoch-7-evm.json").exists());
+    assert_eq!(reads["epoch_qtsa"]["status"], 200);
+    assert_eq!(reads["epochs"]["status"], 200);
+}
+
+/// The steps over a copy of the finished run, as a live run reads it: the copy takes what they
+/// write.
+async fn steps_over_copy(
+    copy: &tempfile::TempDir,
+    which: Steps,
+    reader: Reader,
+    finality_budget: Duration,
+) -> Vec<StepLog> {
+    let state = RunState::load(copy.path(), &reader.aq).await.unwrap();
+    let ctx = Ctx {
+        store: Store::new(copy.path(), StoreMode::Persist),
+        reader,
+        state,
+        header: Vec::new(),
+        expect_server_did: None,
+        finality_budget,
+    };
+    steps::run(&ctx, which, "test").await.unwrap()
+}
+
+/// The recorded failure of an epoch read ends in a failed step 7, not a pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_epoch_read_that_stayed_down_fails_step_7() {
+    let run = run().await;
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(&run.dir, copy.path());
+    let meta: Value = serde_json::from_str(&read(copy.path(), "run.json")).unwrap();
+    let epoch = meta["epoch_id"].as_u64().unwrap();
+    std::fs::remove_file(copy.path().join(format!("epoch-{epoch}-evm.json"))).unwrap();
+    let mut status: Value = serde_json::from_str(&read(copy.path(), "fetch-status.json")).unwrap();
+    status["epoch_evm"] = json!({"status": null, "error": "HTTP 503", "at": "t"});
+    std::fs::write(copy.path().join("fetch-status.json"), status.to_string()).unwrap();
+    let logs = steps_over_copy(
+        &copy,
+        Steps::FromPersisted,
+        run.reader.clone(),
+        Duration::ZERO,
+    )
+    .await;
+    let seven = logs.iter().find(|l| l.number() == 7).unwrap();
+    assert!(!seven.passed(), "{:?}", seven.lines());
+    assert!(!all_passed(&logs));
 }

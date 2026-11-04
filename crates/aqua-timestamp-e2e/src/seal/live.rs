@@ -29,7 +29,9 @@ use super::run_dir::{
 };
 use super::sdk_rev;
 use super::steps::{self, Ctx, Steps};
-use crate::flow::{http_get, http_post, mint_bearer, wait_for_seal, SealTrigger};
+use crate::flow::{
+    get_retrying, http_get, http_post, mint_bearer, wait_for_seal, PollBudget, SealTrigger,
+};
 use crate::identity::StandingIdentity;
 use crate::witness::{fetch_served, WitnessMethod};
 
@@ -342,6 +344,7 @@ async fn submit_and_pull(
         epoch_id,
         after_close(cfg.seal_grace),
         cfg.poll_interval,
+        &mut |line| println!("{line}"),
     )
     .await?;
     println!("epoch {epoch_id} sealed at {}", utc());
@@ -396,30 +399,69 @@ async fn submit_and_pull(
             }
         }
     }
-    for method in [WitnessMethod::Evm, WitnessMethod::Qtsa] {
-        let url = format!(
-            "{base_url}/trees?epoch={epoch_id}&method={}",
-            method.as_str()
-        );
-        let resp = http_get(client, &url, Some(&bearer)).await?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        write_file(&run.join(epoch_file(epoch_id, method)), body.as_bytes())?;
-        fetch_status.insert(
-            format!("epoch_{}", method.as_str()),
-            json!({"status": status, "at": utc()}),
-        );
-    }
-    let url = format!("{base_url}/v1/epochs?from={epoch_id}&limit=1");
-    let resp = http_get(client, &url, Some(&bearer)).await?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    write_file(&run.join(epochs_file(epoch_id)), body.as_bytes())?;
-    fetch_status.insert("epochs".into(), json!({"status": status, "at": utc()}));
+    let reads = read_epoch_bodies(
+        client,
+        base_url,
+        &bearer,
+        epoch_id,
+        run,
+        PollBudget {
+            deadline,
+            interval: iv,
+        },
+        &mut |line| println!("{line}"),
+    )
+    .await?;
+    fetch_status.extend(reads);
     write_file(
         &run.join(FETCH_STATUS),
         (serde_json::to_string_pretty(&Value::Object(fetch_status))? + "\n").as_bytes(),
     )
+}
+
+/// The epoch's listing per method and its `/v1/epochs` row, persisted byte for byte, each read
+/// retried within `budget` (see [`get_retrying`]). The answers go into `fetch-status.json`. A read
+/// that stays down is recorded with its error and leaves no body, which fails step 7; it does not
+/// discard a run that already holds its witnesses.
+pub async fn read_epoch_bodies(
+    client: &Client,
+    base_url: &str,
+    bearer: &str,
+    epoch_id: u64,
+    run: &Path,
+    budget: PollBudget,
+    log: &mut dyn FnMut(String),
+) -> Result<serde_json::Map<String, Value>> {
+    let listing = |method: WitnessMethod| {
+        (
+            format!("epoch_{}", method.as_str()),
+            epoch_file(epoch_id, method),
+            format!(
+                "{base_url}/trees?epoch={epoch_id}&method={}",
+                method.as_str()
+            ),
+        )
+    };
+    let mut fetch_status = serde_json::Map::new();
+    for (key, file, url) in [
+        listing(WitnessMethod::Evm),
+        listing(WitnessMethod::Qtsa),
+        (
+            "epochs".to_string(),
+            epochs_file(epoch_id),
+            format!("{base_url}/v1/epochs?from={epoch_id}&limit=1"),
+        ),
+    ] {
+        let entry = match get_retrying(client, &url, Some(bearer), &budget, log).await {
+            Ok((status, body)) => {
+                write_file(&run.join(file), body.as_bytes())?;
+                json!({"status": status, "at": utc()})
+            }
+            Err(last) => json!({"status": Value::Null, "error": last, "at": utc()}),
+        };
+        fetch_status.insert(key, entry);
+    }
+    Ok(fetch_status)
 }
 
 /// Refuse a run directory that would overwrite a run, or sit beside the key.

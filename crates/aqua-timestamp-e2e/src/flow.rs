@@ -410,25 +410,76 @@ pub struct FlowOptions {
     pub reader: ReaderConfig,
 }
 
+/// One read of `url`, repeated until `budget.deadline` while the answer is a transport error
+/// (the body read included) or a 5xx, with one `log` line per failed attempt. Any other answer is
+/// final and returned, a 4xx included. `Err` is the last failure: a read that never got an answer
+/// is never an answer. Run at least once.
+pub async fn get_retrying(
+    client: &Client,
+    url: &str,
+    bearer: Option<&str>,
+    budget: &PollBudget,
+    log: &mut dyn FnMut(String),
+) -> std::result::Result<(u16, String), String> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let failure = match http_get(client, url, bearer).await {
+            Err(e) => format!("{e:#}"),
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.text().await {
+                    Err(e) => format!("HTTP {status}, body read failed: {e}"),
+                    Ok(body) if status.is_server_error() => {
+                        let shown: String = body.chars().take(200).collect();
+                        format!("HTTP {status} {shown}")
+                    }
+                    Ok(body) => return Ok((status.as_u16(), body)),
+                }
+            }
+        };
+        let now = Instant::now();
+        let at = chrono::Utc::now().to_rfc3339();
+        if now >= budget.deadline {
+            log(format!(
+                "GET {url}: attempt {attempt} at {at}: {failure}; deadline reached"
+            ));
+            return Err(failure);
+        }
+        log(format!(
+            "GET {url}: attempt {attempt} at {at}: {failure}; retry in {:?}",
+            budget.interval
+        ));
+        tokio::time::sleep(budget.interval.min(budget.deadline - now)).await;
+    }
+}
+
 /// Poll `GET /v1/schedule` until `last_sealed_epoch_id` reaches `epoch_id`; past `deadline` it
-/// is an error.
+/// is an error. A transport error or a 5xx is retried up to `deadline` and logged per attempt;
+/// a 4xx is final.
 pub async fn wait_for_seal(
     client: &Client,
     base_url: &str,
     epoch_id: u64,
     deadline: Instant,
     interval: Duration,
+    log: &mut dyn FnMut(String),
 ) -> Result<()> {
     let sched_url = format!("{base_url}/v1/schedule");
+    let budget = PollBudget { deadline, interval };
     loop {
         if Instant::now() >= deadline {
             bail!("timed out waiting for epoch {epoch_id} to seal");
         }
-        let resp = http_get(client, &sched_url, None).await?;
-        if !resp.status().is_success() {
-            bail!("GET /v1/schedule: HTTP {}", resp.status());
+        let (status, body) = get_retrying(client, &sched_url, None, &budget, log)
+            .await
+            .map_err(|last| {
+                anyhow!("timed out waiting for epoch {epoch_id} to seal; last read: {last}")
+            })?;
+        if !(200..300).contains(&status) {
+            bail!("GET /v1/schedule: HTTP {status}");
         }
-        let body: Value = resp.json().await.context("schedule json")?;
+        let body: Value = serde_json::from_str(&body).context("schedule json")?;
         let last_sealed = body
             .get("last_sealed_epoch_id")
             .and_then(Value::as_u64)
@@ -588,6 +639,7 @@ pub async fn run_full_flow(
         epoch_id,
         effective_deadline,
         opts.seal_wait.interval,
+        &mut |line| log(7, &line),
     )
     .await?;
     log(7, &format!("/v1/schedule confirms epoch {epoch_id} sealed"));
