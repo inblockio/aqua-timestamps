@@ -12,9 +12,11 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aqua_rs_sdk::schema::timestamp::TimestampValue;
+use aqua_rs_sdk::{HostError, QualifiedVerifyLevel, TsaTokenFacts, WebHost};
 use aqua_timestamp::{
     build_app_with_anchors,
     config::{
@@ -35,7 +37,17 @@ use crate::flow::{
     StepLogger,
 };
 use crate::identity;
+use crate::seal::live::{run_seal, SealConfig, SealReport};
+use crate::seal::policy::{Reader, ReaderPolicy};
 use crate::witness::ReaderHosts;
+
+/// The anchors' stamp time in a main path selfcheck.
+const OFFLINE_ANCHOR_TIME: u64 = 1_000;
+/// The simulated chain's contract.
+const OFFLINE_EVM_CONTRACT: &str = "0xDEAD000000000000000000000000000000000000";
+/// What the seal selfcheck's TSA double reports as its token's facts.
+const OFFLINE_TSA_POLICY_OID: &str = "1.2.3.4.5";
+const OFFLINE_TSA_ISSUER: &str = "CN=Offline Selfcheck TSA";
 
 /// The same Hardhat / Foundry default mnemonic used in
 /// `crates/aqua-timestamp/tests/witness_flow.rs` for the service identity.
@@ -79,7 +91,8 @@ async fn run_with_reader(
     let addr: SocketAddr = listener.local_addr().context("local_addr")?;
     let base_url = format!("http://{addr}");
 
-    let (router, _state, seal_tx, _tmp_keep, hosts) = build_in_process(tmp).await?;
+    let (anchors, hosts) = offline_anchors(OFFLINE_ANCHOR_TIME);
+    let (router, _state, seal_tx, _tmp_keep) = build_in_process(tmp, anchors).await?;
 
     // Spin up the server task. We swallow its return value; the test
     // tears it down via `abort()` once the flow completes.
@@ -135,7 +148,8 @@ pub async fn run_all_methods(
     let addr: SocketAddr = listener.local_addr().context("local_addr")?;
     let base_url = format!("http://{addr}");
 
-    let (router, _state, seal_tx, _tmp_keep, hosts) = build_in_process(tmp).await?;
+    let (anchors, hosts) = offline_anchors(OFFLINE_ANCHOR_TIME);
+    let (router, _state, seal_tx, _tmp_keep) = build_in_process(tmp, anchors).await?;
     let server_handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router.into_make_service()).await;
     });
@@ -197,12 +211,12 @@ fn options(hosts: ReaderHosts) -> FlowOptions {
 
 async fn build_in_process(
     tmp: TempDir,
+    anchors: AnchorOverrides,
 ) -> Result<(
     axum::Router,
     Arc<aqua_timestamp::state::AppState>,
     mpsc::Sender<SealTick>,
     TempDir,
-    ReaderHosts,
 )> {
     let cfg = Config {
         server: ServerConfig {
@@ -247,7 +261,6 @@ async fn build_in_process(
         .context("ServiceIdentity::from_mnemonic")?;
 
     let (seal_tx, seal_rx) = mpsc::channel::<SealTick>(8);
-    let (anchors, hosts) = offline_anchors();
     let (router, state) = build_app_with_anchors(
         cfg,
         identity,
@@ -258,7 +271,7 @@ async fn build_in_process(
     .await
     .context("build_app")?;
 
-    Ok((router, state, seal_tx, tmp, hosts))
+    Ok((router, state, seal_tx, tmp))
 }
 
 /// Offline anchor providers for the in-process selfcheck: fixed anchor facts,
@@ -266,7 +279,7 @@ async fn build_in_process(
 /// rehash, batch inclusion, service signature), not an anchor; these
 /// witnesses do not verify against a chain or a TSA. Never used by the
 /// server binary.
-fn offline_anchors() -> (AnchorOverrides, ReaderHosts) {
+fn offline_anchors(anchor_time: u64) -> (AnchorOverrides, ReaderHosts) {
     let fact = |sender: &str, provider: &str, tx: String, contract: &str, network: &str| {
         TimestampValue::new(
             vec![],
@@ -276,7 +289,7 @@ fn offline_anchors() -> (AnchorOverrides, ReaderHosts) {
             contract.to_string(),
             network.to_string(),
             String::new(),
-            1_000,
+            anchor_time,
             1,
             0,
             String::new(),
@@ -288,7 +301,7 @@ fn offline_anchors() -> (AnchorOverrides, ReaderHosts) {
         "0xCAFE000000000000000000000000000000000000",
         "",
         format!("0x{}", "ab".repeat(32)),
-        "0xDEAD000000000000000000000000000000000000",
+        OFFLINE_EVM_CONTRACT,
         "sepolia",
     )));
     let tsa = Arc::new(SimTsa::new(fact(
@@ -314,6 +327,118 @@ fn offline_anchors() -> (AnchorOverrides, ReaderHosts) {
         },
         hosts,
     )
+}
+
+/// The seal selfcheck's TSA host: the simulated TSA's verdict, plus the token facts an honest
+/// qualified TSA host reports (the simulated TSA reports none, and the SDK never admits a token
+/// without its facts). A token the simulated TSA did not issue, as after step 5's byte flip,
+/// still fails.
+struct FactsOfVerifiedTokens {
+    inner: Arc<dyn WebHost>,
+}
+
+impl WebHost for FactsOfVerifiedTokens {
+    fn verify_tsa_token(
+        &self,
+        tsa_response: &str,
+        merkle_root: &str,
+        timestamp: u64,
+    ) -> Result<(QualifiedVerifyLevel, String, Option<TsaTokenFacts>), HostError> {
+        let (level, message, _) =
+            self.inner
+                .verify_tsa_token(tsa_response, merkle_root, timestamp)?;
+        let facts = (level == QualifiedVerifyLevel::Verified).then(|| {
+            let mut facts =
+                TsaTokenFacts::new(OFFLINE_TSA_POLICY_OID.into(), OFFLINE_TSA_ISSUER.into());
+            facts.qualified_root = true;
+            facts
+        });
+        Ok((level, message, facts))
+    }
+}
+
+/// The reader of a seal selfcheck: the pinned policy shape over the doubles' values.
+fn seal_selfcheck_reader(hosts: ReaderHosts) -> Reader {
+    Reader::new(
+        hosts,
+        ReaderPolicy {
+            tsa_policy_oid: OFFLINE_TSA_POLICY_OID.into(),
+            tsa_issuer: OFFLINE_TSA_ISSUER.into(),
+            evm_chain_id: 11_155_111,
+            evm_contract: OFFLINE_EVM_CONTRACT.into(),
+            sealer_signature_type: "ethereum:eip-191".into(),
+        },
+    )
+}
+
+/// What a seal selfcheck leaves: the report of the run, and the reader to replay it with (and
+/// its hosts, for a test that wants to change one).
+pub struct SealSelfcheck {
+    pub report: SealReport,
+    pub reader: Reader,
+    pub hosts: ReaderHosts,
+}
+
+/// `seal` through its whole live part (sign-in, both leaves, seal, pull, persist) against an
+/// in-process aggregator on localhost, with the offline doubles as anchors and hosts; the
+/// server is gone when this returns. Proves the flow, the persisted run directory and the
+/// steps' logic, not a real chain or TSA: see the README.
+pub async fn run_seal_in_process(run_dir: &Path, identity_dir: &Path) -> Result<SealSelfcheck> {
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind ephemeral")?;
+    let base_url = format!("http://{}", listener.local_addr().context("local_addr")?);
+
+    // A stamp after the seal's own local times: the SDK refuses a T older than H.
+    let anchor_time = chrono::Utc::now().timestamp().max(0) as u64 + 3_600;
+    let (anchors, hosts) = offline_anchors(anchor_time);
+    let (router, _state, seal_tx, _tmp_keep) = build_in_process(tmp, anchors).await?;
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service()).await;
+    });
+    let trigger_tx = seal_tx.clone();
+    let seal_trigger = SealTrigger::Driver(Box::new(move || {
+        let tx = trigger_tx.clone();
+        Box::pin(async move {
+            let _ = tx.send(SealTick { now: 1_700_000_000 }).await;
+            for _ in 0..40 {
+                tokio::task::yield_now().await;
+            }
+        }) as crate::flow::SealTriggerFuture
+    }));
+
+    let hosts = ReaderHosts {
+        web: Arc::new(FactsOfVerifiedTokens { inner: hosts.web }),
+        ..hosts
+    };
+    let reader = seal_selfcheck_reader(hosts.clone());
+    let id = identity::for_base_url(&base_url, identity_dir)?;
+    let result = run_seal(
+        SealConfig {
+            base_url,
+            run_dir: run_dir.to_path_buf(),
+            identity_dir: identity_dir.to_path_buf(),
+            reader: reader.clone(),
+            seal_trigger,
+            expect_version: None,
+            expect_server_did: None,
+            seal_grace: Duration::from_secs(120),
+            witness_grace: Duration::from_secs(120),
+            poll_interval: Duration::from_millis(50),
+            finality_budget: Duration::ZERO,
+        },
+        &id,
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    drop(seal_tx);
+    Ok(SealSelfcheck {
+        report: result?,
+        reader,
+        hosts,
+    })
 }
 
 #[cfg(test)]
@@ -351,7 +476,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reader_whose_tsa_did_not_issue_the_token_fails_the_run() {
         // The chain half of the reader stays the aggregator's; only the TSA is a stranger.
-        let (_, hosts) = offline_anchors();
+        let (_, hosts) = offline_anchors(OFFLINE_ANCHOR_TIME);
         let stranger = ReaderHosts {
             web: Arc::new(SimTsa::new(blank())),
             ..hosts
@@ -365,7 +490,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reader_whose_chain_does_not_know_the_transaction_fails_the_run() {
-        let (_, hosts) = offline_anchors();
+        let (_, hosts) = offline_anchors(OFFLINE_ANCHOR_TIME);
         let stranger = ReaderHosts {
             blockchain: Arc::new(SimChain::new(blank())),
             ..hosts

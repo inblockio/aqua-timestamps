@@ -870,6 +870,7 @@ dependencies = [
  "aqua-timestamp-core",
  "aqua-tsa-provider",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "ed25519-dalek",

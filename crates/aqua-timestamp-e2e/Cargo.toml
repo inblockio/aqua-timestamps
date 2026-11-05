@@ -6,6 +6,10 @@ license     = { workspace = true }
 repository  = { workspace = true }
 description = "Live + in-process end-to-end test client for the aqua-timestamp aggregator (one standing identity, both anchors judged by the SDK verifier)."
 
+[lib]
+name = "aqua_timestamp_e2e"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aqua-timestamp-e2e"
 path = "src/main.rs"
@@ -27,6 +31,7 @@ serde_json         = { workspace = true }
 clap               = { version = "4", features = ["derive", "env"] }
 anyhow             = { workspace = true }
 hex                = { workspace = true }
+base64             = "0.22"
 sha3               = { workspace = true }
 rand               = { workspace = true }
 tracing            = { workspace = true }
