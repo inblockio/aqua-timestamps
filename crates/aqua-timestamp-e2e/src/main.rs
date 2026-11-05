@@ -86,7 +86,7 @@ enum Cmd {
         #[arg(long, env = "OPENWITNESS_E2E_IDENTITY_DIR")]
         identity_dir: Option<PathBuf>,
         /// The run directory (default seal-run-<UTC> under the working directory). Never in the
-        /// identity directory; a directory that already holds a run is refused.
+        /// identity directory; a directory that is not empty is refused.
         #[arg(long)]
         run_dir: Option<PathBuf>,
         /// When given, `/version`'s revision must equal this before anything is posted. Without

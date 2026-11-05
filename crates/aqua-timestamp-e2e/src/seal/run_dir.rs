@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -209,18 +209,44 @@ pub fn verify_complete(dir: &Path) -> Result<(), RunDirError> {
     Ok(())
 }
 
-/// A path is refused when it sits inside (or is) `guarded`, compared as absolute lexical paths.
+/// A path is refused when it sits inside (or is) `guarded`, compared with symlinks resolved.
 pub fn ensure_outside(path: &Path, guarded: &Path, what: &str, guarded_what: &str) -> Result<()> {
-    let abs = std::path::absolute(path).with_context(|| format!("{}", path.display()))?;
-    let guard = std::path::absolute(guarded).with_context(|| format!("{}", guarded.display()))?;
+    let abs = resolved(path)?;
+    let guard = resolved(guarded)?;
     if abs.starts_with(&guard) {
         anyhow::bail!(
-            "{what} {} is inside {guarded_what} {}: refused",
+            "{what} {} (resolved: {}) is inside {guarded_what} {}: refused",
+            path.display(),
             abs.display(),
             guard.display()
         );
     }
     Ok(())
+}
+
+/// Where `path` leads: its deepest existing ancestor canonicalized, the rest re-attached. Refused
+/// when that cannot be known from here: a dangling symlink, or a `..` after a name that does not
+/// exist yet.
+fn resolved(path: &Path) -> Result<PathBuf> {
+    let abs = std::path::absolute(path).with_context(|| format!("{}", path.display()))?;
+    for ancestor in abs.ancestors() {
+        match std::fs::canonicalize(ancestor) {
+            Ok(real) => {
+                let rest = abs.strip_prefix(ancestor)?;
+                if rest.components().any(|c| c == Component::ParentDir) {
+                    anyhow::bail!("{}: `..` after a missing name: refused", abs.display());
+                }
+                return Ok(real.join(rest));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(ancestor).is_ok() {
+                    anyhow::bail!("{} is a dangling symlink: refused", ancestor.display());
+                }
+            }
+            Err(e) => return Err(e).with_context(|| format!("resolve {}", ancestor.display())),
+        }
+    }
+    anyhow::bail!("{}: no existing ancestor", abs.display())
 }
 
 /// How steps read the run directory and where what they derive goes.

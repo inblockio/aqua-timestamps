@@ -264,6 +264,35 @@ async fn replay_out_gets_the_logs_and_may_not_sit_in_the_run() {
     assert!(!run.dir.join("x").exists());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_out_that_is_a_symlink_into_the_run_is_refused() {
+    let run = run().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let copy = tmp.path().join("run");
+    std::fs::create_dir(&copy).unwrap();
+    copy_tree(&run.dir, &copy);
+    let before = snapshot(&copy);
+    let link = tmp.path().join("to-run");
+    std::os::unix::fs::symlink(&copy, &link).unwrap();
+
+    for out in [link.clone(), link.join("not-yet")] {
+        let result = run_replay(ReplayConfig {
+            run_dir: copy.clone(),
+            out: Some(out.clone()),
+            reader: run.reader.clone(),
+            expect_server_did: pin(run),
+        })
+        .await;
+        assert!(
+            snapshot(&copy) == before,
+            "{}: wrote into the run",
+            out.display()
+        );
+        let err = result.err().expect("a symlink into the run").to_string();
+        assert!(err.contains("inside"), "{err}");
+    }
+}
+
 /// A chain whose head moves with every read, as a live one does between two reads.
 struct MovingHead {
     inner: Arc<dyn aqua_rs_sdk::BlockchainHost>,
@@ -1241,7 +1270,7 @@ async fn a_post_with_no_answer_leaves_a_record_and_a_rerun_is_refused() {
         .err()
         .expect("refused")
         .to_string();
-    assert!(err.contains("already holds a run"), "{err}");
+    assert!(err.contains("is not empty"), "{err}");
     assert_eq!(snapshot(&dir), before, "the rerun touched the run");
     assert_eq!(server.hits(LEAVES), 1, "the rerun posted");
 }

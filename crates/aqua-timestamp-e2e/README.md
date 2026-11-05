@@ -111,8 +111,8 @@ aqua-timestamp-e2e seal --base-url https://openwitness.org --allow-production \
 ### The run directory
 
 `--run-dir` (default `seal-run-<UTC>` under the working directory; never inside the identity
-directory; made 0700; a directory that already holds a run is refused, so a rerun cannot overwrite the
-prepared seals of leaves the server may hold) holds the client state, the served bodies byte for
+directory; made 0700; must be absent or empty, so a rerun cannot overwrite the prepared seals of leaves
+the server may hold, and a planted symlink is not written through) holds the client state, the served bodies byte for
 byte. `run.json` is written before the POST and completed after it:
 
 `run.json`, `aqua-identity.json`, `set-folder.json`, `members/m<i>/tree.json`,

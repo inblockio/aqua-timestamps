@@ -496,16 +496,22 @@ pub async fn read_epoch_bodies(
     Ok(fetch_status)
 }
 
-/// Refuse a run directory that would overwrite a run, or sit beside the key.
+/// Refuse a run directory that holds anything, or sits beside the key. A run writes through what
+/// it finds: a held file is overwritten (a rerun, the prepared seals), a held symlink is followed.
 pub fn check_run_dir(run_dir: &Path, identity_dir: &Path) -> Result<()> {
     ensure_outside(run_dir, identity_dir, "--run-dir", "the identity directory")?;
-    for held in [RUN_JSON.to_string(), prepared_file(1), prepared_file(2)] {
-        if run_dir.join(&held).exists() {
-            bail!(
-                "{} already holds a run ({held}): name another --run-dir",
-                run_dir.display()
-            );
-        }
+    let mut held = match std::fs::read_dir(run_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read --run-dir {}", run_dir.display())),
+    };
+    if let Some(entry) = held.next() {
+        let entry = entry.with_context(|| format!("read --run-dir {}", run_dir.display()))?;
+        bail!(
+            "{} is not empty (holds {}): name another --run-dir",
+            run_dir.display(),
+            entry.file_name().to_string_lossy()
+        );
     }
     Ok(())
 }
@@ -637,5 +643,98 @@ mod tests {
         assert!(check_run_dir(&run, &id).is_ok());
         std::fs::write(run.join(prepared_file(2)), "{}").unwrap();
         assert!(check_run_dir(&run, &id).is_err());
+    }
+
+    #[test]
+    fn a_symlink_in_a_fresh_run_dir_is_refused_and_its_target_keeps_its_bytes() {
+        const KEY: &[u8] = b"the key, not to be truncated";
+        let tmp = tempfile::tempdir().unwrap();
+        let id = tmp.path().join("id");
+        let key = tmp.path().join("key");
+        std::fs::write(&key, KEY).unwrap();
+        let run = tmp.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        let planted = run.join(AQUA_IDENTITY);
+        std::os::unix::fs::symlink(&key, &planted).unwrap();
+
+        // What the run does once the guard lets the directory through.
+        let checked = check_run_dir(&run, &id);
+        if checked.is_ok() {
+            write_file(&planted, b"written through").unwrap();
+        }
+        assert_eq!(std::fs::read(&key).unwrap(), KEY, "the target is untouched");
+        let err = checked
+            .expect_err("a run directory holding a symlink")
+            .to_string();
+        assert!(err.contains(&run.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_run_dir_that_is_a_symlink_into_the_identity_dir_is_refused() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let id = tmp.path().join("id");
+        let held = id.join("held");
+        std::fs::create_dir_all(&held).unwrap();
+
+        // Empty, so only the resolved comparison can refuse these.
+        let to_held = tmp.path().join("to-held");
+        symlink(&held, &to_held).unwrap();
+        let to_id = tmp.path().join("to-id");
+        symlink(&id, &to_id).unwrap();
+        for run in [
+            to_held.clone(),
+            to_held.join("not/yet"),
+            to_id.join("held"),
+            to_id.join("not-yet"),
+        ] {
+            let err = check_run_dir(&run, &id).expect_err(&run.display().to_string());
+            assert!(err.to_string().contains("inside"), "{err}");
+        }
+
+        // The identity directory itself reached through a link.
+        let err = check_run_dir(&held, &to_id).expect_err("guard behind a link");
+        assert!(err.to_string().contains("inside"), "{err}");
+
+        // A name that does not exist yet can still walk back in.
+        let back_in = tmp.path().join("not-yet/../id/run");
+        assert!(check_run_dir(&back_in, &id).is_err());
+
+        // A dangling link has no answer to where it leads: mkdir would refuse it, so do we.
+        let dangling = tmp.path().join("dangling");
+        symlink(id.join("absent"), &dangling).unwrap();
+        assert!(check_run_dir(&dangling, &id).is_err());
+        assert!(check_run_dir(&dangling.join("x"), &id).is_err());
+    }
+
+    #[test]
+    fn a_run_dir_must_be_absent_or_empty_and_a_link_that_stays_outside_may_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = tmp.path().join("id");
+        std::fs::create_dir(&id).unwrap();
+
+        let run = tmp.path().join("run");
+        assert!(check_run_dir(&run, &id).is_ok(), "absent");
+        std::fs::create_dir(&run).unwrap();
+        assert!(check_run_dir(&run, &id).is_ok(), "empty");
+
+        let elsewhere = tmp.path().join("elsewhere");
+        std::os::unix::fs::symlink(&run, &elsewhere).unwrap();
+        assert!(
+            check_run_dir(&elsewhere, &id).is_ok(),
+            "link to an empty dir"
+        );
+
+        std::fs::write(run.join("anything"), "x").unwrap();
+        let err = check_run_dir(&run, &id).expect_err("non-empty").to_string();
+        assert!(err.contains(&run.display().to_string()), "{err}");
+        assert!(
+            check_run_dir(&elsewhere, &id).is_err(),
+            "link to a non-empty dir"
+        );
+
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert!(check_run_dir(&file, &id).is_err(), "not a directory");
     }
 }
