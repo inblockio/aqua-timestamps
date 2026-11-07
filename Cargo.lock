@@ -686,8 +686,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-evm-provider"
-version = "9.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.0.0#11a0a2e56b25a96ab1f9baade28e958cab694704"
+version = "9.1.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
 dependencies = [
  "aqua-rs-sdk",
  "async-trait",
@@ -708,8 +708,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-qualified-pki"
-version = "9.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.0.0#11a0a2e56b25a96ab1f9baade28e958cab694704"
+version = "9.1.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
 dependencies = [
  "aqua-rs-sdk",
  "const-oid 0.9.6",
@@ -725,8 +725,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-rs-sdk"
-version = "9.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.0.0#11a0a2e56b25a96ab1f9baade28e958cab694704"
+version = "9.1.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
 dependencies = [
  "async-trait",
  "base64 0.21.7",
@@ -741,7 +741,6 @@ dependencies = [
  "hex",
  "hkdf",
  "js-sys",
- "jsonpointer_flatten",
  "jsonschema",
  "k256 0.14.0",
  "ml-dsa",
@@ -889,8 +888,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-tsa-provider"
-version = "9.0.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.0.0#11a0a2e56b25a96ab1f9baade28e958cab694704"
+version = "9.1.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
 dependencies = [
  "aqua-qualified-pki",
  "aqua-rs-sdk",
@@ -902,6 +901,7 @@ dependencies = [
  "der 0.7.10",
  "hex",
  "p256 0.14.0",
+ "p384",
  "rand 0.8.6",
  "reqwest 0.12.28",
  "rsa",
@@ -1946,7 +1946,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
  "rustc_version 0.4.1",
  "subtle",
  "zeroize",
@@ -2035,7 +2035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2449,6 +2449,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
@@ -3322,16 +3328,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonpointer_flatten"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a201f06e6fd0fac3e97f856cde3ba8269e8f29ac99f98ac6e5ee3ca30de3201"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "jsonschema"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3878,6 +3874,20 @@ checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
 dependencies = [
  "ecdsa 0.17.0",
  "elliptic-curve 0.14.2",
+ "primefield",
+ "primeorder 0.14.0",
+ "sha2 0.11.1",
+]
+
+[[package]]
+name = "p384"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
+dependencies = [
+ "ecdsa 0.17.0",
+ "elliptic-curve 0.14.2",
+ "fiat-crypto 0.3.0",
  "primefield",
  "primeorder 0.14.0",
  "sha2 0.11.1",
