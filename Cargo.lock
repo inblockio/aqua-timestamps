@@ -686,8 +686,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-evm-provider"
-version = "9.1.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
+version = "9.2.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.2.0#91ecba5632bc51dc68724d908c61d10da19365ae"
 dependencies = [
  "aqua-rs-sdk",
  "async-trait",
@@ -708,8 +708,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-qualified-pki"
-version = "9.1.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
+version = "9.2.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.2.0#91ecba5632bc51dc68724d908c61d10da19365ae"
 dependencies = [
  "aqua-rs-sdk",
  "const-oid 0.9.6",
@@ -725,8 +725,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-rs-sdk"
-version = "9.1.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
+version = "9.2.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.2.0#91ecba5632bc51dc68724d908c61d10da19365ae"
 dependencies = [
  "async-trait",
  "base64 0.21.7",
@@ -888,8 +888,8 @@ dependencies = [
 
 [[package]]
 name = "aqua-tsa-provider"
-version = "9.1.0"
-source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.1.0#c0f41aa77ede5d03aef3a9c8695b5880273af0cc"
+version = "9.2.0"
+source = "git+https://github.com/inblockio/aqua-rs-sdk?tag=v9.2.0#91ecba5632bc51dc68724d908c61d10da19365ae"
 dependencies = [
  "aqua-qualified-pki",
  "aqua-rs-sdk",
@@ -2035,7 +2035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
